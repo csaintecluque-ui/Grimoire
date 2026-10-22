@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx.full.min.js',
@@ -811,9 +811,17 @@ function ensureSize(r, c) {
   if (grow) { buildGrid(); }
   return grow;
 }
+// Saisie à la manière d'Excel : « +64*2 » ou « -A1*2 » deviennent des formules,
+// et les guillemets typographiques du clavier (iPhone) redeviennent des guillemets droits.
+function normRaw(raw) {
+  let s = raw == null ? '' : String(raw);
+  if (/^[+\-]/.test(s) && parseNum(s) == null && /[A-Za-z0-9(]/.test(s.slice(1))) s = '=' + (s[0] === '+' ? s.slice(1) : s);
+  if (s[0] === '=') s = s.replace(/[“”„«»]/g, '"').replace(/[‘’]/g, "'").replace(/\u00a0/g, ' ');
+  return s;
+}
 function applyRaw(r, c, raw) {
   const k = addr(r, c), cells = state.cur.cells;
-  raw = raw == null ? '' : String(raw);
+  raw = normRaw(raw);
   const old = cells[k];
   if (raw === '') { if (old) { if (old.f && Object.keys(old.f).length) old.v = ''; else delete cells[k]; } }
   else {
