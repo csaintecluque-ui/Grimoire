@@ -2,10 +2,11 @@
 
 Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 
-- **Documents** façon Word : titres, polices, tailles, couleurs, surlignage, liens, listes à niveaux et cases à cocher, tableaux complets (lignes, colonnes, fusion, couleurs, largeurs), images, sauts de page, sommaire, rechercher-remplacer, mise en page (orientation, marges, en-tête, pied de page, numéros de page), plan du document, mode concentration.
+- **Documents** façon Word : titres, polices, tailles, couleurs, surlignage, liens, listes à niveaux et cases à cocher, tableaux complets (lignes, colonnes, fusion, couleurs, largeurs), images avec habillage du texte (à gauche, à droite), sauts de page, sommaire, rechercher-remplacer, mise en page (orientation, marges, en-tête, pied de page, numéros de page), plan du document, mode concentration.
 - **Classeurs** façon Excel : formules en français (`=SOMME`, `=SI`, `=SOMME.SI`, `=RECHERCHEV`…), onglets et formules entre feuilles, recopie et séries, dates, tri et filtre, couleurs, bordures, volets figés.
-- **Export** Word (.docx), Excel (.xlsx), CSV, Markdown, et **impression / PDF**.
-- **Import** de fichiers .docx, .xlsx, .csv, .txt.
+- **Export** Word (.docx), Excel (.xlsx), CSV, Markdown.
+- **Impression / PDF** : bouton « Imprimer » (ou Ctrl+P), avec en-tête, pied de page et numéros de page. Sur iPhone : Exporter → Imprimer ou PDF.
+- **Import** de fichiers .docx (couleurs, tailles, polices, surlignage, alignements, listes, tableaux, images, en-tête et pied de page conservés), .xlsx, .csv, .txt.
 - **Mode PC / Téléphone** : bouton en haut de l'écran.
 - **Hors connexion** : tout est enregistré sur l'appareil.
 - **Plume** (facultatif) : assistant d'écriture avec une clé Mistral ou OpenRouter, à saisir dans les Réglages.

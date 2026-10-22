@@ -33,6 +33,7 @@
     <span class="spacer" id="barSpacer"></span>
     <div class="bar-actions">
       <button class="bbtn plume-btn" id="plumeBtn" aria-pressed="false" title="Plume, l'assistant d'écriture" hidden data-ic="feather"><span class="lbl-t">Plume</span></button>
+      <button class="bbtn" id="printBtn" title="Imprimer ou enregistrer en PDF (Ctrl+P)" hidden data-ic="printer"><span class="lbl-t">Imprimer</span></button>
       <button class="bbtn" id="exportBtn" title="Exporter et options du document" hidden data-ic="download"><span class="lbl-t">Exporter</span></button>
       <button class="bbtn framed" id="palBtn" title="Palette de commandes (Ctrl+K)" data-ic="command"><span class="lbl-t">Commandes</span><span class="k">Ctrl K</span></button>
       <button class="bbtn" id="modeBtn" title="Passer en mode téléphone"></button>
@@ -161,7 +162,9 @@
           <a id="lbOpen" href="#" target="_blank" rel="noopener">Ouvrir ↗</a><span class="lb-url" id="lbUrl"></span><button id="lbEdit">Modifier</button><button id="lbDel" class="danger">Retirer</button>
         </div>
         <div class="img-bar" id="imgBar" hidden role="toolbar" aria-label="Taille de l'image">
-          <button data-iw="33">Petite</button><button data-iw="60">Moyenne</button><button data-iw="100">Pleine largeur</button><button data-iw="del" class="danger">Retirer</button>
+          <span class="ib-l">Taille</span><button data-iw="33">Petite</button><button data-iw="60">Moyenne</button><button data-iw="100">Pleine</button>
+          <span class="ib-sep"></span><span class="ib-l">Habillage</span><button data-wrap-set="none" title="Image seule sur sa ligne, centrée">Aucun</button><button data-wrap-set="left" title="Image à gauche, le texte l'entoure à droite">À gauche</button><button data-wrap-set="right" title="Image à droite, le texte l'entoure à gauche">À droite</button>
+          <span class="ib-sep"></span><button data-iw="del" class="danger">Retirer</button>
         </div>
       </div>
       <footer class="w-status" id="wStatus"></footer>
