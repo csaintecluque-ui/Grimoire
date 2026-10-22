@@ -203,6 +203,24 @@ body.no-outline .w-body{grid-template-columns:minmax(0,1fr)}
 .act-box{border:2px solid var(--selline)}
 .cell-ed{position:absolute;z-index:3;border:2px solid var(--selline);background:var(--paper);color:var(--fg);font-family:var(--f-ui);font-size:13px;padding:3px 6px;resize:none;outline:none;box-shadow:var(--shadow);line-height:18px;overflow:hidden;white-space:pre}
 .cell-ed.fm{font-family:var(--f-mono);font-size:12.5px}
+.fill-h{position:absolute;width:10px;height:10px;background:var(--selline);border:2px solid var(--paper);border-radius:2px;z-index:3;cursor:crosshair;touch-action:none}
+body.m-phone .fill-h{width:20px;height:20px;border-radius:50%}
+.fill-box{position:absolute;border:2px dashed var(--selline);pointer-events:none;z-index:2}
+.grid thead th.flt{color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent);font-weight:700}
+.fpop{position:absolute;z-index:40;top:8px;right:var(--gr);width:min(330px,calc(100% - 32px));max-height:calc(100% - 16px);background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:12px;display:flex;flex-direction:column;gap:8px}
+.fp-h{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.fp-search{border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:8px 10px;font-size:15px;min-width:0}
+.fp-search:focus{outline:none;border-color:var(--selline)}
+.fp-tools{display:flex;gap:6px}
+.fp-tools button{border:1px solid var(--line);background:none;border-radius:8px;padding:5px 10px;font-size:12.5px}
+.fp-list{overflow-y:auto;min-height:60px;max-height:42vh;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:9px;padding:4px}
+.fp-it{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:6px;font-size:14px;cursor:pointer}
+.fp-it:hover{background:var(--hover)}
+.fp-it span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fp-it small{color:var(--faint);font-variant-numeric:tabular-nums}
+.fp-it input{width:18px;height:18px;accent-color:var(--accent);flex:none}
+.fp-acts{display:flex;gap:8px;flex-wrap:wrap}
+.linkbtn{border:0;background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:3px 10px;font-size:12.5px}
 .loading{padding:24px var(--gr) 24px var(--gl);color:var(--muted)}
 
 /* ---------- Plume */

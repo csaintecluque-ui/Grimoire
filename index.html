@@ -138,7 +138,7 @@
           <button class="tb" data-s="ar" title="Aligner à droite" data-ic="alignR"></button>
           <span class="tb-sep"></span>
           <div class="seg" role="group" aria-label="Format des nombres">
-            <button data-n="" title="Standard">123</button><button data-n="dec2" title="Deux décimales">0,00</button><button data-n="eur" title="Monétaire">€</button><button data-n="pct" title="Pourcentage">%</button>
+            <button data-n="" title="Standard">123</button><button data-n="dec2" title="Deux décimales">0,00</button><button data-n="eur" title="Monétaire">€</button><button data-n="pct" title="Pourcentage">%</button><button data-n="date" title="Date">Date</button>
           </div>
           <span class="tb-sep"></span>
           <button class="tb lbl" data-s="sum" title="Somme automatique" data-ic="sigma"><span>Somme</span></button>
@@ -148,6 +148,11 @@
           <button class="tb" data-s="colIns" title="Insérer une colonne à gauche" data-ic="colIns"></button>
           <button class="tb" data-s="colDel" title="Supprimer la colonne" data-ic="colDel"></button>
           <button class="tb" data-s="clear" title="Effacer le contenu (Suppr)" data-ic="eraser"></button>
+          <span class="tb-sep"></span>
+          <button class="tb" data-s="fillDown" title="Recopier vers le bas (Ctrl+D)" data-ic="fillDown"></button>
+          <button class="tb" data-s="sortAsc" title="Trier de A à Z" data-ic="sortAsc"></button>
+          <button class="tb" data-s="sortDesc" title="Trier de Z à A" data-ic="sortDesc"></button>
+          <button class="tb" data-s="filter" title="Filtrer la colonne" data-ic="filter"></button>
         </div>
       </div>
       <div class="fxbar"><span class="fx-ref" id="fxRef">A1</span><button class="fx-lbl" id="fxBtn" title="Insérer une fonction" aria-label="Insérer une fonction">ƒx</button><input id="fx" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" aria-label="Contenu ou formule de la cellule"></div>
@@ -159,10 +164,19 @@
         <table class="grid" id="grid"></table>
         <div class="sel-box" id="selBox"></div>
         <div class="act-box" id="actBox"></div>
+        <div class="fill-box" id="fillBox" hidden></div>
+        <div class="fill-h" id="fillH" title="Faire glisser pour recopier"></div>
         <textarea class="cell-ed" id="cellEd" hidden spellcheck="false" autocorrect="off" autocapitalize="off" aria-label="Édition de la cellule"></textarea>
       </div>
       <footer class="s-status" id="sStatus"></footer>
       <div id="printArea"></div>
+      <div class="fpop" id="filterPop" hidden role="dialog" aria-label="Filtre de colonne">
+        <div class="fp-h"><b id="fpTitle">Filtrer</b><button class="xbtn" id="fpX" aria-label="Fermer le filtre" data-ic="close"></button></div>
+        <input id="fpSearch" class="fp-search" placeholder="Rechercher une valeur" autocomplete="off" autocorrect="off" aria-label="Rechercher une valeur">
+        <div class="fp-tools"><button id="fpAll">Tout cocher</button><button id="fpNone">Tout décocher</button></div>
+        <div class="fp-list" id="fpList"></div>
+        <div class="fp-acts"><button class="pbtn" id="fpApply">Appliquer</button><button class="pbtn ghost" id="fpClear">Retirer ce filtre</button></div>
+      </div>
     </section>
 
 
