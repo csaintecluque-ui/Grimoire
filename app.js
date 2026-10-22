@@ -12,10 +12,10 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
-  xlsx: 'lib/xlsx.full.min.js',
+  xlsx: 'lib/xlsx-style.bundle.js',
   jszip: 'lib/jszip.min.js',
   mammoth: 'lib/mammoth.browser.min.js'
 };
@@ -65,6 +65,12 @@ const IC = {
   pen: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   type: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
   fillDown: '<path d="M12 4v12M7 11l5 5 5-5M5 20h14"/>',
+  wrap: '<path d="M4 6h16M4 12h13a3 3 0 010 6h-4M15 16l-2 2 2 2M4 18h5"/>',
+  bucket: '<path d="M5 11l7-7 7 7-7 7z"/><path d="M5 11h14"/><path d="M20 15s1.8 2.1 1.8 3.3a1.8 1.8 0 01-3.6 0c0-1.2 1.8-3.3 1.8-3.3z"/>',
+  textColor: '<path d="M7 15l5-11 5 11M9 11h6"/><path d="M5 20h14" stroke-width="3"/>',
+  borders: '<rect x="4" y="4" width="16" height="16"/><path d="M4 12h16M12 4v16" opacity=".4"/>',
+  freeze: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9.5h18" stroke-width="2.6"/><path d="M8.5 4v16" opacity=".4"/>',
+  right: '<path d="M9 6l6 6-6 6"/>',
   sortAsc: '<path d="M7 4v16M4 7l3-3 3 3M13 6h7M13 11h5M13 16h3"/>',
   sortDesc: '<path d="M7 4v16M4 17l3 3 3-3M13 6h3M13 11h5M13 16h7"/>',
   filter: '<path d="M4 5h16l-6 7.5V19l-4 1.5v-8z"/>',
@@ -224,7 +230,7 @@ const WELCOME = () => ({
 });
 const sheetTpl = (title, rows, colW) => {
   const cells = {};
-  rows.forEach(([a, v, f]) => { cells[a] = { v: String(v), f: f || {} }; });
+  rows.forEach(([a, v, f]) => { cells[a] = { v: String(v), f: f ? { ...f } : {} }; });
   return { type: 'feuille', title, cells, rows: 60, cols: 10, colW };
 };
 const E = { n: 'eur' }, EB = { n: 'eur', b: 1 }, B = { b: 1 };
@@ -330,7 +336,7 @@ $('#titleIn').addEventListener('keydown', e => { if (e.key === 'Enter') { e.prev
 })();
 
 function docText(d) {
-  if (d.type === 'feuille') return Object.values(d.cells || {}).map(c => c.v).filter(Boolean).join(' · ');
+  if (d.type === 'feuille') return (d.sheets || [d]).map(sh => Object.values(sh.cells || {}).map(c => c.v).filter(Boolean).join(' · ')).join(' · ');
   const div = document.createElement('div'); div.innerHTML = d.html || '';
   $$('h1,h2,h3,p,li,td,th,blockquote', div).forEach(el => el.append(' '));
   return (div.textContent || '').replace(/\s+/g, ' ').trim();
@@ -382,7 +388,7 @@ function renderHome() {
   list.innerHTML = items.map(d => {
     const t = texts.get(d.id);
     const meta = d.type === 'feuille'
-      ? `Classeur · ${Object.values(d.cells || {}).filter(c => c.v !== '').length} cellules`
+      ? `Classeur · ${(d.sheets || [d]).reduce((n, sh) => n + Object.values(sh.cells || {}).filter(c => c.v !== '').length, 0)} cellules${(d.sheets || []).length > 1 ? ' · ' + d.sheets.length + ' feuilles' : ''}`
       : `${(t.match(/\S+/g) || []).length.toLocaleString('fr-FR')} mots`;
     return `<button class="drow" data-id="${esc(d.id)}" data-type="${d.type}">
       <span class="dico">${ic(d.type === 'feuille' ? 'grid' : 'doc')}</span>
@@ -693,24 +699,72 @@ function toHF(raw) {
 const cellOf = (r, c) => state.cur.cells[addr(r, c)];
 const rawOf = (r, c) => { const x = cellOf(r, c); return x ? x.v : ''; };
 
+// Un classeur contient plusieurs feuilles ; cells, rows, cols… désignent toujours la feuille active.
+const SHEET_KEYS = ['cells', 'rows', 'cols', 'colW', 'filter', 'frz'];
+function ensureSheets(doc) {
+  if (!Array.isArray(doc.sheets) || !doc.sheets.length) {
+    doc.sheets = [{ id: uid(), name: 'Feuille1', cells: doc.cells || {}, rows: doc.rows || 60, cols: doc.cols || 12, colW: doc.colW || {}, filter: doc.filter, frz: doc.frz }];
+    doc.active = 0;
+  }
+  if (!(doc.active >= 0 && doc.active < doc.sheets.length)) doc.active = 0;
+  doc.sheets.forEach((sh, i) => { sh.cells ||= {}; sh.rows ||= 60; sh.cols ||= 12; sh.colW ||= {}; sh.id ||= uid(); sh.name ||= 'Feuille' + (i + 1); });
+  SHEET_KEYS.forEach(k => {
+    const d = Object.getOwnPropertyDescriptor(doc, k);
+    if (d && d.get) return;
+    delete doc[k];
+    Object.defineProperty(doc, k, { configurable: true, enumerable: false, get() { return this.sheets[this.active][k]; }, set(v) { this.sheets[this.active][k] = v; } });
+  });
+}
+const refName = n => /^[A-Za-zÀ-ÿ_][A-Za-z0-9À-ÿ_.]*$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`;
+function sheetData(sh) {
+  const data = [];
+  for (let r = 0; r < sh.rows; r++) { const row = []; for (let c = 0; c < sh.cols; c++) { const x = sh.cells[addr(r, c)]; row.push(x ? toHF(x.v) : null); } data.push(row); }
+  return data;
+}
+function serToRaw(v) {
+  let raw = typeof v === 'number' ? numToRaw(v) : typeof v === 'boolean' ? (v ? 'VRAI' : 'FAUX') : String(v);
+  if (raw[0] === '=') raw = '=' + (SH.fr ? enNamesToFr(raw.slice(1)) : excelToFr(raw.slice(1)));
+  return raw;
+}
+// Une date reste écrite en date (22/10/2026) même quand le moteur la renvoie en nombre.
+function fixDates(cells) {
+  Object.values(cells).forEach(x => { if (x.f && x.f.n === 'date' && /^-?\d+(,\d+)?$/.test(String(x.v))) x.v = fmtDate(parseNum(x.v)); });
+  return cells;
+}
+function markDates(sh) {
+  Object.values(sh.cells).forEach(x => { const v = String(x.v || ''); if (v && v[0] !== '=' && !(x.f && x.f.n) && parseNum(v) == null && parseDate(v) != null) (x.f ||= {}).n = 'date'; });
+}
+function cellsFromHF(id, old, fmts) {
+  const cells = {};
+  (SH.hf.getSheetSerialized(id) || []).forEach((row, ri) => (row || []).forEach((v, ci) => {
+    if (v == null || v === '') return;
+    const k = addr(ri, ci);
+    cells[k] = { v: serToRaw(v), f: fmts ? {} : clone((old[k] && old[k].f) || {}) };
+  }));
+  if (!fmts) Object.entries(old).forEach(([k, x]) => { if (!cells[k] && x.f && Object.keys(x.f).length) cells[k] = { v: '', f: clone(x.f) }; });
+  return fmts ? cells : fixDates(cells);
+}
 async function openSheet() {
   const cur = state.cur;
-  cur.cells ||= {}; cur.rows ||= 60; cur.cols ||= 12; cur.colW ||= {};
+  ensureSheets(cur);
+  cur.sheets.forEach(markDates);
   SH.hist = []; SH.fut = []; SH.sel = { r: 0, c: 0 }; SH.anc = { r: 0, c: 0 }; SH.editing = null;
   show('sheet');
-  buildGrid();
+  buildGrid(); renderTabs();
   $('#sStatus').textContent = 'Chargement du moteur de calcul…';
   try { await ensureHF(); }
   catch { toast('Moteur de calcul injoignable : les formules s\'afficheront sans être calculées. Vérifiez la connexion.', true); }
   if (state.cur !== cur) return;
-  loadHF(); renderValues(); SH.hiddenRows = 0; applyFilters(); select(0, 0);
+  loadHF(); renderValues(); SH.hiddenRows = 0; applyFilters(); applyFreeze(); renderTabs(); select(0, 0);
   gw.focus({ preventScroll: true });
 }
 function loadHF() {
   if (!SH.hf) return;
-  const cur = state.cur, data = [];
-  for (let r = 0; r < cur.rows; r++) { const row = []; for (let c = 0; c < cur.cols; c++) { const x = cur.cells[addr(r, c)]; row.push(x ? toHF(x.v) : null); } data.push(row); }
-  SH.hf.setSheetContent(SH.sid, data);
+  const cur = state.cur, hf = SH.hf;
+  hf.getSheetNames().forEach(n => hf.removeSheet(hf.getSheetId(n)));
+  SH.ids = cur.sheets.map(sh => hf.getSheetId(hf.addSheet(sh.name)));
+  hf.batch(() => cur.sheets.forEach((sh, i) => hf.setSheetContent(SH.ids[i], sheetData(sh))));
+  SH.sid = SH.ids[cur.active];
 }
 function buildGrid() {
   const cur = state.cur;
@@ -740,8 +794,14 @@ function display(r, c) {
   else if (typeof v === 'boolean') { txt = v ? 'VRAI' : 'FAUX'; cls = 'ac'; }
   else txt = String(v);
   if (f.b) cls += ' b';
+  if (f.i) cls += ' i';
+  if (f.u) cls += ' u';
+  if (f.w) cls += ' wr';
   if (f.a) cls += ' ' + f.a;
-  return { txt, cls: cls.trim(), v };
+  const sh = [];
+  if (f.bt) sh.push('inset 0 1px 0 var(--bd)'); if (f.bb) sh.push('inset 0 -1px 0 var(--bd)');
+  if (f.bl) sh.push('inset 1px 0 0 var(--bd)'); if (f.br) sh.push('inset -1px 0 0 var(--bd)');
+  return { txt, cls: cls.trim(), v, bg: f.bg ? `var(--bg-${f.bg})` : '', fc: f.fc ? `var(--fc-${f.fc})` : '', bd: sh.join(',') };
 }
 function renderValues() {
   if (!state.cur || state.view !== 'sheet') return;
@@ -750,8 +810,31 @@ function renderValues() {
   for (let r = 0; r < cur.rows; r++) for (let c = 0; c < cur.cols; c++) {
     const td = SH.cell[r][c], d = display(r, c);
     if (td.textContent !== d.txt) td.textContent = d.txt;
-    if (td.className !== d.cls) td.className = d.cls;
+    const keep = td.classList.contains('fz') || td.classList.contains('fzc') ? ' ' + [...td.classList].filter(k => /^fz/.test(k)).join(' ') : '';
+    if (td.className !== d.cls + keep) td.className = d.cls + keep;
+    const st = d.bg + '|' + d.fc + '|' + d.bd;
+    if (td._st !== st) { td._st = st; td.style.backgroundColor = d.bg; td.style.color = d.fc; td.style.boxShadow = d.bd; }
     if (d.txt.length > 12) td.title = d.txt; else if (td.title) td.removeAttribute('title');
+  }
+  if (cur.frz) applyFreeze();
+}
+function applyFreeze() {
+  if (!state.cur || state.view !== 'sheet') return;
+  const F = state.cur.frz || { r: 0, c: 0 }, t = $('#grid');
+  $$('#grid .fz, #grid .fzc').forEach(el => { el.classList.remove('fz', 'fzc', 'fzl', 'fzr'); el.style.top = ''; el.style.left = ''; });
+  let top = t.tHead.offsetHeight;
+  for (let r = 0; r < Math.min(F.r || 0, state.cur.rows); r++) {
+    const tr = SH.cell[r][0].parentElement, th = tr.firstElementChild;
+    th.classList.add('fz'); th.style.top = top + 'px';
+    SH.cell[r].forEach(td => { td.classList.add('fz'); td.style.top = top + 'px'; if (r === F.r - 1) td.classList.add('fzl'); });
+    top += tr.offsetHeight;
+  }
+  let left = 46;
+  for (let c = 0; c < Math.min(F.c || 0, state.cur.cols); c++) {
+    const w = state.cur.colW[c] || 104;
+    SH.cell.forEach(row => { const td = row[c]; td.classList.add('fzc'); td.style.left = left + 'px'; if (c === F.c - 1) td.classList.add('fzr'); });
+    SH.colTh[c].classList.add('fzc'); SH.colTh[c].style.left = left + 'px';
+    left += w;
   }
 }
 const rng = () => ({ r1: Math.min(SH.anc.r, SH.sel.r), r2: Math.max(SH.anc.r, SH.sel.r), c1: Math.min(SH.anc.c, SH.sel.c), c2: Math.max(SH.anc.c, SH.sel.c) });
@@ -816,6 +899,8 @@ function updateSelStatus() {
 function updateSheetTools() {
   const f = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
   $$('[data-s="bold"]').forEach(b => b.setAttribute('aria-pressed', String(!!f.b)));
+  [['ital', 'i'], ['under', 'u'], ['wrap', 'w']].forEach(([s, k]) => { const b = $(`[data-s="${s}"]`); if (b) b.setAttribute('aria-pressed', String(!!f[k])); });
+  const fz = state.cur.frz; $('[data-s="freeze"]').setAttribute('aria-pressed', String(!!(fz && (fz.r || fz.c))));
   ['al', 'ac', 'ar'].forEach(k => $(`[data-s="${k}"]`).setAttribute('aria-pressed', String(f.a === k)));
   $$('.seg [data-n]').forEach(b => b.setAttribute('aria-pressed', String((f.n || '') === b.dataset.n)));
 }
@@ -827,7 +912,7 @@ function restore(s) {
   const o = JSON.parse(s); const dims = o.rows !== state.cur.rows || o.cols !== state.cur.cols || JSON.stringify(o.colW) !== JSON.stringify(state.cur.colW);
   Object.assign(state.cur, o);
   if (dims) buildGrid();
-  loadHF(); afterChange(); applyFilters(); select(Math.min(SH.sel.r, state.cur.rows - 1), Math.min(SH.sel.c, state.cur.cols - 1));
+  loadHF(); afterChange(); applyFilters(); applyFreeze(); select(Math.min(SH.sel.r, state.cur.rows - 1), Math.min(SH.sel.c, state.cur.cols - 1));
 }
 function undo() { if (!SH.hist.length) return; SH.fut.push(snap()); restore(SH.hist.pop()); }
 function redo() { if (!SH.fut.length) return; SH.hist.push(snap()); restore(SH.fut.pop()); }
@@ -870,7 +955,7 @@ function clearRange() { pushHist(); batch(() => eachInRange((r, c) => applyRaw(r
 function setFmt(key, val) {
   commitEdit(false); pushHist();
   const first = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
-  if (key === 'b') val = first.b ? 0 : 1;
+  if (['b', 'i', 'u', 'w'].includes(key)) val = first[key] ? 0 : 1;
   if (key === 'a' && first.a === val) val = '';
   eachInRange((r, c) => {
     const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
@@ -1088,6 +1173,10 @@ gw.addEventListener('keydown', e => {
   if (mod && (k === 'z' || k === 'Z')) { e.preventDefault(); return e.shiftKey ? redo() : undo(); }
   if (mod && (k === 'y' || k === 'Y')) { e.preventDefault(); return redo(); }
   if (mod && (k === 'b' || k === 'B')) { e.preventDefault(); return setFmt('b'); }
+  if (mod && (k === 'i' || k === 'I')) { e.preventDefault(); return setFmt('i'); }
+  if (mod && (k === 'u' || k === 'U')) { e.preventDefault(); return setFmt('u'); }
+  if (mod && k === 'PageDown') { e.preventDefault(); return switchSheet(Math.min(state.cur.active + 1, state.cur.sheets.length - 1)); }
+  if (mod && k === 'PageUp') { e.preventDefault(); return switchSheet(Math.max(state.cur.active - 1, 0)); }
   if (mod && (k === 'd' || k === 'D')) { e.preventDefault(); return fillDown(); }
   if (mod && (k === 'r' || k === 'R')) { e.preventDefault(); return fillRight(); }
   if (mod && (k === 'a' || k === 'A')) { e.preventDefault(); SH.anc = { r: state.cur.rows - 1, c: state.cur.cols - 1 }; return select(0, 0, true); }
@@ -1334,7 +1423,7 @@ function openFilter() {
   if (!isPhone()) $('#fpSearch').focus();
 }
 function closeFilter() { $('#filterPop').hidden = true; SH.fdraft = null; gw.focus({ preventScroll: true }); }
-function clearFilters() { if (!state.cur.filter) return; delete state.cur.filter; scheduleSave(); applyFilters(); toast('Toutes les lignes sont affichées.'); }
+function clearFilters() { if (!state.cur.filter) return; state.cur.filter = undefined; scheduleSave(); applyFilters(); toast('Toutes les lignes sont affichées.'); }
 $('#fpSearch').addEventListener('input', e => { const q = norm(e.target.value); $$('#fpList .fp-it').forEach(l => { l.hidden = !!q && !norm(l.textContent).includes(q); }); });
 $('#fpAll').addEventListener('click', () => $$('#fpList .fp-it:not([hidden]) input').forEach(i => { i.checked = true; }));
 $('#fpNone').addEventListener('click', () => $$('#fpList .fp-it:not([hidden]) input').forEach(i => { i.checked = false; }));
@@ -1344,17 +1433,182 @@ $('#fpApply').addEventListener('click', () => {
   const boxes = $$('#fpList input'), on = boxes.filter(i => i.checked).map(i => i.value);
   const F = { r1: d.F.r1, r2: d.F.r2, cols: { ...(d.F.cols || {}) } };
   if (on.length === boxes.length) delete F.cols[d.c]; else F.cols[d.c] = on;
-  if (Object.keys(F.cols).length) state.cur.filter = F; else delete state.cur.filter;
+  state.cur.filter = Object.keys(F.cols).length ? F : undefined;
   scheduleSave(); closeFilter(); applyFilters();
 });
 $('#fpClear').addEventListener('click', () => {
   const d = SH.fdraft; closeFilter(); if (!d || !state.cur.filter) return;
   delete state.cur.filter.cols[d.c];
-  if (!Object.keys(state.cur.filter.cols).length) delete state.cur.filter;
+  if (!Object.keys(state.cur.filter.cols).length) state.cur.filter = undefined;
   scheduleSave(); applyFilters();
 });
 $('#sStatus').addEventListener('click', e => { if (e.target.closest('[data-act="clearFilter"]')) clearFilters(); });
 document.addEventListener('mousedown', e => { if (!$('#filterPop').hidden && !e.target.closest('#filterPop') && !e.target.closest('[data-s="filter"]')) closeFilter(); });
+
+/* --- onglets */
+function refreshSheetView() {
+  const cur = state.cur;
+  if (SH.ids) SH.sid = SH.ids[cur.active];
+  SH.hist = []; SH.fut = []; SH.hiddenRows = 0;
+  buildGrid(); renderValues(); applyFilters(); applyFreeze(); select(0, 0); renderTabs();
+}
+function renderTabs() {
+  const cur = state.cur;
+  $('#tabList').innerHTML = cur.sheets.map((sh, i) => `<button class="tab" role="tab" data-i="${i}" aria-selected="${i === cur.active}">${esc(sh.name)}${i === cur.active ? '<span class="tab-more" aria-hidden="true">▾</span>' : ''}</button>`).join('');
+  const a = $('#tabList .tab[aria-selected="true"]'); if (a) a.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+}
+function switchSheet(i) {
+  const cur = state.cur;
+  if (i === cur.active || !cur.sheets[i]) return;
+  commitEdit(false); closeFilter(); closeMini();
+  cur.active = i; refreshSheetView(); scheduleSave();
+}
+function uniqueName(base) {
+  const has = n => state.cur.sheets.some(s => s.name.toLowerCase() === n.toLowerCase());
+  if (!has(base)) return base;
+  const root = base.replace(/\s*\(\d+\)$/, '');
+  for (let n = 2; ; n++) { const t = `${root} (${n})`; if (!has(t)) return t; }
+}
+function addSheet(from) {
+  commitEdit(false); closeMini();
+  const cur = state.cur;
+  let n = cur.sheets.length + 1; while (cur.sheets.some(s => s.name.toLowerCase() === 'feuille' + n)) n++;
+  const sh = from ? { ...clone(from), id: uid(), name: uniqueName(from.name) } : { id: uid(), name: 'Feuille' + n, cells: {}, rows: 60, cols: 12, colW: {} };
+  delete sh.filter;
+  cur.sheets.splice(cur.active + 1, 0, sh);
+  cur.active += 1;
+  loadHF(); refreshSheetView(); scheduleSave();
+  toast(from ? `Feuille dupliquée : ${sh.name}` : `Nouvelle feuille : ${sh.name}`);
+}
+function deleteSheet(i) {
+  const cur = state.cur;
+  if (cur.sheets.length < 2) return toast('Un classeur garde au moins une feuille.');
+  commitEdit(false); closeMini();
+  const name = cur.sheets[i].name;
+  if (SH.hf && SH.ids) {
+    SH.hf.removeSheet(SH.ids[i]);
+    const ids = SH.ids.filter((_, k) => k !== i);
+    cur.sheets.splice(i, 1);
+    cur.sheets.forEach((sh, k) => { sh.cells = cellsFromHF(ids[k], sh.cells); });
+  } else cur.sheets.splice(i, 1);
+  if (cur.active > i || cur.active >= cur.sheets.length) cur.active = Math.max(0, cur.active - 1);
+  loadHF(); refreshSheetView(); scheduleSave();
+  toast(`Feuille « ${name} » supprimée. Les formules qui la citaient affichent #REF!.`);
+}
+function moveSheet(i, d) {
+  const cur = state.cur, j = i + d;
+  if (j < 0 || j >= cur.sheets.length) return;
+  const act = cur.sheets[cur.active];
+  [cur.sheets[i], cur.sheets[j]] = [cur.sheets[j], cur.sheets[i]];
+  cur.active = cur.sheets.indexOf(act);
+  loadHF(); renderTabs(); scheduleSave(); closeMini();
+}
+function renameSheet(i, name) {
+  const cur = state.cur, old = cur.sheets[i].name;
+  name = String(name || '').replace(/[\[\]:*?\/\\']/g, '').replace(/\s+/g, ' ').trim().slice(0, 31);
+  if (!name || name === old) return renderTabs();
+  if (cur.sheets.some((s, k) => k !== i && s.name.toLowerCase() === name.toLowerCase())) { toast('Une autre feuille porte déjà ce nom.', true); return renderTabs(); }
+  const e = old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|[^A-Za-z0-9À-ÿ_.])(?:'${e.replace(/'/g, "''")}'|${e})!`, 'gi');
+  cur.sheets.forEach(sh => Object.values(sh.cells).forEach(x => { if (String(x.v)[0] === '=') x.v = outsideStrings(x.v, p => p.replace(re, (m, pre) => pre + refName(name) + '!')); }));
+  cur.sheets[i].name = name;
+  loadHF(); renderValues(); renderTabs(); updateFx(); scheduleSave();
+}
+function startRename(i) {
+  closeMini(); renderTabs();
+  const t = $(`#tabList .tab[data-i="${i}"]`); if (!t) return;
+  t.innerHTML = `<input class="tab-in" id="tabIn" value="${esc(state.cur.sheets[i].name)}" aria-label="Nom de la feuille" autocomplete="off" autocorrect="off">`;
+  const inp = $('#tabIn'); inp.focus(); inp.select();
+  let done = false;
+  const fin = ok => { if (done) return; done = true; ok ? renameSheet(i, inp.value) : renderTabs(); };
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fin(true); } else if (e.key === 'Escape') { e.preventDefault(); fin(false); } e.stopPropagation(); });
+  inp.addEventListener('blur', () => fin(true));
+}
+function placePop(pop, anchor) {
+  pop.hidden = false;
+  const host = $('#sheet').getBoundingClientRect(), a = anchor.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(a.left - host.left, host.width - pop.offsetWidth - 8)) + 'px';
+  if (a.top - host.top > host.height / 2) { pop.style.top = 'auto'; pop.style.bottom = (host.bottom - a.top + 6) + 'px'; }
+  else { pop.style.bottom = 'auto'; pop.style.top = (a.bottom - host.top + 6) + 'px'; }
+}
+function closeMini() { $('#tabMenu').hidden = true; $('#fmtPop').hidden = true; SH.tabDel = false; }
+function openTabMenu(el, i) {
+  const m = $('#tabMenu'), n = state.cur.sheets.length;
+  m.dataset.i = i; SH.tabDel = false;
+  m.innerHTML = `<button data-tm="rename">${ic('pen')}Renommer</button><button data-tm="dup">${ic('copy')}Dupliquer</button>`
+    + (i > 0 ? `<button data-tm="left">${ic('left')}Déplacer à gauche</button>` : '')
+    + (i < n - 1 ? `<button data-tm="right">${ic('right')}Déplacer à droite</button>` : '')
+    + (n > 1 ? `<hr><button data-tm="del" class="danger">${ic('trash')}<span>Supprimer la feuille</span></button>` : '');
+  placePop(m, el);
+}
+$('#tabList').addEventListener('click', e => {
+  const t = e.target.closest('.tab'); if (!t || t.querySelector('input')) return;
+  const i = +t.dataset.i;
+  if (i !== state.cur.active) switchSheet(i); else if ($('#tabMenu').hidden) openTabMenu(t, i); else closeMini();
+});
+$('#tabList').addEventListener('dblclick', e => { const t = e.target.closest('.tab'); if (t && !t.querySelector('input')) startRename(+t.dataset.i); });
+$('#tabAdd').addEventListener('click', () => addSheet());
+$('#tabMenu').addEventListener('click', e => {
+  const b = e.target.closest('[data-tm]'); if (!b) return;
+  const i = +$('#tabMenu').dataset.i, k = b.dataset.tm;
+  if (k === 'rename') startRename(i);
+  else if (k === 'dup') addSheet(state.cur.sheets[i]);
+  else if (k === 'left') moveSheet(i, -1);
+  else if (k === 'right') moveSheet(i, 1);
+  else if (k === 'del') { if (!SH.tabDel) { SH.tabDel = true; b.querySelector('span').textContent = 'Confirmer la suppression'; } else deleteSheet(i); }
+});
+
+/* --- couleurs, bordures, figer */
+const COLORS = ['jaune', 'vert', 'bleu', 'rouge', 'violet', 'orange', 'gris', 'cuivre'];
+const COLOR_FR = { jaune: 'Jaune', vert: 'Vert', bleu: 'Bleu', rouge: 'Rouge', violet: 'Violet', orange: 'Orange', gris: 'Gris', cuivre: 'Cuivre' };
+function openFmt(kind) {
+  commitEdit(false);
+  const p = $('#fmtPop'), anchor = $(`[data-s="${{ bg: 'fill', fc: 'color', bd: 'borders', frz: 'freeze' }[kind]}"]`);
+  if (!p.hidden && p.dataset.k === kind) return closeMini();
+  closeMini(); p.dataset.k = kind;
+  if (kind === 'bg' || kind === 'fc') {
+    p.innerHTML = `<div class="mp-t">${kind === 'bg' ? 'Couleur de fond' : 'Couleur du texte'}</div><div class="swatches">`
+      + COLORS.map(c => `<button class="sw" data-col="${c}" title="${COLOR_FR[c]}" aria-label="${COLOR_FR[c]}" style="${kind === 'bg' ? `background:var(--bg-${c})` : `color:var(--fc-${c})`}">${kind === 'fc' ? 'A' : ''}</button>`).join('')
+      + `<button class="sw none" data-col="" title="Aucune" aria-label="Aucune couleur">Aucune</button></div>`;
+  } else if (kind === 'bd') {
+    p.innerHTML = `<div class="mp-t">Bordures</div><button data-bd="all">${ic('grid')}Toutes les bordures</button><button data-bd="outer">${ic('borders')}Contour</button><button data-bd="bottom">${ic('hr')}Bordure en bas</button><button data-bd="none">${ic('close')}Aucune bordure</button>`;
+  } else {
+    const F = state.cur.frz || {};
+    p.innerHTML = `<div class="mp-t">Figer</div><button data-fz="1,${F.c || 0}" aria-pressed="${F.r === 1}">${ic('freeze')}La première ligne</button><button data-fz="2,${F.c || 0}" aria-pressed="${F.r === 2}">${ic('freeze')}Les 2 premières lignes</button><button data-fz="${F.r || 0},1" aria-pressed="${F.c === 1}">${ic('freeze')}La première colonne</button><hr><button data-fz="0,0">${ic('close')}Ne rien figer</button>`;
+  }
+  placePop(p, anchor);
+}
+function setBorders(mode) {
+  commitEdit(false); pushHist();
+  const R = rng();
+  eachInRange((r, c) => {
+    const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
+    const set = (side, on) => { if (on) x.f[side] = 1; else delete x.f[side]; };
+    if (mode === 'none') ['bt', 'bb', 'bl', 'br'].forEach(sd => set(sd, false));
+    else if (mode === 'all') { set('bt', true); set('bl', true); if (r === R.r2) set('bb', true); if (c === R.c2) set('br', true); }
+    else if (mode === 'outer') { if (r === R.r1) set('bt', true); if (r === R.r2) set('bb', true); if (c === R.c1) set('bl', true); if (c === R.c2) set('br', true); }
+    else if (mode === 'bottom' && r === R.r2) set('bb', true);
+    if (!x.v && !Object.keys(x.f).length) delete state.cur.cells[k];
+  });
+  afterChange();
+}
+function setFreeze(r, c) {
+  state.cur.frz = r || c ? { r: r || 0, c: c || 0 } : undefined;
+  applyFreeze(); drawSel(); updateSheetTools(); scheduleSave();
+  toast(r || c ? 'Volets figés' : 'Plus rien n\'est figé');
+}
+$('#fmtPop').addEventListener('mousedown', e => e.preventDefault());
+$('#fmtPop').addEventListener('click', e => {
+  const p = $('#fmtPop'), k = p.dataset.k;
+  const sw = e.target.closest('[data-col]'); if (sw) { closeMini(); setFmt(k, sw.dataset.col); gw.focus({ preventScroll: true }); return; }
+  const bd = e.target.closest('[data-bd]'); if (bd) { closeMini(); setBorders(bd.dataset.bd); gw.focus({ preventScroll: true }); return; }
+  const fz = e.target.closest('[data-fz]'); if (fz) { closeMini(); const [a, b] = fz.dataset.fz.split(',').map(Number); setFreeze(a, b); gw.focus({ preventScroll: true }); }
+});
+document.addEventListener('mousedown', e => {
+  if ($('#tabMenu').hidden && $('#fmtPop').hidden) return;
+  if (e.target.closest('#tabMenu, #fmtPop, .tab, [data-s="fill"], [data-s="color"], [data-s="borders"], [data-s="freeze"]')) return;
+  closeMini();
+});
 
 /* --- somme auto et structure */
 function autoSum() {
@@ -1374,7 +1628,7 @@ function structural(op) {
   commitEdit(false);
   if (!SH.hf) return toast('Le moteur de calcul est nécessaire pour insérer ou supprimer des lignes.', true);
   const cur = state.cur, { r, c } = SH.sel;
-  if (cur.filter) { delete cur.filter; SH.hiddenRows = 0; toast('Filtre retiré pour modifier la structure.'); }
+  if (cur.filter) { cur.filter = undefined; SH.hiddenRows = 0; toast('Filtre retiré pour modifier la structure.'); }
   if (op === 'rowDel' && cur.rows <= 1 || op === 'colDel' && cur.cols <= 1) return;
   pushHist();
   const fm = {}; Object.entries(cur.cells).forEach(([k, x]) => { if (x.f && Object.keys(x.f).length) fm[k] = x.f; });
@@ -1397,21 +1651,18 @@ function structural(op) {
     SH.hf.removeColumns(SH.sid, [c, 1]);
     const w = {}; Object.entries(cur.colW).forEach(([i, v]) => { if (+i !== c) w[+i > c ? +i - 1 : i] = v; }); cur.colW = w;
   }
-  const ser = SH.hf.getSheetSerialized(SH.sid), cells = {};
-  ser.forEach((row, ri) => (row || []).forEach((v, ci) => {
-    if (v == null || v === '') return;
-    let raw = typeof v === 'number' ? numToRaw(v) : typeof v === 'boolean' ? (v ? 'VRAI' : 'FAUX') : String(v);
-    if (raw[0] === '=') raw = '=' + (SH.fr ? enNamesToFr(raw.slice(1)) : excelToFr(raw.slice(1)));
-    cells[addr(ri, ci)] = { v: raw, f: {} };
-  }));
+  const cells = cellsFromHF(SH.sid, {}, true);
   Object.entries(nf).forEach(([k, f]) => { (cells[k] ||= { v: '', f: {} }).f = f; });
-  cur.cells = cells;
+  cur.cells = fixDates(cells);
+  cur.sheets.forEach((sh, i) => { if (i !== cur.active) sh.cells = cellsFromHF(SH.ids[i], sh.cells); });
   buildGrid(); afterChange(); select(Math.min(r, cur.rows - 1), Math.min(c, cur.cols - 1));
 }
 const S = {
   undo: () => { commitEdit(false); undo(); }, redo: () => { commitEdit(false); redo(); },
   bold: () => setFmt('b'), al: () => setFmt('a', 'al'), ac: () => setFmt('a', 'ac'), ar: () => setFmt('a', 'ar'),
   sum: autoSum, clear: () => { commitEdit(false); clearRange(); },
+  ital: () => setFmt('i'), under: () => setFmt('u'), wrap: () => setFmt('w'),
+  fill: () => openFmt('bg'), color: () => openFmt('fc'), borders: () => openFmt('bd'), freeze: () => openFmt('frz'),
   fillDown, sortAsc: () => sortZone(false), sortDesc: () => sortZone(true), filter: () => { $('#filterPop').hidden ? openFilter() : closeFilter(); },
   rowIns: () => structural('rowIns'), rowDel: () => structural('rowDel'), colIns: () => structural('colIns'), colDel: () => structural('colDel')
 };
@@ -1442,9 +1693,12 @@ async function importFile(f) {
     } else if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) {
       await loadScript(LIB.xlsx);
       const X = window.XLSX;
-      const wb = ext === 'csv' ? X.read(await f.text(), { type: 'string', FS: guessSep(await f.text()) }) : X.read(await f.arrayBuffer(), { cellFormula: true });
-      const ws = wb.Sheets[wb.SheetNames[0]];
+      const wb = ext === 'csv' ? X.read(await f.text(), { type: 'string', FS: guessSep(await f.text()) }) : X.read(await f.arrayBuffer(), { cellFormula: true, cellStyles: true });
+      let cut = false;
+      const sheets = wb.SheetNames.slice(0, 20).map(name => {
+      const ws = wb.Sheets[name];
       const ref = X.utils.decode_range(ws['!ref'] || 'A1');
+      if (ref.e.r > 999 || ref.e.c > 51) cut = true;
       const maxR = Math.min(ref.e.r, 999), maxC = Math.min(ref.e.c, 51);
       const cells = {};
       for (let r = 0; r <= maxR; r++) for (let c = 0; c <= maxC; c++) {
@@ -1456,12 +1710,16 @@ async function importFile(f) {
         else if (cl.t === 'b') v = cl.v ? 'VRAI' : 'FAUX';
         else if (cl.t === 'd') v = cl.w || String(cl.v);
         else v = cl.v == null ? '' : String(cl.v);
-        if (cl.f && cl.z) { const z = String(cl.z); if (z.includes('%')) fm.n = 'pct'; else if (z.includes('€')) fm.n = 'eur'; }
+        if (cl.f && cl.z) { const z = String(cl.z); if (z.includes('%')) fm.n = 'pct'; else if (z.includes('€')) fm.n = 'eur'; else if (X.SSF.is_date(z)) fm.n = 'date'; }
+        if (cl.s && cl.s.font) { if (cl.s.font.bold) fm.b = 1; if (cl.s.font.italic) fm.i = 1; }
         if (v !== '') cells[addr(r, c)] = { v, f: fm };
       }
       const colW = {}; (ws['!cols'] || []).slice(0, maxC + 1).forEach((cw, i) => { if (cw && cw.wpx) colW[i] = Math.round(Math.max(40, Math.min(cw.wpx, 420))); else if (cw && cw.wch) colW[i] = Math.round(Math.max(40, Math.min(cw.wch * 7.5, 420))); });
-      await createDoc('feuille', { title, cells, rows: Math.max(60, maxR + 21), cols: Math.max(12, maxC + 2), colW });
-      toast(ref.e.r > 999 || ref.e.c > 51 ? 'Classeur importé (limité aux 1 000 premières lignes et 52 colonnes).' : (wb.SheetNames.length > 1 ? `Classeur importé : première feuille « ${wb.SheetNames[0]} » seulement.` : 'Classeur importé.'));
+      return { id: uid(), name: String(name).replace(/[\[\]:*?\/\\']/g, '').slice(0, 31) || 'Feuille', cells, rows: Math.max(60, maxR + 21), cols: Math.max(12, maxC + 2), colW };
+      });
+      await createDoc('feuille', { title, sheets, active: 0 });
+      const more = wb.SheetNames.length > 20 ? ' (20 premières feuilles)' : '';
+      toast(cut ? `Classeur importé${more}, limité à 1 000 lignes et 52 colonnes par feuille.` : `Classeur importé : ${sheets.length} feuille${sheets.length > 1 ? 's' : ''}${more}.`);
     } else if (ext === 'txt' || ext === 'md') {
       const text = await f.text();
       const html = text.split(/\n{2,}/).map(p => { const t = p.trim(); const h = /^(#{1,3})\s+(.*)$/.exec(t); return h ? `<h${h[1].length}>${esc(h[2])}</h${h[1].length}>` : `<p>${esc(t).replace(/\n/g, '<br>')}</p>`; }).join('');
@@ -1639,31 +1897,53 @@ function exportMd() {
   }).filter(Boolean).join('\n\n');
   return saveFile(safeName(state.cur.title) + '.md', md + '\n');
 }
+const XL_RGB = { jaune: ['9A6512', 'FDF0C4'], vert: ['2F7D46', 'DDF0DF'], bleu: ['2563A8', 'DCE9F7'], rouge: ['B23F33', 'F8DEDA'], violet: ['6D4AA8', 'E9E1F5'], orange: ['C2611F', 'FBE3CF'], gris: ['5F6670', 'E7E8EA'], cuivre: ['A35E2C', 'F2E3D4'] };
+const XL_Z = { eur: '#,##0.00 "€"', pct: '0.00%', dec2: '#,##0.00', date: 'dd/mm/yyyy' };
+function xlStyle(f) {
+  const s = {}, font = {}, al = {}, bd = {};
+  if (f.b) font.bold = true; if (f.i) font.italic = true; if (f.u) font.underline = true;
+  if (f.fc && XL_RGB[f.fc]) font.color = { rgb: XL_RGB[f.fc][0] };
+  if (Object.keys(font).length) s.font = font;
+  if (f.bg && XL_RGB[f.bg]) s.fill = { patternType: 'solid', fgColor: { rgb: XL_RGB[f.bg][1] } };
+  if (f.a) al.horizontal = { al: 'left', ac: 'center', ar: 'right' }[f.a];
+  if (f.w) { al.wrapText = true; al.vertical = 'top'; }
+  if (Object.keys(al).length) s.alignment = al;
+  [['bt', 'top'], ['bb', 'bottom'], ['bl', 'left'], ['br', 'right']].forEach(([k, n]) => { if (f[k]) bd[n] = { style: 'thin', color: { rgb: '1B1512' } }; });
+  if (Object.keys(bd).length) s.border = bd;
+  if (f.n && XL_Z[f.n]) s.numFmt = XL_Z[f.n];
+  return Object.keys(s).length ? s : null;
+}
 async function exportXlsx() {
   commitEdit(false);
   await loadScript(LIB.xlsx);
-  const X = window.XLSX, cur = state.cur, ws = {};
-  let maxR = 0, maxC = 0;
-  const Z = { eur: '#,##0.00 "€"', pct: '0.00%', dec2: '#,##0.00', date: 'dd/mm/yyyy' };
-  Object.entries(cur.cells).forEach(([k, x]) => {
-    if (x.v === '' || x.v == null) return;
-    const p = parseAddr(k); if (!p) return;
-    maxR = Math.max(maxR, p.r); maxC = Math.max(maxC, p.c);
-    const v = (SH.vals[p.r] || [])[p.c], f = x.f || {};
-    let cell;
-    if (String(x.v)[0] === '=') {
-      const fv = typeof v === 'number' ? { t: 'n', v } : typeof v === 'boolean' ? { t: 'b', v } : typeof v === 'object' && v ? { t: 'e', v: 0, w: v.value } : { t: 's', v: v == null ? '' : String(v) };
-      cell = { ...fv, f: frToExcel(String(x.v).slice(1)) };
-    } else {
-      const n = parseNum(x.v);
-      cell = n != null ? { t: 'n', v: n } : { t: 's', v: String(x.v).replace(/^'/, '') };
-    }
-    if (f.n && Z[f.n] && cell.t === 'n') cell.z = Z[f.n];
-    ws[X.utils.encode_cell({ r: p.r, c: p.c })] = cell;
+  const X = window.XLSX, cur = state.cur, wb = X.utils.book_new();
+  cur.sheets.forEach((sh, i) => {
+    const vals = SH.hf && SH.ids ? SH.hf.getSheetValues(SH.ids[i]) : [];
+    const ws = {};
+    let maxR = 0, maxC = 0;
+    Object.entries(sh.cells).forEach(([k, x]) => {
+      const p = parseAddr(k); if (!p) return;
+      const f = x.f || {}, st = xlStyle(f);
+      if ((x.v === '' || x.v == null) && !st) return;
+      maxR = Math.max(maxR, p.r); maxC = Math.max(maxC, p.c);
+      const v = (vals[p.r] || [])[p.c];
+      let cell;
+      if (x.v === '' || x.v == null) cell = { t: 's', v: '' };
+      else if (String(x.v)[0] === '=') {
+        const fv = typeof v === 'number' ? { t: 'n', v } : typeof v === 'boolean' ? { t: 'b', v } : typeof v === 'object' && v ? { t: 'e', v: 0, w: v.value } : { t: 's', v: v == null ? '' : String(v) };
+        cell = { ...fv, f: frToExcel(String(x.v).slice(1)) };
+      } else {
+        const n = parseNum(x.v), d = n == null ? parseDate(x.v) : null;
+        cell = n != null ? { t: 'n', v: n } : d != null ? { t: 'n', v: d } : { t: 's', v: String(x.v).replace(/^'/, '') };
+      }
+      if (f.n && XL_Z[f.n] && cell.t === 'n') cell.z = XL_Z[f.n];
+      if (st) cell.s = st;
+      ws[X.utils.encode_cell({ r: p.r, c: p.c })] = cell;
+    });
+    ws['!ref'] = X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
+    ws['!cols'] = Array.from({ length: maxC + 1 }, (_, c) => ({ wpx: sh.colW[c] || 104 }));
+    X.utils.book_append_sheet(wb, ws, sh.name.slice(0, 31));
   });
-  ws['!ref'] = X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
-  ws['!cols'] = Array.from({ length: maxC + 1 }, (_, i) => ({ wpx: cur.colW[i] || 104 }));
-  const wb = X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Feuille1');
   const buf = X.write(wb, { type: 'array', bookType: 'xlsx' });
   await saveFile(safeName(cur.title) + '.xlsx', new Blob([buf]));
 }
@@ -1939,6 +2219,22 @@ function commands() {
     add('Cellules', 'Recopier vers le bas', 'fillDown', fillDown, 'Ctrl D');
     add('Cellules', 'Recopier vers la droite', 'fillDown', fillRight, 'Ctrl R');
     add('Cellules', 'Format date', 'grid', () => setFmt('n', 'date'));
+    add('Cellules', 'Italique', 'type', () => setFmt('i'), 'Ctrl I');
+    add('Cellules', 'Souligné', 'type', () => setFmt('u'), 'Ctrl U');
+    add('Cellules', 'Retour à la ligne automatique', 'wrap', () => setFmt('w'));
+    add('Cellules', 'Couleur de fond', 'bucket', () => openFmt('bg'));
+    add('Cellules', 'Couleur du texte', 'textColor', () => openFmt('fc'));
+    add('Cellules', 'Toutes les bordures', 'borders', () => setBorders('all'));
+    add('Cellules', 'Bordure de contour', 'borders', () => setBorders('outer'));
+    add('Cellules', 'Retirer les bordures', 'borders', () => setBorders('none'));
+    add('Affichage', 'Figer la première ligne', 'freeze', () => setFreeze(1, (state.cur.frz || {}).c || 0));
+    add('Affichage', 'Figer la première colonne', 'freeze', () => setFreeze((state.cur.frz || {}).r || 0, 1));
+    add('Affichage', 'Ne rien figer', 'freeze', () => setFreeze(0, 0));
+    add('Feuilles', 'Nouvelle feuille', 'plus', () => addSheet());
+    add('Feuilles', 'Dupliquer cette feuille', 'copy', () => addSheet(state.cur.sheets[state.cur.active]));
+    add('Feuilles', 'Renommer cette feuille', 'pen', () => startRename(state.cur.active));
+    add('Feuilles', 'Feuille suivante', 'right', () => switchSheet(Math.min(state.cur.active + 1, state.cur.sheets.length - 1)), 'Ctrl Pg↓');
+    add('Feuilles', 'Feuille précédente', 'left', () => switchSheet(Math.max(state.cur.active - 1, 0)), 'Ctrl Pg↑');
     add('Données', 'Trier de A à Z', 'sortAsc', () => sortZone(false));
     add('Données', 'Trier de Z à A', 'sortDesc', () => sortZone(true));
     add('Données', 'Filtrer la colonne', 'filter', openFilter);

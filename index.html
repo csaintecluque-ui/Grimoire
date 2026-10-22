@@ -133,9 +133,17 @@
           <button class="tb" data-s="redo" title="Rétablir (Ctrl+Y)" data-ic="redo"></button>
           <span class="tb-sep"></span>
           <button class="tb txt" data-s="bold" title="Gras (Ctrl+B)"><b>G</b></button>
+          <button class="tb txt" data-s="ital" title="Italique (Ctrl+I)"><i>I</i></button>
+          <button class="tb txt" data-s="under" title="Souligné (Ctrl+U)"><u>S</u></button>
           <button class="tb" data-s="al" title="Aligner à gauche" data-ic="alignL"></button>
           <button class="tb" data-s="ac" title="Centrer" data-ic="alignC"></button>
           <button class="tb" data-s="ar" title="Aligner à droite" data-ic="alignR"></button>
+          <button class="tb" data-s="wrap" title="Retour à la ligne automatique" data-ic="wrap"></button>
+          <span class="tb-sep"></span>
+          <button class="tb" data-s="fill" title="Couleur de fond" data-ic="bucket"></button>
+          <button class="tb" data-s="color" title="Couleur du texte" data-ic="textColor"></button>
+          <button class="tb" data-s="borders" title="Bordures" data-ic="borders"></button>
+          <button class="tb" data-s="freeze" title="Figer des lignes ou des colonnes" data-ic="freeze"></button>
           <span class="tb-sep"></span>
           <div class="seg" role="group" aria-label="Format des nombres">
             <button data-n="" title="Standard">123</button><button data-n="dec2" title="Deux décimales">0,00</button><button data-n="eur" title="Monétaire">€</button><button data-n="pct" title="Pourcentage">%</button><button data-n="date" title="Date">Date</button>
@@ -168,8 +176,11 @@
         <div class="fill-h" id="fillH" title="Faire glisser pour recopier"></div>
         <textarea class="cell-ed" id="cellEd" hidden spellcheck="false" autocorrect="off" autocapitalize="off" aria-label="Édition de la cellule"></textarea>
       </div>
+      <div class="tabs" id="tabs"><div class="tab-list" id="tabList" role="tablist" aria-label="Feuilles du classeur"></div><button class="tab-add" id="tabAdd" title="Nouvelle feuille" aria-label="Ajouter une feuille" data-ic="plus"></button></div>
       <footer class="s-status" id="sStatus"></footer>
       <div id="printArea"></div>
+      <div class="mini-pop" id="tabMenu" hidden role="menu"></div>
+      <div class="mini-pop" id="fmtPop" hidden></div>
       <div class="fpop" id="filterPop" hidden role="dialog" aria-label="Filtre de colonne">
         <div class="fp-h"><b id="fpTitle">Filtrer</b><button class="xbtn" id="fpX" aria-label="Fermer le filtre" data-ic="close"></button></div>
         <input id="fpSearch" class="fp-search" placeholder="Rechercher une valeur" autocomplete="off" autocorrect="off" aria-label="Rechercher une valeur">
@@ -211,7 +222,7 @@
         <div class="set-card">
           <h2>Application</h2>
           <div class="set-acts"><button class="pbtn install-btn" hidden>Installer Grimoire</button></div>
-          <p class="set-note">Grimoire <span id="appVer"></span> · bibliothèques : HyperFormula (GPL v3), SheetJS (Apache 2.0), JSZip (MIT), Mammoth (BSD).</p>
+          <p class="set-note">Grimoire <span id="appVer"></span> · bibliothèques : HyperFormula (GPL v3), SheetJS et xlsx-js-style (Apache 2.0), JSZip (MIT), Mammoth (BSD).</p>
         </div>
       </div>
     </section>

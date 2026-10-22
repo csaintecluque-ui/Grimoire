@@ -32,4 +32,4 @@ Les documents sont enregistrés dans le navigateur de chaque appareil (IndexedDB
 
 ## Licences
 
-Bibliothèques incluses dans `lib/` : HyperFormula (GPL v3), SheetJS Community Edition (Apache 2.0), JSZip (MIT), Mammoth (BSD-2). HyperFormula étant sous GPL v3, ce dépôt public est distribué sous la même licence.
+Bibliothèques incluses dans `lib/` : HyperFormula (GPL v3), SheetJS et xlsx-js-style (Apache 2.0), JSZip (MIT), Mammoth (BSD-2). HyperFormula étant sous GPL v3, ce dépôt public est distribué sous la même licence.
