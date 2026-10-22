@@ -16,6 +16,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500;1,600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap">
 <link rel="stylesheet" href="app.css">
+<style id="pageCss"></style>
 </head>
 <body>
 <div class="app" id="app">
@@ -94,35 +95,84 @@
           <select class="tb-select" id="blockSel" aria-label="Style de paragraphe">
             <option value="p">Paragraphe</option><option value="h1">Titre 1</option><option value="h2">Titre 2</option><option value="h3">Titre 3</option><option value="blockquote">Citation</option>
           </select>
+          <select class="tb-select" id="fontSel" aria-label="Police"><option value="">Police</option><option value="Source Serif 4" style="font-family:Source Serif 4">Source Serif</option><option value="Instrument Sans" style="font-family:Instrument Sans">Instrument Sans</option><option value="Arial" style="font-family:Arial">Arial</option><option value="Calibri" style="font-family:Calibri">Calibri</option><option value="Georgia" style="font-family:Georgia">Georgia</option><option value="Times New Roman" style="font-family:Times New Roman">Times New Roman</option><option value="Verdana" style="font-family:Verdana">Verdana</option><option value="Courier New" style="font-family:Courier New">Courier New</option></select>
+          <select class="tb-select" id="sizeSel" aria-label="Taille du texte"><option value="">Taille</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="14">14</option><option value="16">16</option><option value="18">18</option><option value="20">20</option><option value="24">24</option><option value="28">28</option><option value="36">36</option><option value="48">48</option></select>
           <span class="tb-sep"></span>
           <button class="tb txt" data-w="bold" title="Gras (Ctrl+B)"><b>G</b></button>
           <button class="tb txt" data-w="italic" title="Italique (Ctrl+I)"><i>I</i></button>
           <button class="tb txt" data-w="underline" title="Souligné (Ctrl+U)"><u>S</u></button>
+          <button class="tb txt" data-w="strike" title="Barré"><s>ab</s></button>
+          <button class="tb" data-w="color" title="Couleur du texte" data-ic="textColor"></button>
+          <button class="tb" data-w="hilite" title="Surligner" data-ic="highlighter"></button>
+          <button class="tb" data-w="link" title="Insérer un lien" data-ic="link"></button>
+          <button class="tb" data-w="clear" title="Effacer la mise en forme" data-ic="clearFmt"></button>
           <span class="tb-sep"></span>
           <button class="tb" data-w="ul" title="Liste à puces" data-ic="ul"></button>
           <button class="tb" data-w="ol" title="Liste numérotée" data-ic="ol"></button>
+          <button class="tb" data-w="check" title="Liste de cases à cocher" data-ic="check"></button>
+          <button class="tb" data-w="outdent" title="Diminuer le retrait (Maj+Tab)" data-ic="outdent"></button>
+          <button class="tb" data-w="indent" title="Augmenter le retrait (Tab)" data-ic="indent"></button>
           <span class="tb-sep"></span>
           <button class="tb" data-w="left" title="Aligner à gauche" data-ic="alignL"></button>
           <button class="tb" data-w="center" title="Centrer" data-ic="alignC"></button>
           <button class="tb" data-w="right" title="Aligner à droite" data-ic="alignR"></button>
           <button class="tb" data-w="justify" title="Justifier" data-ic="alignJ"></button>
+          <button class="tb" data-w="spacing" title="Interligne et espacement" data-ic="spacing"></button>
           <span class="tb-sep"></span>
           <button class="tb" data-w="image" title="Insérer une image" data-ic="image"></button>
           <button class="tb" data-w="table" title="Insérer un tableau" data-ic="table"></button>
           <button class="tb" data-w="hr" title="Insérer un séparateur" data-ic="hr"></button>
+          <button class="tb" data-w="pagebreak" title="Saut de page (Ctrl+Entrée)" data-ic="pagebreak"></button>
+          <button class="tb" data-w="toc" title="Insérer un sommaire" data-ic="toc"></button>
           <span class="tb-sep"></span>
+          <button class="tb" data-w="find" title="Rechercher et remplacer (Ctrl+F)" data-ic="search"></button>
+          <button class="tb" data-w="layout" title="Mise en page, en-tête et pied de page" data-ic="layout"></button>
           <button class="tb" data-w="outline" title="Afficher ou masquer le plan" data-ic="outline"></button>
           <button class="tb" data-w="focus" title="Mode concentration" data-ic="focus"></button>
         </div>
       </div>
+      <div class="findbar" id="findBar" hidden role="search">
+        <div class="fb-row">
+          <span class="fb-ic" data-ic="search"></span>
+          <input id="fIn" placeholder="Rechercher dans le document" autocomplete="off" autocorrect="off" aria-label="Rechercher">
+          <span class="fb-count" id="fCount" role="status"></span>
+          <button class="fb-btn" data-f="prev" title="Résultat précédent (Maj+Entrée)" aria-label="Précédent">‹</button>
+          <button class="fb-btn" data-f="next" title="Résultat suivant (Entrée)" aria-label="Suivant">›</button>
+          <label class="fb-case" for="fCase"><input type="checkbox" id="fCase"> Aa</label>
+          <button class="fb-link" data-f="rep">Remplacer</button>
+          <button class="fb-btn" data-f="close" aria-label="Fermer la recherche" data-ic="close"></button>
+        </div>
+        <div class="fb-row fb-rep">
+          <span class="fb-ic" data-ic="pen"></span>
+          <input id="rIn" placeholder="Remplacer par" autocomplete="off" autocorrect="off" aria-label="Remplacer par">
+          <button class="pbtn ghost" data-f="one">Remplacer</button>
+          <button class="pbtn" data-f="all">Tout remplacer</button>
+        </div>
+      </div>
       <div class="w-body">
         <nav class="outline" id="outline" aria-label="Plan du document"><p class="eyebrow">Plan</p><ol id="outlineList"></ol></nav>
-        <div class="w-scroll" id="wScroll"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article></div>
+        <div class="w-scroll" id="wScroll"><div class="page-wrap"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article><div id="pgMarks" aria-hidden="true"></div></div></div>
+        <div class="img-bar tbl-bar" id="tblBar" hidden role="toolbar" aria-label="Tableau">
+          <button data-tb="rowAbove">+ Ligne au-dessus</button><button data-tb="rowBelow">+ Ligne en dessous</button><button data-tb="colLeft">+ Colonne à gauche</button><button data-tb="colRight">+ Colonne à droite</button>
+          <button data-tb="rowDel">− Ligne</button><button data-tb="colDel">− Colonne</button><button data-tb="merge">Fusionner →</button><button data-tb="split">Scinder</button>
+          <button data-tb="fill">Fond</button><button data-tb="header">Ligne d'en-tête</button><button data-tb="tableDel" class="danger">Supprimer le tableau</button>
+        </div>
+        <div class="img-bar link-bar" id="linkBar" hidden role="toolbar" aria-label="Lien">
+          <a id="lbOpen" href="#" target="_blank" rel="noopener">Ouvrir ↗</a><span class="lb-url" id="lbUrl"></span><button id="lbEdit">Modifier</button><button id="lbDel" class="danger">Retirer</button>
+        </div>
         <div class="img-bar" id="imgBar" hidden role="toolbar" aria-label="Taille de l'image">
           <button data-iw="33">Petite</button><button data-iw="60">Moyenne</button><button data-iw="100">Pleine largeur</button><button data-iw="del" class="danger">Retirer</button>
         </div>
       </div>
       <footer class="w-status" id="wStatus"></footer>
+      <div class="mini-pop" id="wPop" hidden></div>
+      <form class="mini-pop link-pop" id="linkPop" hidden>
+        <div class="pp-h"><b>Lien</b><button type="button" class="xbtn" id="lpX" aria-label="Fermer" data-ic="close"></button></div>
+        <label class="field" id="lpTextRow" for="lpText"><span>Texte affiché</span><input id="lpText" autocomplete="off"></label>
+        <label class="field" for="lpUrl"><span>Adresse</span><input id="lpUrl" placeholder="exemple.fr ou nom@domaine.fr" autocomplete="off" autocorrect="off" autocapitalize="off" inputmode="url"></label>
+        <div class="set-acts"><button class="pbtn" type="submit">Appliquer</button><button class="pbtn ghost" type="button" id="lpDel">Retirer le lien</button></div>
+      </form>
+      <div class="mini-pop page-pop" id="pagePop" hidden></div>
     </section>
 
     <!-- CLASSEUR -->
