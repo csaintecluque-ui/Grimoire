@@ -62,7 +62,7 @@
           <div class="create">
             <button class="ccard" data-new="texte"><span class="thumb t-doc"></span><div><strong>Document</strong><span>Lettre, notes, récit, liste</span></div></button>
             <button class="ccard" data-new="feuille"><span class="thumb t-grid"></span><div><strong>Classeur</strong><span>Formules à la française : SOMME, SI…</span></div></button>
-            <button class="ccard" id="pdfCard"><span class="thumb t-pdf" data-ic="pdf"></span><div><strong>PDF</strong><span>Lire, remplir, annoter, fusionner, diviser</span></div></button>
+            <button class="ccard" id="pdfCard"><span class="thumb t-pdf" data-ic="pdf"></span><div><strong>PDF</strong><span>Lire, remplir, annoter, fusionner, diviser. Accepte aussi Word, Excel et photos</span></div></button>
             <button class="ccard" id="importCard"><span class="thumb t-up" data-ic="upload"></span><div><strong>Importer</strong><span>Word (.docx), Excel (.xlsx), CSV, PDF</span></div></button>
           </div>
           <div class="tpls">
@@ -233,7 +233,7 @@
       </div>
       <div class="pdf-scroll" id="pdfScroll"><div class="pdf-pages" id="pdfPages"></div></div>
       <div class="fpop sdlg" id="pdfDlg" hidden role="dialog"></div>
-      <input type="file" id="pdfIns" class="sr" accept=".pdf,application/pdf,image/*" multiple tabindex="-1" aria-hidden="true">
+      <input type="file" id="pdfIns" class="sr" accept=".pdf,application/pdf,image/*,.docx,.xlsx,.xls,.ods,.csv,.txt,.md" multiple tabindex="-1" aria-hidden="true">
       <input type="file" id="pdfImg" class="sr" accept="image/*" tabindex="-1" aria-hidden="true">
     </section>
 
@@ -374,7 +374,7 @@
     <div class="pal-foot">↑ ↓ pour naviguer · Entrée pour valider · Échap pour fermer</div>
   </div>
 </div>
-<input type="file" id="pdfIn" class="sr" accept=".pdf,application/pdf,image/*" multiple tabindex="-1" aria-hidden="true">
+<input type="file" id="pdfIn" class="sr" accept=".pdf,application/pdf,image/*,.docx,.xlsx,.xls,.ods,.csv,.txt,.md" multiple tabindex="-1" aria-hidden="true">
 <input type="file" id="fileIn" class="sr" accept=".docx,.xlsx,.xls,.ods,.csv,.txt,.md,.pdf" tabindex="-1" aria-hidden="true">
 <input type="file" id="imgIn" class="sr" accept="image/*" tabindex="-1" aria-hidden="true">
 <input type="file" id="restoreIn" class="sr" accept=".json,application/json" tabindex="-1" aria-hidden="true">

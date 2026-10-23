@@ -1,11 +1,11 @@
 // Grimoire — service worker : fonctionnement hors connexion.
 // À chaque mise en ligne d'une nouvelle version, augmenter VERSION.
-const VERSION = 'grimoire-1.6.2';
+const VERSION = 'grimoire-1.7.0';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './manifest.webmanifest',
   './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png', './icons/apple-touch-icon.png',
   './lib/hyperformula.full.min.js', './lib/xlsx-style.bundle.js', './lib/jszip.min.js', './lib/mammoth.browser.min.js',
-  './lib/pdfjs/pdf.min.mjs', './lib/pdfjs/pdf.worker.min.mjs', './lib/pdf-lib.min.js'
+  './lib/pdfjs/pdf.min.mjs', './lib/pdfjs/pdf.worker.min.mjs', './lib/pdf-lib.min.js', './lib/pdfmake.min.js', './lib/vfs_fonts.js'
 ];
 const FONTS = 'grimoire-fonts';
 

@@ -12,13 +12,14 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.6.2';
+const APP_VERSION = '1.7.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
   jszip: 'lib/jszip.min.js',
   pdfjs: 'lib/pdfjs/pdf.min.mjs', pdfWorker: 'lib/pdfjs/pdf.worker.min.mjs', pdflib: 'lib/pdf-lib.min.js',
-  mammoth: 'lib/mammoth.browser.min.js'
+  mammoth: 'lib/mammoth.browser.min.js',
+  pdfmake: 'lib/pdfmake.min.js', pdfmakeFonts: 'lib/vfs_fonts.js'
 };
 const loaded = {};
 function loadScript(src) {
@@ -4630,7 +4631,14 @@ async function pagesFromFiles(pdf, PDFLib, files) {
         const k = Math.min((W - 2 * m) / im.w, (H - 2 * m) / im.h);
         out.push({ kind: 'img', W, H, emb, w: im.w * k, h: im.h * k });
       } catch { toast(`« ${f.name} » : image illisible.`, true); }
-    }
+    } else if (/\.(docx|xlsx|xls|ods|csv|txt|md)$/i.test(f.name)) {
+      try {
+        const bytes = await fileToPdfBytes(f);
+        const src = await PDFLib.PDFDocument.load(bytes);
+        const cp = await pdf.copyPages(src, src.getPageIndices());
+        cp.forEach(p => out.push({ kind: 'ext', page: p }));
+      } catch (e) { console.warn(e); toast(`« ${f.name} » n'a pas pu être converti en PDF.`, true); }
+    } else toast(`« ${f.name} » : format non pris en charge.`, true);
   }
   return out;
 }
@@ -4925,17 +4933,18 @@ async function importPdfFiles(files) {
       const PDFLib = await ensurePdfLib();
       const pdf = await PDFLib.PDFDocument.create();
       const pages = await pagesFromFiles(pdf, PDFLib, files);
-      if (!pages.length) return toast('Aucun fichier PDF ou image utilisable.', true);
+      if (!pages.length) return toast('Aucun fichier utilisable (PDF, image, Word, Excel, CSV ou texte).', true);
       addBuiltPages(pdf, pages);
       bytes = await pdf.save({ useObjectStreams: true });
       title = files.length > 1 ? `Fusion de ${files.length} fichiers` : files[0].name.replace(/\.[^.]+$/, '');
+      if (files.length === 1) toast('Conversion en PDF…');
     }
     // vérification rapide (PDF lisible) : seule la structure est lue, pas les pages
     const doc = await pdfjsOpen(bytes);
     const n = doc.numPages; doc.destroy();
     const pdfId = uid(); await Store.putBlob(pdfId, bytes);
     await createDoc('pdf', { title, pdfId, ann: [], form: {}, pagesN: n });
-    toast(one ? `PDF ouvert : ${n} page${n > 1 ? 's' : ''}` : `PDF créé : ${n} page${n > 1 ? 's' : ''}. Réorganisez-les dans l'onglet Pages.`);
+    toast(one || files.length === 1 ? `PDF ouvert : ${n} page${n > 1 ? 's' : ''}` : `PDF créé : ${n} page${n > 1 ? 's' : ''}. Réorganisez-les dans l'onglet Pages.`);
   } catch (e) {
     console.warn(e);
     toast(e && e.name === 'PasswordException' ? 'PDF protégé : mot de passe nécessaire.' : 'Ce fichier PDF ne peut pas être ouvert.', true);
@@ -4943,6 +4952,341 @@ async function importPdfFiles(files) {
 }
 $('#pdfCard').addEventListener('click', () => $('#pdfIn').click());
 $('#pdfIn').addEventListener('change', e => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) importPdfFiles(fs); });
+
+/* =========================================================
+   Conversion en PDF : documents (Word, Grimoire), classeurs (Excel, CSV, Grimoire), texte
+   ========================================================= */
+async function ensurePdfMake() { await loadScript(LIB.pdfmake); await loadScript(LIB.pdfmakeFonts); return window.pdfMake; }
+const PT_PX = 0.75; // 1 px (écran) = 0,75 pt
+const pdfTxt = t => String(t).replace(/[\u202f\u2009\u2007]/g, '\u00a0').replace(/[\u200b\ufeff]/g, '');
+const MARGIN_PT = { normal: 70.9, narrow: 36, wide: 90.7 };
+function pdfMakeBytes(dd) {
+  return new Promise((res, rej) => { try { window.pdfMake.createPdf(dd).getBuffer(b => res(new Uint8Array(b))); } catch (e) { rej(e); } });
+}
+// Pied et en-tête de page, numéros « Page X sur Y »
+function pdfHeadFoot(P, dd, mar) {
+  const small = { fontSize: 8.5, color: '#666666' };
+  if (P.header) dd.header = () => ({ text: P.header, alignment: 'center', margin: [mar, 22, mar, 0], ...small });
+  if (P.footer || (P.num && P.num !== 'none')) dd.footer = (cur, n) => ({
+    columns: [
+      { text: P.footer || '', alignment: 'left', ...small },
+      { text: P.num === 'xofy' ? `Page ${cur} sur ${n}` : P.num && P.num !== 'none' ? String(cur) : '', alignment: P.num === 'right' ? 'right' : 'center', ...small }
+    ], margin: [mar, 10, mar, 0]
+  });
+}
+// --- HTML (le sous-ensemble produit par Grimoire) → contenu pdfmake
+function htmlToPdfContent(html, contentW) {
+  const root = document.createElement('div'); root.innerHTML = sanitize(html || '');
+  let hasToc = false;
+  const runs = (node, st = {}) => {
+    const out = [];
+    node.childNodes.forEach(n => {
+      if (n.nodeType === 3) { const t = pdfTxt(n.nodeValue).replace(/[ \t\n\r]+/g, ' '); if (t) out.push({ text: t, ...st }); return; }
+      if (n.nodeType !== 1) return;
+      const tg = n.tagName, s2 = { ...st };
+      if (tg === 'BR') { out.push({ text: '\n', ...st }); return; }
+      if (tg === 'IMG' || /^(UL|OL|TABLE)$/.test(tg)) return;
+      if (tg === 'STRONG' || tg === 'B') s2.bold = true;
+      if (tg === 'EM' || tg === 'I') s2.italics = true;
+      if (tg === 'U') s2.decoration = 'underline';
+      if (tg === 'S') s2.decoration = 'lineThrough';
+      if (tg === 'SUP') s2.sup = true;
+      if (tg === 'SUB') s2.sub = true;
+      if (tg === 'A') { s2.link = n.getAttribute('href'); s2.color = '#1F5FAD'; s2.decoration = 'underline'; }
+      if (tg === 'SPAN') {
+        const c = cssColor(n.style.color), bg = cssColor(n.style.backgroundColor), fs = cssSizePt(n.style.fontSize);
+        if (c) s2.color = c; if (bg) s2.background = bg; if (fs) s2.fontSize = fs;
+      }
+      out.push(...runs(n, s2));
+    });
+    // espaces de début et de fin de paragraphe
+    if (out.length && typeof out[0].text === 'string') out[0].text = out[0].text.replace(/^\s+/, '');
+    if (out.length && typeof out[out.length - 1].text === 'string') out[out.length - 1].text = out[out.length - 1].text.replace(/\s+$/, '');
+    return out.filter(r => r.text !== '');
+  };
+  const align = el => ({ center: 'center', right: 'right', justify: 'justify' }[el.style && el.style.textAlign] || undefined);
+  const imgs = el => [...el.querySelectorAll(':scope > img, :scope > span > img')].map(im => ({ image: im.getAttribute('src'), width: Math.max(20, contentW * (parseFloat(im.style.width) || 100) / 100), alignment: im.getAttribute('data-wrap') === 'right' ? 'right' : im.getAttribute('data-wrap') === 'left' ? 'left' : 'center', margin: [0, 4, 0, 8] }));
+  const para = (el, extra = {}) => {
+    const out = [...imgs(el)];
+    const r = runs(el);
+    if (r.length) {
+      const p = { text: r, margin: [0, 0, 0, el.style.marginBottom === '0px' ? 0 : 7], ...extra };
+      const a = align(el); if (a) p.alignment = a;
+      const lh = parseFloat(el.style.lineHeight); if (lh) p.lineHeight = Math.max(1, lh * 0.82);
+      const ml = parseInt(el.style.marginLeft, 10); if (ml) p.margin = [ml * PT_PX, p.margin[1], 0, p.margin[3]];
+      out.push(p);
+    } else if (!out.length) out.push({ text: ' ', margin: [0, 0, 0, 4] });
+    return out;
+  };
+  const checkBox = done => ({ width: 13, canvas: [{ type: 'rect', x: 0, y: 2.5, w: 8.5, h: 8.5, r: 1.5, lineWidth: 0.9, lineColor: '#555555' }, ...(done ? [{ type: 'polyline', lineWidth: 1.3, lineColor: '#A35E2C', points: [{ x: 1.8, y: 7 }, { x: 3.8, y: 9.2 }, { x: 7.5, y: 4 }] }] : [])] });
+  const list = el => {
+    const items = [...el.children].filter(li => li.tagName === 'LI').map(li => {
+      const own = document.createElement('div'); [...li.childNodes].forEach(c => { if (!(c.nodeType === 1 && /^(UL|OL)$/.test(c.tagName))) own.appendChild(c.cloneNode(true)); });
+      const sub = [...li.children].filter(c => /^(UL|OL)$/.test(c.tagName)).map(list);
+      const txt = { text: runs(own), margin: [0, 0, 0, 3] };
+      if (el.hasAttribute('data-check')) return { columns: [checkBox(li.getAttribute('data-done') === '1'), { ...txt, width: '*', decoration: li.getAttribute('data-done') === '1' ? 'lineThrough' : undefined, color: li.getAttribute('data-done') === '1' ? '#888888' : undefined }], columnGap: 4 };
+      return sub.length ? { stack: [txt, ...sub] } : txt;
+    });
+    if (el.hasAttribute('data-check')) return { stack: items, margin: [0, 0, 0, 7] };
+    return el.tagName === 'OL' ? { ol: items, margin: [0, 0, 0, 7] } : { ul: items, margin: [0, 0, 0, 7] };
+  };
+  const table = tb => {
+    const rows = [...tb.rows]; if (!rows.length) return null;
+    const n = gridCols(tb);
+    const cols = [...tb.querySelectorAll('col')];
+    const widths = cols.length === n ? cols.map(c => (parseFloat(c.style.width) || 100 / n) + '%').map(w => (parseFloat(w) / 100) * contentW) : Array(n).fill('*');
+    let headerRows = 0;
+    const body = rows.map(tr => {
+      if (tr.parentElement.tagName === 'THEAD') headerRows++;
+      const out = [];
+      rowGrid(tr).forEach(o => {
+        while (out.length < o.start) out.push({ text: '' });
+        const cell = o.cell, th = cell.tagName === 'TH';
+        const inner = [...cell.children].some(c => /^(P|UL|OL|H1|H2|H3|TABLE)$/.test(c.tagName)) ? { stack: blocks(cell) } : { text: runs(cell, th ? { bold: true } : {}) };
+        const bg = cssColor(cell.style.backgroundColor) || (th ? '#EAD9B8' : undefined);
+        const span = Math.min(o.span, n - o.start);
+        out.push({ ...inner, fontSize: 9.5, fillColor: bg, colSpan: span > 1 ? span : undefined, alignment: align(cell) });
+        for (let k = 1; k < span; k++) out.push({});
+      });
+      while (out.length < n) out.push({ text: '' });
+      return out.slice(0, n);
+    });
+    return { table: { headerRows, widths, body, dontBreakRows: true }, layout: { hLineWidth: () => 0.6, vLineWidth: () => 0.6, hLineColor: () => '#C5B8A8', vLineColor: () => '#C5B8A8', paddingLeft: () => 5, paddingRight: () => 5, paddingTop: () => 3, paddingBottom: () => 3 }, margin: [0, 2, 0, 10] };
+  };
+  const blocks = container => {
+    const out = [];
+    let inline = null;
+    const flush = () => { if (inline) { out.push(...para(inline)); inline = null; } };
+    [...container.childNodes].forEach(n => {
+      if (n.nodeType === 3) { if (n.nodeValue.trim()) { inline ||= document.createElement('p'); inline.appendChild(n.cloneNode()); } return; }
+      if (n.nodeType !== 1) return;
+      const tg = n.tagName;
+      if (/^(STRONG|EM|U|S|SUP|SUB|A|B|I|SPAN|BR|IMG)$/.test(tg)) { inline ||= document.createElement('p'); inline.appendChild(n.cloneNode(true)); return; }
+      flush();
+      if (/^H[1-3]$/.test(tg)) {
+        const lv = +tg[1], sz = [0, 20, 15, 12.5][lv];
+        out.push({ text: runs(n), fontSize: sz, bold: true, color: lv === 3 ? '#A35E2C' : '#1B1512', margin: [0, lv === 1 ? 6 : 12, 0, lv === 1 ? 8 : 5], alignment: align(n), tocItem: true, tocStyle: lv === 1 ? { bold: true } : {}, tocMargin: [(lv - 1) * 12, 0, 0, 2], headlineLevel: lv });
+      } else if (tg === 'P') out.push(...para(n));
+      else if (tg === 'UL' || tg === 'OL') out.push(list(n));
+      else if (tg === 'TABLE') { const t = table(n); if (t) out.push(t); }
+      else if (tg === 'BLOCKQUOTE') {
+        const inner = n.querySelector('p') ? blocks(n) : para(n);
+        out.push({ table: { widths: ['*'], body: [[{ stack: inner, italics: true, color: '#6B5F56' }]] }, layout: { hLineWidth: () => 0, vLineWidth: i => i === 0 ? 2.5 : 0, vLineColor: () => '#C9804F', paddingLeft: () => 10 }, margin: [0, 2, 0, 8] });
+      } else if (tg === 'HR' && n.hasAttribute('data-pb')) out.push({ text: '', pageBreak: 'after' });
+      else if (tg === 'HR') out.push({ canvas: [{ type: 'line', x1: 0, y1: 4, x2: contentW, y2: 4, lineWidth: 0.8, lineColor: '#C9804F' }], margin: [0, 4, 0, 10] });
+      else if (tg === 'DIV' && n.hasAttribute('data-toc')) { hasToc = true; out.push({ toc: { title: { text: 'Sommaire', fontSize: 14, bold: true, margin: [0, 0, 0, 8] }, numberStyle: { color: '#6B5F56' } }, margin: [0, 0, 0, 12] }); }
+      else out.push(...para(n));
+    });
+    flush();
+    return out;
+  };
+  const content = blocks(root);
+  if (!hasToc) content.forEach(c => { delete c.tocItem; });
+  return content;
+}
+async function htmlToPdfBytes(html, page = {}, title = '') {
+  await ensurePdfMake();
+  const P = { ...PAGE_DEF, ...page }, land = P.orient === 'landscape', mar = MARGIN_PT[P.margin] || 70.9;
+  const contentW = (land ? 841.89 : 595.28) - 2 * mar;
+  const dd = {
+    pageSize: 'A4', pageOrientation: land ? 'landscape' : 'portrait', pageMargins: [mar, mar, mar, mar],
+    info: { title, creator: 'Grimoire' },
+    defaultStyle: { font: 'Roboto', fontSize: 11, lineHeight: 1.18, color: '#1E1814' },
+    content: htmlToPdfContent(html, contentW)
+  };
+  pdfHeadFoot(P, dd, mar);
+  return pdfMakeBytes(dd);
+}
+// --- grille de cellules (classeur) → tableau pdfmake ; grid = { name, rows: [[{ t, b, i, u, a, bg, fc, num, cs, rs, skip }]], colW: [px], charts: [dataURL] }
+function gridToPdfContent(grid, maxW) {
+  const n = Math.max(1, ...grid.rows.map(r => r.length));
+  let widths = Array.from({ length: n }, (_, c) => (grid.colW[c] || 104) * PT_PX);
+  const tot = widths.reduce((s, w) => s + w, 0);
+  const room = maxW - n * 6.5; // marges intérieures (3 + 3) et traits de chaque colonne
+  const k = tot > room ? room / tot : 1;
+  widths = widths.map(w => Math.max(8, w * k));
+  const fs = Math.max(6, Math.min(9.5, 9.5 * Math.max(k, 0.65)));
+  const body = grid.rows.map(row => {
+    const out = [];
+    for (let c = 0; c < n; c++) {
+      const x = row[c];
+      if (!x) { out.push({ text: '' }); continue; }
+      if (x.skip) { out.push({}); continue; }
+      if (x.chk != null) { out.push({ canvas: [{ type: 'rect', x: 0, y: 1, w: fs * 0.9, h: fs * 0.9, r: 1.2, lineWidth: 0.8, lineColor: '#555555' }, ...(x.chk ? [{ type: 'polyline', lineWidth: 1.1, lineColor: '#A35E2C', points: [{ x: fs * 0.18, y: fs * 0.5 }, { x: fs * 0.38, y: fs * 0.75 }, { x: fs * 0.75, y: fs * 0.22 }] }] : [])], fillColor: x.bg, alignment: 'center' }); continue; }
+      const cell = { text: pdfTxt(x.t ?? ''), fontSize: fs, bold: !!x.b, italics: !!x.i, decoration: x.u ? 'underline' : undefined, alignment: x.a || (x.num ? 'right' : 'left'), fillColor: x.bg, color: x.fc, noWrap: !x.w && !x.cs };
+      if (x.cs > 1) cell.colSpan = x.cs; if (x.rs > 1) cell.rowSpan = x.rs;
+      out.push(cell);
+    }
+    return out;
+  });
+  const out = [{ text: grid.name, fontSize: 13, bold: true, margin: [0, 0, 0, 8] }];
+  if (body.length) out.push({ table: { widths, body, dontBreakRows: true }, layout: { hLineWidth: () => 0.5, vLineWidth: () => 0.5, hLineColor: () => '#D9D2C8', vLineColor: () => '#D9D2C8', paddingLeft: () => 3, paddingRight: () => 3, paddingTop: () => 2, paddingBottom: () => 2 } });
+  else out.push({ text: '(feuille vide)', color: '#888888' });
+  (grid.charts || []).forEach(ch => out.push({ image: ch.src, width: Math.min(maxW, ch.w * PT_PX), margin: [0, 12, 0, 0] }));
+  return { content: out, wide: tot * Math.min(1, 1) > 595.28 - 2 * 36 };
+}
+async function gridsToPdfBytes(grids, title = '') {
+  await ensurePdfMake();
+  const content = [];
+  // paysage si un tableau est trop large pour une page en portrait
+  const anyWide = grids.some(g => g.colW.slice(0, Math.max(1, ...g.rows.map(r => r.length))).reduce((s, w) => s + (w || 104) * PT_PX, 0) > 595.28 - 72);
+  const W = (anyWide ? 841.89 : 595.28) - 72;
+  grids.forEach((g, i) => { const r = gridToPdfContent(g, W); if (i) r.content[0].pageBreak = 'before'; content.push(...r.content); });
+  return pdfMakeBytes({ pageSize: 'A4', pageOrientation: anyWide ? 'landscape' : 'portrait', pageMargins: [36, 40, 36, 40], info: { title, creator: 'Grimoire' }, defaultStyle: { font: 'Roboto', fontSize: 9.5, color: '#1E1814' }, content, footer: (cur, n) => ({ text: `${cur} / ${n}`, alignment: 'right', fontSize: 8, color: '#888888', margin: [36, 10, 36, 0] }) });
+}
+// Classeur Grimoire → grilles (valeurs calculées, mise en forme, fusions, graphiques)
+async function sheetGrids(cur) {
+  const grids = [];
+  const hexBg = k => k && XL_RGB[k] ? '#' + XL_RGB[k][1] : undefined, hexFc = k => k && XL_RGB[k] ? '#' + XL_RGB[k][0] : undefined;
+  for (let i = 0; i < cur.sheets.length; i++) {
+    const sh = cur.sheets[i];
+    const vals = SH.hf && SH.ids ? SH.hf.getSheetValues(SH.ids[i]) : [];
+    let maxR = -1, maxC = -1;
+    Object.entries(sh.cells).forEach(([k, x]) => { const p = parseAddr(k); if (!p) return; const v = (vals[p.r] || [])[p.c]; if ((x.v !== '' && x.v != null) || (v != null && v !== '') || (x.f && (x.f.bg || x.f.mg))) { maxR = Math.max(maxR, p.r + ((x.f && x.f.mg && x.f.mg.r) || 1) - 1); maxC = Math.max(maxC, p.c + ((x.f && x.f.mg && x.f.mg.c) || 1) - 1); } });
+    (vals || []).forEach((row, r) => (row || []).forEach((v, c) => { if (v != null && v !== '') { maxR = Math.max(maxR, r); maxC = Math.max(maxC, c); } }));
+    const hidR = new Set((sh.hid && sh.hid.r) || []), hidC = new Set((sh.hid && sh.hid.c) || []);
+    const colIdx = []; for (let c = 0; c <= maxC; c++) if (!hidC.has(c)) colIdx.push(c);
+    const covered = new Set();
+    const rows = [];
+    for (let r = 0; r <= maxR; r++) {
+      if (hidR.has(r)) continue;
+      const row = [];
+      colIdx.forEach(c => {
+        if (covered.has(r + ',' + c)) { row.push({ skip: true }); return; }
+        const x = sh.cells[addr(r, c)], f = (x && x.f) || {}, v = (vals[r] || [])[c];
+        let t = '', num = false;
+        if (f.chk || v == null || v === '') t = '';
+        else if (typeof v === 'object') t = ERR_FR[v.value] || v.value || '#ERREUR';
+        else if (typeof v === 'number') { t = f.n === 'date' ? fmtDate(v) : numFmt(f.n, f.d).format(v).replace(/ | /g, ' '); num = true; }
+        else if (typeof v === 'boolean') t = v ? 'VRAI' : 'FAUX';
+        else t = String(v);
+        const cell = { t, num, chk: f.chk ? (v === true || v === 1) : undefined, b: f.b, i: f.i, u: f.u, w: f.w, a: { al: 'left', ac: 'center', ar: 'right' }[f.a], bg: hexBg(f.bg), fc: hexFc(f.fc) };
+        if (f.mg) { cell.cs = f.mg.c || 1; cell.rs = f.mg.r || 1; for (let rr = r; rr < r + cell.rs; rr++) for (let cc = c; cc < c + cell.cs; cc++) if (rr !== r || cc !== c) covered.add(rr + ',' + cc); }
+        row.push(cell);
+      });
+      rows.push(row);
+    }
+    const charts = [];
+    for (const ch of (sh.charts || [])) { const src = await chartPng(ch, vals, (r, c) => sh.cells[addr(r, c)]); if (src) charts.push({ src, w: ch.w }); }
+    grids.push({ name: sh.name, rows, colW: colIdx.map(c => sh.colW[c] || 104), charts });
+  }
+  return grids;
+}
+// Graphique → image PNG (couleurs écrites en dur, fond blanc)
+async function chartPng(ch, vals, cellsOf) {
+  try {
+    const W = ch.w * 2, H = ch.h * 2;
+    const box = document.createElement('div');
+    box.className = 'chart static'; box.style.cssText = `width:${ch.w}px;height:${ch.h}px;position:fixed;left:-9999px;top:0;background:#fff;` + ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'].map((c, k) => `--s${k + 1}:${c}`).join(';') + ';--ch-bg:#fff';
+    box.innerHTML = chartHTML(ch, vals, cellsOf);
+    document.body.appendChild(box);
+    const svg = box.querySelector('svg');
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+    // titre et légende (HTML) dessinés à la main
+    g.scale(2, 2);
+    const B = box.getBoundingClientRect(), rel = el => { const r = el.getBoundingClientRect(); return { x: r.left - B.left, y: r.top - B.top, w: r.width, h: r.height }; };
+    const tt = box.querySelector('.ch-title');
+    if (tt) { const r = rel(tt); g.font = '600 14px Arial, sans-serif'; g.fillStyle = '#1E1814'; g.textBaseline = 'middle'; g.fillText(ch.title, r.x, r.y + r.h / 2); }
+    box.querySelectorAll('.ch-leg span').forEach(sp => {
+      const i = sp.querySelector('i'), ri = rel(i), r = rel(sp);
+      g.fillStyle = getComputedStyle(i).backgroundColor; g.fillRect(ri.x, ri.y, ri.w, ri.h);
+      g.font = '12px Arial, sans-serif'; g.fillStyle = '#6B5F56'; g.textBaseline = 'middle'; g.fillText(sp.textContent, ri.x + ri.w + 5, r.y + r.h / 2);
+    });
+    if (svg) {
+      // couleurs et polices calculées écrites en attributs (le SVG isolé ne voit plus les variables CSS)
+      const cl = svg.cloneNode(true), src = [svg, ...svg.querySelectorAll('*')], dst = [cl, ...cl.querySelectorAll('*')];
+      src.forEach((el, k) => {
+        const cs = getComputedStyle(el), d = dst[k];
+        if (el.tagName === 'text') { d.setAttribute('fill', /ch-tot/.test(el.getAttribute('class')) ? '#1E1814' : '#6B5F56'); d.setAttribute('font-family', 'Arial, sans-serif'); d.setAttribute('font-size', cs.fontSize); d.setAttribute('font-weight', cs.fontWeight); return; }
+        if (cs.fill && cs.fill !== 'none') d.setAttribute('fill', cs.fill); else if (cs.fill === 'none') d.setAttribute('fill', 'none');
+        if (cs.stroke && cs.stroke !== 'none') { d.setAttribute('stroke', /ch-grid/.test(el.getAttribute('class')) ? '#E5E0D8' : /ch-base/.test(el.getAttribute('class')) ? '#C5B8A8' : cs.stroke); d.setAttribute('stroke-width', cs.strokeWidth); }
+        d.removeAttribute('class'); d.removeAttribute('style');
+      });
+      cl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      const bb = svg.getBoundingClientRect();
+      cl.setAttribute('width', bb.width); cl.setAttribute('height', bb.height);
+      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(cl)], { type: 'image/svg+xml' }));
+      const im = new Image(); await new Promise((res, rej) => { im.onload = res; im.onerror = rej; im.src = url; });
+      g.drawImage(im, bb.left - B.left, bb.top - B.top, bb.width, bb.height);
+      URL.revokeObjectURL(url);
+    }
+    box.remove();
+    return c.toDataURL('image/png');
+  } catch { return null; }
+}
+// Fichier Excel / ODS / CSV (sans l'ouvrir dans Grimoire) → grilles, avec les valeurs affichées par Excel
+async function sheetFileGrids(f) {
+  await loadScript(LIB.xlsx);
+  const X = window.XLSX, ext = (f.name.split('.').pop() || '').toLowerCase();
+  const wb = ext === 'csv' ? X.read(await f.text(), { type: 'string', FS: guessSep(await f.text()) }) : X.read(await f.arrayBuffer(), { cellStyles: true, cellNF: true });
+  let styles = {}, chartsOf = {};
+  if (ext === 'xlsx') { try { const ex = await xlsxReadExtras(await f.arrayBuffer(), wb.SheetNames); Object.entries(ex).forEach(([k, v]) => { styles[k] = v.fmt || {}; chartsOf[k] = v.charts || []; }); } catch {} }
+  const grids = [];
+  for (const name of wb.SheetNames.slice(0, 20)) {
+    const ws = wb.Sheets[name], ref = X.utils.decode_range(ws['!ref'] || 'A1');
+    const maxR = Math.min(ref.e.r, 1999), maxC = Math.min(ref.e.c, 51);
+    const hidC = new Set(), hidR = new Set();
+    (ws['!cols'] || []).forEach((cw, i) => { if (cw && cw.hidden) hidC.add(i); });
+    (ws['!rows'] || []).forEach((rw, i) => { if (rw && rw.hidden) hidR.add(i); });
+    const covered = new Set(), mg = {};
+    (ws['!merges'] || []).forEach(m => { mg[m.s.r + ',' + m.s.c] = m; for (let r = m.s.r; r <= m.e.r; r++) for (let c = m.s.c; c <= m.e.c; c++) if (r !== m.s.r || c !== m.s.c) covered.add(r + ',' + c); });
+    const colIdx = []; for (let c = 0; c <= maxC; c++) if (!hidC.has(c)) colIdx.push(c);
+    const st = styles[name] || {};
+    const rows = [];
+    for (let r = 0; r <= maxR; r++) {
+      if (hidR.has(r)) continue;
+      rows.push(colIdx.map(c => {
+        if (covered.has(r + ',' + c)) return { skip: true };
+        const a = X.utils.encode_cell({ r, c }), cl = ws[a], s = st[a] || {};
+        // texte tel qu'affiché, remis à la française (1,234.5 → 1 234,5 ; TRUE → VRAI)
+        const t = !cl || cl.v == null ? '' : cl.t === 'b' ? (cl.v ? 'VRAI' : 'FAUX') : cl.t === 'e' ? (ERR_FR[cl.w] || cl.w || '#ERREUR') : cl.w == null ? String(cl.v) : cl.t === 'n' && !/[a-z]{3}/i.test(cl.w) ? String(cl.w).replace(/[,.]/g, m => m === ',' ? '\u00a0' : ',') : String(cl.w);
+        const cell = { t, num: !!cl && cl.t === 'n', b: s.b, i: s.i, u: s.u, w: s.w, a: { al: 'left', ac: 'center', ar: 'right' }[s.a], bg: s.bg && XL_RGB[s.bg] ? '#' + XL_RGB[s.bg][1] : undefined, fc: s.fc && XL_RGB[s.fc] ? '#' + XL_RGB[s.fc][0] : undefined };
+        const m = mg[r + ',' + c]; if (m) { cell.cs = m.e.c - m.s.c + 1; cell.rs = m.e.r - m.s.r + 1; }
+        return cell;
+      }));
+    }
+    // dernières lignes vides retirées
+    while (rows.length && rows[rows.length - 1].every(x => !x || x.skip || !x.t)) rows.pop();
+    const colW = colIdx.map(c => { const cw = (ws['!cols'] || [])[c]; return cw && cw.wpx ? cw.wpx : cw && cw.wch ? cw.wch * 7.5 : 90; });
+    const charts = [];
+    if ((chartsOf[name] || []).length) {
+      const vals = [];
+      for (let r = 0; r <= maxR; r++) { vals[r] = []; for (let c = 0; c <= maxC; c++) { const cl = ws[X.utils.encode_cell({ r, c })]; vals[r][c] = cl ? cl.v : null; } }
+      for (const ch of chartsOf[name]) { const src = await chartPng(ch, vals, (r, c) => { const cl = ws[X.utils.encode_cell({ r, c })]; return cl ? { v: cl.v } : null; }); if (src) charts.push({ src, w: ch.w }); }
+    }
+    grids.push({ name, rows, colW, charts });
+  }
+  return grids;
+}
+// Fichier quelconque → octets PDF (null si format non pris en charge)
+async function fileToPdfBytes(f) {
+  const ext = (f.name.split('.').pop() || '').toLowerCase(), title = f.name.replace(/\.[^.]+$/, '');
+  if (ext === 'docx') {
+    droppedImages = 0;
+    let raw, page;
+    try { ({ html: raw, page } = await docxToHtml(await f.arrayBuffer())); }
+    catch { await loadScript(LIB.mammoth); raw = (await window.mammoth.convertToHtml({ arrayBuffer: await f.arrayBuffer() })).value; }
+    const box = document.createElement('div'); box.innerHTML = restoreChecklists(sanitize(raw));
+    return htmlToPdfBytes(attachFloats(box).innerHTML, page || {}, title);
+  }
+  if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) return gridsToPdfBytes(await sheetFileGrids(f), title);
+  if (ext === 'txt' || ext === 'md') {
+    const text = await f.text();
+    const html = text.split(/\n{2,}/).map(p => { const t = p.trim(); const h = /^(#{1,3})\s+(.*)$/.exec(t); return h ? `<h${h[1].length}>${esc(h[2])}</h${h[1].length}>` : `<p>${esc(t).replace(/\n/g, '<br>')}</p>`; }).join('');
+    return htmlToPdfBytes(html, {}, title);
+  }
+  return null;
+}
+// Export PDF direct des documents et classeurs Grimoire
+async function exportDocPdf() {
+  try {
+    toast('Création du PDF…');
+    const cur = state.cur;
+    const bytes = cur.type === 'feuille' ? (commitEdit(false), await gridsToPdfBytes(await sheetGrids(cur), cur.title)) : await htmlToPdfBytes(cur.html, pageOf(), cur.title);
+    await saveFile(safeName(cur.title) + '.pdf', bytes);
+  } catch (e) { console.warn(e); toast('Création du PDF impossible.', true); }
+}
 
 /* =========================================================
    Import
@@ -6182,14 +6526,14 @@ function openExport() {
     ? `<button data-x="pdf">${ic('pdf')}PDF modifié (.pdf)<small>Ctrl E</small></button><button data-x="pdfdoc">${ic('doc')}Convertir en document Grimoire</button><button data-x="print">${ic('printer')}Imprimer<small>Ctrl P</small></button>`
       + `<hr><button data-x="dup">${ic('copy')}Dupliquer</button><button data-x="del" class="danger">${ic('trash')}<span>Supprimer le document</span></button>`
     : (t === 'texte'
-    ? `<button data-x="docx">${ic('doc')}Word (.docx)<small>Ctrl E</small></button><button data-x="md">${ic('type')}Markdown (.md)</button><button data-x="html">${ic('download')}Page web (.html)</button>`
-    : `<button data-x="xlsx">${ic('grid')}Excel (.xlsx)<small>Ctrl E</small></button><button data-x="csv">${ic('download')}CSV pour Excel (.csv)</button>`)
-    + `<button data-x="print">${ic('printer')}Imprimer ou PDF<small>Ctrl P</small></button>`
+    ? `<button data-x="docx">${ic('doc')}Word (.docx)<small>Ctrl E</small></button><button data-x="md">${ic('type')}Markdown (.md)</button><button data-x="html">${ic('download')}Page web (.html)</button><button data-x="docpdf">${ic('pdf')}PDF (.pdf)</button>`
+    : `<button data-x="xlsx">${ic('grid')}Excel (.xlsx)<small>Ctrl E</small></button><button data-x="csv">${ic('download')}CSV pour Excel (.csv)</button><button data-x="docpdf">${ic('pdf')}PDF (.pdf)</button>`)
+    + `<button data-x="print">${ic('printer')}Imprimer<small>Ctrl P</small></button>`
     + `<hr><button data-x="dup">${ic('copy')}Dupliquer</button><button data-x="del" class="danger">${ic('trash')}<span>Supprimer le document</span></button>`;
   p.hidden = false;
 }
 function closeExport() { $('#exportPop').hidden = true; }
-const runExport = k => ({ docx: exportDocx, md: exportMd, html: exportHtml, xlsx: exportXlsx, csv: exportCsv, print: printDoc, pdf: exportPdfFile, pdfdoc: pdfToDoc }[k] || (() => {}))();
+const runExport = k => ({ docx: exportDocx, md: exportMd, html: exportHtml, xlsx: exportXlsx, csv: exportCsv, print: printDoc, pdf: exportPdfFile, pdfdoc: pdfToDoc, docpdf: exportDocPdf }[k] || (() => {}))();
 $('#exportBtn').addEventListener('click', e => { e.stopPropagation(); $('#exportPop').hidden ? openExport() : closeExport(); });
 $('#exportPop').addEventListener('click', async e => {
   e.stopPropagation();
@@ -6430,6 +6774,7 @@ function commands() {
     add('Affichage', 'Afficher ou masquer le plan', 'outline', W.outline);
     if (Plume.available) { add('Plume', 'Reformuler la sélection', 'feather', () => { openPlume(); runPlume('reformuler'); }); add('Plume', 'Corriger la sélection', 'feather', () => { openPlume(); runPlume('corriger'); }); add('Plume', 'Résumer le document', 'feather', () => { openPlume(); runPlume('resumer'); }); add('Plume', 'Rédiger avec Plume…', 'feather', () => { openPlume(); setTimeout(() => $('#plumeAsk').focus(), 30); }); }
     add('Exporter', 'Exporter en Word (.docx)', 'download', () => runExport('docx').catch(() => toast('Export impossible.', true)), 'Ctrl E');
+    add('Exporter', 'Exporter en PDF (.pdf)', 'pdf', () => runExport('docpdf'));
     add('Exporter', 'Exporter en Markdown (.md)', 'download', () => runExport('md'));
   }
   if (v === 'sheet') {
@@ -6484,6 +6829,7 @@ function commands() {
     add('Structure', 'Afficher les colonnes masquées', 'eye', () => setHidden('c', false));
     if (Plume.available) { add('Plume', 'Écrire une formule avec Plume…', 'feather', () => { openPlume(); setTimeout(() => $('#plumeAsk').focus(), 30); }); add('Plume', 'Vérifier le classeur', 'feather', () => { openPlume(); runPlume('verifier'); }); }
     add('Exporter', 'Exporter en Excel (.xlsx)', 'download', () => runExport('xlsx').catch(() => toast('Export impossible.', true)), 'Ctrl E');
+    add('Exporter', 'Exporter en PDF (.pdf)', 'pdf', () => runExport('docpdf'));
     add('Exporter', 'Exporter en CSV', 'download', () => runExport('csv'));
   }
   if (v !== 'home') {
