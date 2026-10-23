@@ -22,7 +22,8 @@
       "accept": {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-        "text/csv": [".csv"]
+        "text/csv": [".csv"],
+        "application/pdf": [".pdf"]
       }
     }
   ]

@@ -62,7 +62,8 @@
           <div class="create">
             <button class="ccard" data-new="texte"><span class="thumb t-doc"></span><div><strong>Document</strong><span>Lettre, notes, récit, liste</span></div></button>
             <button class="ccard" data-new="feuille"><span class="thumb t-grid"></span><div><strong>Classeur</strong><span>Formules à la française : SOMME, SI…</span></div></button>
-            <button class="ccard" id="importCard"><span class="thumb t-up" data-ic="upload"></span><div><strong>Importer</strong><span>Word (.docx), Excel (.xlsx), CSV</span></div></button>
+            <button class="ccard" id="pdfCard"><span class="thumb t-pdf" data-ic="pdf"></span><div><strong>PDF</strong><span>Lire, remplir, annoter, fusionner, diviser</span></div></button>
+            <button class="ccard" id="importCard"><span class="thumb t-up" data-ic="upload"></span><div><strong>Importer</strong><span>Word (.docx), Excel (.xlsx), CSV, PDF</span></div></button>
           </div>
           <div class="tpls">
             <button class="tcard" data-tpl="budget"><span class="eyebrow">Modèle · classeur</span><b>Budget du mois</b><small>Prévu, réel et écarts, avec totaux et taux d'épargne calculés.</small></button>
@@ -78,6 +79,7 @@
               <button class="chip" data-f="tous" aria-pressed="true">Tous<span class="n" id="nAll"></span></button>
               <button class="chip" data-f="texte" aria-pressed="false">Documents<span class="n" id="nTxt"></span></button>
               <button class="chip" data-f="feuille" aria-pressed="false">Classeurs<span class="n" id="nSh"></span></button>
+              <button class="chip" data-f="pdf" aria-pressed="false">PDF<span class="n" id="nPdf"></span></button>
             </div>
           </div>
           <div class="docs" id="docs"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
@@ -176,6 +178,63 @@
         <div class="set-acts"><button class="pbtn" type="submit">Appliquer</button><button class="pbtn ghost" type="button" id="lpDel">Retirer le lien</button></div>
       </form>
       <div class="mini-pop page-pop" id="pagePop" hidden></div>
+    </section>
+
+
+    <!-- PDF -->
+    <section class="view pdfv" id="pdfv" hidden data-mode="read">
+      <div class="toolbar" role="toolbar" aria-label="Outils PDF">
+        <div class="tb-scroll">
+          <div class="seg pdf-modes" role="group" aria-label="Mode"><button data-pm="read" aria-pressed="true">Lire</button><button data-pm="annot">Annoter</button><button data-pm="pages">Pages</button><button data-pm="form" hidden title="Ce PDF contient un formulaire">Remplir</button></div>
+          <span class="tb-sep"></span>
+          <button class="tb" data-pa="undo" title="Annuler (Ctrl+Z)" data-ic="undo"></button>
+          <button class="tb" data-pa="redo" title="Rétablir (Ctrl+Y)" data-ic="redo"></button>
+          <span class="tb-sep"></span>
+          <span class="tb-grp" id="pdfReadTools">
+            <button class="tb txt" data-pz="out" title="Réduire" aria-label="Réduire">−</button>
+            <button class="tb lbl" id="pdfZoom" data-pz="fit" title="Ajuster à la largeur">100 %</button>
+            <button class="tb txt" data-pz="in" title="Agrandir" aria-label="Agrandir">+</button>
+            <button class="tb" data-pa="find" title="Rechercher (Ctrl+F)" data-ic="search"></button>
+          </span>
+          <span class="tb-grp" id="pdfAnnTools" hidden>
+            <span class="tb-sep"></span>
+            <button class="tb" data-pt="select" title="Sélectionner, déplacer, redimensionner" data-ic="cursor"></button>
+            <button class="tb" data-pt="text" title="Ajouter du texte" data-ic="type"></button>
+            <button class="tb" data-pt="hl" title="Surligner" data-ic="highlighter"></button>
+            <button class="tb" data-pt="ink" title="Dessiner à main levée" data-ic="pen"></button>
+            <button class="tb" data-pt="rect" title="Encadrer" data-ic="square"></button>
+            <button class="tb" data-pt="white" title="Cacher (bloc blanc) : pour remplacer un texte, cachez-le puis écrivez par-dessus" data-ic="whiteout"></button>
+            <button class="tb" data-pt="sign" title="Signature" data-ic="sign"></button>
+            <button class="tb" data-pt="image" title="Image" data-ic="image"></button>
+            <span class="tb-sep"></span>
+            <span class="pdf-opts" id="pdfOpts"></span>
+          </span>
+          <span class="tb-grp" id="pdfPageTools" hidden>
+            <button class="tb" data-pg="all" title="Tout sélectionner (Ctrl+A)" data-ic="selAll"></button>
+            <button class="tb" data-pg="rotL" data-need="1" title="Pivoter à gauche" data-ic="rotL"></button>
+            <button class="tb" data-pg="rotR" data-need="1" title="Pivoter à droite" data-ic="rotR"></button>
+            <button class="tb" data-pg="dup" data-need="1" title="Dupliquer" data-ic="copy"></button>
+            <button class="tb" data-pg="move" data-need="1" title="Déplacer à une position" data-ic="move"></button>
+            <button class="tb" data-pg="del" data-need="1" title="Supprimer (Suppr)" data-ic="trash"></button>
+            <span class="tb-sep"></span>
+            <button class="tb lbl" data-pg="extract" data-need="1" title="Créer un PDF avec les pages sélectionnées" data-ic="extract"><span>Extraire</span></button>
+            <button class="tb lbl" data-pg="split" title="Diviser en plusieurs PDF" data-ic="scissors"><span>Diviser</span></button>
+            <button class="tb lbl" data-pg="insert" title="Ajouter un PDF ou des photos après la sélection" data-ic="filePlus"><span>Ajouter</span></button>
+            <button class="tb" data-pg="blank" title="Insérer une page blanche" data-ic="pagePlus"></button>
+            <span class="pdf-selinfo" id="pdfSelInfo"></span>
+          </span>
+          <span class="spacer"></span>
+          <button class="tb lbl pdf-pg" id="pdfPg" title="Aller à la page">1 / 1</button>
+        </div>
+      </div>
+      <div class="findbar sfind" id="pdfFind" hidden role="search">
+        <div class="sf-row"><input id="pfQ" placeholder="Rechercher dans le PDF" autocomplete="off" aria-label="Rechercher dans le PDF"><span class="sf-count" id="pfCount"></span>
+          <button class="xbtn" data-pf="prev" title="Précédent (Maj+Entrée)" aria-label="Précédent">&#8593;</button><button class="xbtn" data-pf="next" title="Suivant (Entrée)" aria-label="Suivant">&#8595;</button><button class="xbtn" data-pf="close" title="Fermer" aria-label="Fermer">×</button></div>
+      </div>
+      <div class="pdf-scroll" id="pdfScroll"><div class="pdf-pages" id="pdfPages"></div></div>
+      <div class="fpop sdlg" id="pdfDlg" hidden role="dialog"></div>
+      <input type="file" id="pdfIns" class="sr" accept=".pdf,application/pdf,image/*" multiple tabindex="-1" aria-hidden="true">
+      <input type="file" id="pdfImg" class="sr" accept="image/*" tabindex="-1" aria-hidden="true">
     </section>
 
     <!-- CLASSEUR -->
@@ -315,7 +374,8 @@
     <div class="pal-foot">↑ ↓ pour naviguer · Entrée pour valider · Échap pour fermer</div>
   </div>
 </div>
-<input type="file" id="fileIn" class="sr" accept=".docx,.xlsx,.xls,.ods,.csv,.txt,.md" tabindex="-1" aria-hidden="true">
+<input type="file" id="pdfIn" class="sr" accept=".pdf,application/pdf,image/*" multiple tabindex="-1" aria-hidden="true">
+<input type="file" id="fileIn" class="sr" accept=".docx,.xlsx,.xls,.ods,.csv,.txt,.md,.pdf" tabindex="-1" aria-hidden="true">
 <input type="file" id="imgIn" class="sr" accept="image/*" tabindex="-1" aria-hidden="true">
 <input type="file" id="restoreIn" class="sr" accept=".json,application/json" tabindex="-1" aria-hidden="true">
 <div class="toast" id="toast" hidden role="status"></div>
