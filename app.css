@@ -599,7 +599,7 @@ body:not(.m-phone) #sheet .tb-scroll{flex-wrap:wrap;row-gap:4px}
 .pdf-scroll{flex:1;min-height:0;overflow:auto;background:var(--bg);overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 .pdf-pages{display:flex;flex-direction:column;align-items:center;gap:14px;padding:16px 8px 40px;min-width:min-content}
 .pdf-msg{padding:60px 20px;color:var(--muted);text-align:center}
-.pp{position:relative;background:#fff;box-shadow:0 1px 3px rgba(40,25,15,.12),0 6px 20px rgba(40,25,15,.08);flex:none}
+.pp{position:relative;background:#fff center/100% 100% no-repeat;box-shadow:0 1px 3px rgba(40,25,15,.12),0 6px 20px rgba(40,25,15,.08);flex:none}
 .pp canvas{position:absolute;left:0;top:0}
 .pp-n{position:absolute;right:-2px;bottom:-20px;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
 .pa{position:absolute;inset:0;z-index:3}
@@ -607,7 +607,7 @@ body:not(.m-phone) #sheet .tb-scroll{flex-wrap:wrap;row-gap:4px}
 .pdfv[data-mode="annot"] .textLayer{pointer-events:none}
 .pdfv[data-mode="annot"][data-tool="text"] .pa{cursor:text}
 .pdfv[data-mode="annot"]:is([data-tool="hl"],[data-tool="rect"],[data-tool="white"],[data-tool="ink"]) .pa{cursor:crosshair;touch-action:none}
-.textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2}
+.textLayer{position:absolute;text-align:initial;left:0;top:0;overflow:clip;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2}
 .textLayer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0% 0%}
 .textLayer span.markedContent{top:0;height:0}
 .textLayer ::selection{background:rgba(201,128,79,.35);color:transparent}
@@ -659,3 +659,7 @@ body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-heigh
 @media (max-width:560px){.create{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .pg-cv{width:100%;height:100%;display:block;object-fit:contain;opacity:0;transition:opacity .15s;pointer-events:none}
 .pg-cv.ok{opacity:1}
+.textLayer[data-main-rotation="90"]{transform:rotate(90deg) translateY(-100%)}
+.textLayer[data-main-rotation="180"]{transform:rotate(180deg) translate(-100%,-100%)}
+.textLayer[data-main-rotation="270"]{transform:rotate(270deg) translateX(-100%)}
+.textLayer > :not(.markedContent),.textLayer .markedContent span:not(.markedContent){z-index:1}

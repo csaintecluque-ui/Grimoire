@@ -12,12 +12,12 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.6.2';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
   jszip: 'lib/jszip.min.js',
-  pdfjs: 'lib/pdfjs/pdf.min.js', pdfWorker: 'lib/pdfjs/pdf.worker.min.js', pdflib: 'lib/pdf-lib.min.js',
+  pdfjs: 'lib/pdfjs/pdf.min.mjs', pdfWorker: 'lib/pdfjs/pdf.worker.min.mjs', pdflib: 'lib/pdf-lib.min.js',
   mammoth: 'lib/mammoth.browser.min.js'
 };
 const loaded = {};
@@ -3845,16 +3845,19 @@ const HL_COLORS2 = [['Jaune', '#FFE066'], ['Vert', '#A8E6A1'], ['Bleu', '#9FD3FF
 const PT = 96 / 72;
 const b64ToBytes = b64 => { const s = atob(b64); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
 const bytesToB64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+let pdfjsMod = null;
 async function ensurePdfJs() {
-  await loadScript(LIB.pdfjs);
-  const L = window.pdfjsLib;
-  if (L && !L.GlobalWorkerOptions.workerSrc) L.GlobalWorkerOptions.workerSrc = LIB.pdfWorker;
+  if (!pdfjsMod) pdfjsMod = import(new URL(LIB.pdfjs, location.href).href).catch(e => { pdfjsMod = null; throw e; });
+  const L = await pdfjsMod;
+  if (!L.GlobalWorkerOptions.workerSrc) L.GlobalWorkerOptions.workerSrc = new URL(LIB.pdfWorker, location.href).href;
+  window.pdfjsLib = L;
   return L;
 }
 async function ensurePdfLib() { await loadScript(LIB.pdflib); return window.PDFLib; }
 async function pdfjsOpen(bytes) {
   const L = await ensurePdfJs();
-  const task = L.getDocument({ data: bytes.slice(0), cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: 'lib/pdfjs/standard_fonts/', isEvalSupported: false });
+  // isImageDecoderSupported : les photos (JPEG) sont décodées par le navigateur lui-même, bien plus vite
+  const task = L.getDocument({ data: bytes.slice(0), cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: 'lib/pdfjs/standard_fonts/', isEvalSupported: false, isImageDecoderSupported: true });
   task.onPassword = (cb, reason) => {
     const p = window.prompt(reason === 2 ? 'Mot de passe incorrect. Réessayez :' : 'Ce PDF est protégé par un mot de passe :');
     if (p == null) task.destroy(); else cb(p);
@@ -3942,7 +3945,8 @@ function rebuildPages() {
 const vpOf = (P, scale) => P.page.getViewport({ scale, rotation: P.rot });
 function pdfFitScale() {
   const wrap = $('#pdfScroll'), w = Math.max(...PDFV.pages.map(P => P.vp1.width), 100);
-  return Math.max(0.3, Math.min(3, (wrap.clientWidth - (isPhone() ? 16 : 48)) / w));
+  // sur un grand écran, la page ne s'étale pas au-delà d'environ 120 % (lisible, et bien plus rapide à dessiner)
+  return Math.max(0.3, Math.min(isPhone() ? 3 : 1.6, (wrap.clientWidth - (isPhone() ? 16 : 48)) / w));
 }
 function renderPdf(keepPage) {
   const box = $('#pdfPages');
@@ -3965,7 +3969,7 @@ function releasePdfPage(el) {
   if (el._task) try { el._task.cancel(); } catch {}
   const cv = el.querySelector('canvas'); cv.width = 0; cv.height = 0;
   const tl = el.querySelector('.textLayer'); tl.innerHTML = '';
-  el._done = null;
+  el._done = null; el._tl = null; el._drawn = null;
 }
 // file de rendu : une page à la fois, les plus proches d'abord
 const RQ = { list: [], busy: false };
@@ -3973,20 +3977,27 @@ function renderPdfPage(i) {
   const el = $(`#pdfPages .pp[data-p="${i}"]`); if (!el) return Promise.resolve();
   const key = PDFV.scale + '|' + PDFV.gen + '|' + PDFV.mode + '|' + PDFV.pages[i].s + '|' + PDFV.pages[i].rot;
   if (el._done === key) return el._prom || Promise.resolve();
-  el._done = key;
+  el._done = key; el._tl = null;
+  pagePlaceholder(i, el);
   el._prom = new Promise(res => { RQ.list.push({ i, el, key, res }); pumpRender(); });
   return el._prom;
 }
+function pageVisible(el) { const sc = $('#pdfScroll'); return el.offsetTop < sc.scrollTop + sc.clientHeight && el.offsetTop + el.offsetHeight > sc.scrollTop; }
+// Ordre de travail : pages visibles, puis leur texte sélectionnable, puis les pages voisines, puis le reste du texte.
 async function pumpRender() {
   if (RQ.busy) return; RQ.busy = true;
-  while (RQ.list.length) {
-    // la page la plus proche de la page affichée passe en premier
-    const here = pdfCurrentPage();
-    RQ.list.sort((a, b) => Math.abs(a.i - here) - Math.abs(b.i - here));
-    const job = RQ.list.shift();
-    if (job.el._done !== job.key || !job.el.isConnected) { job.res(); continue; }
-    try { await drawPdfPage(job.i, job.el); } catch {}
-    job.res();
+  for (;;) {
+    RQ.list = RQ.list.filter(j => { if (j.el._done !== j.key || !j.el.isConnected) { j.res(); return false; } return true; });
+    for (let k = TLQ.length - 1; k >= 0; k--) { const j = TLQ[k]; if (j.el._done !== j.key || !j.el.isConnected || j.el._tl === j.key) TLQ.splice(k, 1); }
+    if (!RQ.list.length && !TLQ.length) break;
+    const here = pdfCurrentPage(), near = (a, b) => Math.abs(a.i - here) - Math.abs(b.i - here);
+    RQ.list.sort(near); TLQ.sort(near);
+    let job = RQ.list.find(j => pageVisible(j.el)), kind = 'page';
+    if (!job) { job = TLQ.find(j => pageVisible(j.el)); kind = 'text'; }
+    if (!job && RQ.list.length) { job = RQ.list[0]; kind = 'page'; }
+    if (!job) { job = TLQ[0]; kind = 'text'; }
+    if (kind === 'page') { RQ.list.splice(RQ.list.indexOf(job), 1); try { await drawPdfPage(job.i, job.el); } catch {} job.res(); }
+    else { TLQ.splice(TLQ.indexOf(job), 1); await drawTextLayer(job); }
   }
   RQ.busy = false;
 }
@@ -3995,7 +4006,7 @@ async function drawPdfPage(i, el) {
   const vp = vpOf(P, S);
   const cv = el.querySelector('canvas');
   // limite de taille du dessin (mémoire des téléphones)
-  const k = Math.min(dpr, Math.sqrt(9e6 / (vp.width * vp.height)));
+  const k = Math.min(dpr, Math.sqrt(6e6 / (vp.width * vp.height)));
   cv.width = Math.floor(vp.width * k); cv.height = Math.floor(vp.height * k);
   cv.style.width = vp.width + 'px'; cv.style.height = vp.height + 'px';
   try {
@@ -4005,16 +4016,27 @@ async function drawPdfPage(i, el) {
   // la page affichée sert aussi de miniature
   const tk = P.s + ':' + P.rot;
   if (!PDFV.thumbC.has(tk)) { PDFV.thumbC.set(tk, null); canvasToThumb(shrinkCanvas(cv)).then(u => { if (u) { PDFV.thumbC.set(tk, u); PDFV.pages.forEach((Q, j) => { if (Q.s === P.s && Q.rot === P.rot) paintThumb(j); }); } else PDFV.thumbC.delete(tk); }); }
-  const tl = el.querySelector('.textLayer');
-  tl.innerHTML = ''; tl.style.setProperty('--scale-factor', S);
-  if (PDFV.mode === 'read') {
-    try {
-      const t = window.pdfjsLib.renderTextLayer({ textContentSource: P.page.streamTextContent(), container: tl, viewport: vp, textDivs: [] });
-      await t.promise;
-      if (PF.q) paintPdfFind(i);
-    } catch {}
-  }
+  el.style.backgroundImage = '';
   drawFields(i);
+  // le calque de texte (sélection, recherche) est préparé quand plus aucune page n'attend d'être dessinée
+  el._drawn = el._done;
+  if (PDFV.mode === 'read') TLQ.push({ i, el, key: el._done, vp, S });
+}
+const TLQ = [];
+async function drawTextLayer(job) {
+  job.el._tl = job.key;
+  const tl = job.el.querySelector('.textLayer');
+  tl.innerHTML = ''; tl.style.setProperty('--scale-factor', job.S);
+  try {
+    tl.dataset.mainRotation = String(PDFV.pages[job.i].rot);
+    await new window.pdfjsLib.TextLayer({ textContentSource: PDFV.pages[job.i].page.streamTextContent(), container: tl, viewport: job.vp }).render();
+    if (PF.q) paintPdfFind(job.i);
+  } catch {}
+}
+// aperçu flou immédiat (miniature) en attendant le dessin net de la page
+function pagePlaceholder(i, el) {
+  const P = PDFV.pages[i], u = P && PDFV.thumbC.get(P.s + ':' + P.rot);
+  if (u && !el.style.backgroundImage) el.style.backgroundImage = `url("${u}")`;
 }
 const THUMB_W = () => Math.round(130 * Math.min(window.devicePixelRatio || 1, 2));
 // miniature compressée en JPEG (peu de mémoire, même pour des centaines de pages)
