@@ -657,3 +657,5 @@ body.m-phone .pc-sw{width:28px;height:28px}
 body.m-phone .an-rz{width:22px;height:22px;right:-11px;bottom:-11px}
 body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-height:80%}
 @media (max-width:560px){.create{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.pg-cv{width:100%;height:100%;display:block;object-fit:contain;opacity:0;transition:opacity .15s;pointer-events:none}
+.pg-cv.ok{opacity:1}

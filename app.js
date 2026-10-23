@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -178,8 +178,12 @@ const Store = {
   tx(m) { return this.db.transaction('docs', m).objectStore('docs'); },
   async open() {
     this.db = await new Promise((res, rej) => {
-      const r = indexedDB.open('grimoire', 1);
-      r.onupgradeneeded = () => r.result.createObjectStore('docs', { keyPath: 'id' });
+      const r = indexedDB.open('grimoire', 2);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains('docs')) db.createObjectStore('docs', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'id' });
+      };
       r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
     });
   },
@@ -210,7 +214,22 @@ const Store = {
     if (this.mode === 'idb') await this.req(this.tx('readwrite').put(clone(doc)));
     else this.writeLocal();
   },
+  // Fichiers lourds (PDF) : rangés à part, pour que les documents restent légers à enregistrer
+  async putBlob(id, bytes) {
+    if (this.mode === 'idb') await this.req(this.db.transaction('blobs', 'readwrite').objectStore('blobs').put({ id, bytes }));
+    else if (!ls.set('grim.blob.' + id, bytesToB64(bytes))) throw { code: 'local_full' };
+  },
+  async getBlob(id) {
+    if (!id) return null;
+    if (this.mode === 'idb') { const r = await this.req(this.db.transaction('blobs', 'readonly').objectStore('blobs').get(id)); return r ? new Uint8Array(r.bytes) : null; }
+    const b = ls.get('grim.blob.' + id, null); return b ? b64ToBytes(b) : null;
+  },
+  async delBlob(id) {
+    if (!id) return;
+    try { if (this.mode === 'idb') await this.req(this.db.transaction('blobs', 'readwrite').objectStore('blobs').delete(id)); else localStorage.removeItem('grim.blob.' + id); } catch {}
+  },
   async remove(id) {
+    const d = state.docs.get(id); if (d && d.pdfId) await this.delBlob(d.pdfId);
     state.docs.delete(id);
     if (this.mode === 'idb') await this.req(this.tx('readwrite').delete(id));
     else this.writeLocal();
@@ -336,7 +355,7 @@ function show(view) {
 async function goHome() {
   if (state.view === 'sheet') commitEdit(false);
   if (saveTimer || state.cur && !state.cur._saved) await flushSave();
-  if (state.view === 'pdfv') { closePdfFind(); if (PDFV.doc) { try { PDFV.doc.destroy(); } catch {} PDFV.doc = null; PDFV.pages = []; PDFV.gen++; } }
+  if (state.view === 'pdfv') { closePdfFind(); if (PDFV.src) { try { PDFV.src.destroy(); } catch {} } PDFV.src = PDFV.doc = null; PDFV.pages = []; PDFV.srcPages = []; PDFV.bytes = null; PDFV.thumbC.forEach(u => { if (u) URL.revokeObjectURL(u); }); PDFV.thumbC = new Map(); PDFV.hist = []; PDFV.fut = []; PDFV.gen++; RQ.list = []; TQ.hi = []; TQ.lo = []; }
   state.cur = null; show('home'); renderHome();
 }
 function openDoc(id) {
@@ -3820,7 +3839,7 @@ window.addEventListener('resize', debounce(() => { if (state.view === 'sheet') {
 /* =========================================================
    PDF : lire, remplir, annoter, organiser les pages, fusionner, diviser
    ========================================================= */
-const PDFV = { doc: null, pages: [], scale: 1, fit: true, mode: 'read', tool: 'select', sel: null, hist: [], fut: [], thumbs: {}, texts: null, obs: null, pageSel: new Set(), fields: [], gen: 0, color: { text: '#1E1814', hl: '#FFE066', rect: '#C0392B', ink: '#1F5FAD' }, size: 14, lw: 2 };
+const PDFV = { doc: null, src: null, srcPages: [], bytes: null, thumbC: new Map(), srcText: [], pages: [], scale: 1, fit: true, mode: 'read', tool: 'select', sel: null, hist: [], fut: [], thumbs: {}, texts: null, obs: null, pageSel: new Set(), fields: [], gen: 0, color: { text: '#1E1814', hl: '#FFE066', rect: '#C0392B', ink: '#1F5FAD' }, size: 14, lw: 2 };
 const PDF_COLORS = [['Noir', '#1E1814'], ['Bleu', '#1F5FAD'], ['Rouge', '#C0392B'], ['Vert', '#2F7D46'], ['Orange', '#E67E22'], ['Violet', '#7D3C98']];
 const HL_COLORS2 = [['Jaune', '#FFE066'], ['Vert', '#A8E6A1'], ['Bleu', '#9FD3FF'], ['Rose', '#FFB3C7'], ['Orange', '#FFC78A']];
 const PT = 96 / 72;
@@ -3861,50 +3880,72 @@ async function pdfAllText(doc, max = 60) {
   return out.join('\n').replace(/[ \t]+/g, ' ').slice(0, 30000);
 }
 
-/* --- ouverture */
+/* --- ouverture
+   Le fichier d'origine (cur.pdfId, dans le magasin « blobs ») ne change pas quand on réorganise les pages :
+   cur.order décrit les pages affichées ({ s: page source, r: rotation ajoutée }). Le PDF n'est réécrit qu'à l'export. */
 async function openPdf() {
   show('pdfv');
   const cur = state.cur;
   cur.ann ||= []; cur.form ||= {};
-  PDFV.hist = []; PDFV.fut = []; PDFV.sel = null; PDFV.pageSel = new Set(); PDFV.texts = null; PDFV.fit = true;
+  PDFV.hist = []; PDFV.fut = []; PDFV.sel = null; PDFV.pageSel = new Set(); PDFV.texts = null; PDFV.fit = true; PDFV.thumbC = new Map(); PDFV.srcText = [];
   setPdfMode('read', true);
   $('#pdfPages').innerHTML = '<div class="pdf-msg">Ouverture du PDF…</div>';
-  try { await loadPdfDoc(); }
-  catch (e) { $('#pdfPages').innerHTML = `<div class="pdf-msg">Ce PDF ne peut pas être ouvert${e && e.name === 'PasswordException' ? ' sans son mot de passe' : ''}.</div>`; return; }
+  try {
+    if (cur.pdf && !cur.pdfId) { // anciens documents : PDF rangé dans le document lui-même
+      const b = b64ToBytes(cur.pdf); cur.pdfId = uid(); await Store.putBlob(cur.pdfId, b); delete cur.pdf; await Store.save(cur);
+    }
+    const bytes = await Store.getBlob(cur.pdfId);
+    if (!bytes) throw new Error('missing');
+    if (state.cur !== cur) return;
+    PDFV.bytes = bytes;
+    await loadPdfDoc();
+  } catch (e) { $('#pdfPages').innerHTML = `<div class="pdf-msg">Ce PDF ne peut pas être ouvert${e && e.name === 'PasswordException' ? ' sans son mot de passe' : e && e.message === 'missing' ? ' : le fichier est introuvable sur cet appareil' : ''}.</div>`; return; }
   if (state.cur !== cur) return;
-  if (!cur.text) { pdfAllText(PDFV.doc).then(t => { if (state.cur === cur) { cur.text = t; cur.pagesN = PDFV.doc.numPages; scheduleSave(); } }).catch(() => {}); }
+  if (!cur.textDone) setTimeout(async () => {
+    try { const t = await pdfAllText(PDFV.src); if (state.cur === cur) { cur.text = t; cur.textDone = true; scheduleSave(); } } catch {}
+  }, 1500);
 }
 async function loadPdfDoc(keepPage) {
   const cur = state.cur, gen = ++PDFV.gen;
-  const doc = await pdfjsOpen(b64ToBytes(cur.pdf));
+  const doc = await pdfjsOpen(PDFV.bytes);
   if (gen !== PDFV.gen) { doc.destroy(); return; }
-  if (PDFV.doc) try { PDFV.doc.destroy(); } catch {}
-  PDFV.doc = doc; PDFV.texts = null; PDFV.thumbs = {};
-  PDFV.pages = [];
+  if (PDFV.src) try { PDFV.src.destroy(); } catch {}
+  PDFV.src = PDFV.doc = doc; PDFV.texts = null;
+  PDFV.srcPages = [];
   for (let i = 0; i < doc.numPages; i++) {
     const page = await doc.getPage(i + 1);
-    PDFV.pages.push({ page, rot: page.rotate, vp1: page.getViewport({ scale: 1 }), fields: [] });
+    PDFV.srcPages.push({ page, fields: [] });
   }
-  cur.pagesN = doc.numPages;
+  if (!Array.isArray(cur.order) || cur.order.some(o => !(o.s >= 0 && o.s < doc.numPages))) cur.order = PDFV.srcPages.map((_, s) => ({ s, r: 0 }));
   // champs de formulaire
-  PDFV.fields = [];
-  await Promise.all(PDFV.pages.map(async (P, i) => {
+  await Promise.all(PDFV.srcPages.map(async S => {
     try {
-      const an = await P.page.getAnnotations();
-      P.fields = an.filter(a => a.subtype === 'Widget' && a.fieldName && !a.readOnly && ['Tx', 'Btn', 'Ch'].includes(a.fieldType) && !a.pushButton);
-      P.fields.forEach(f => PDFV.fields.push({ ...f, p: i }));
+      const an = await S.page.getAnnotations();
+      S.fields = an.filter(a => a.subtype === 'Widget' && a.fieldName && !a.readOnly && ['Tx', 'Btn', 'Ch'].includes(a.fieldType) && !a.pushButton);
     } catch {}
   }));
-  $('[data-pm="form"]').hidden = !PDFV.fields.length;
+  if (gen !== PDFV.gen) return;
+  rebuildPages();
+  $('[data-pm="form"]').hidden = !PDFV.pages.some(P => P.fields.length);
   renderPdf(keepPage);
+  setTimeout(() => { if (gen === PDFV.gen) prefetchThumbs(); }, 1200);
 }
+function rebuildPages() {
+  const cur = state.cur;
+  PDFV.pages = cur.order.map(o => {
+    const S = PDFV.srcPages[o.s], rot = ((S.page.rotate + o.r) % 360 + 360) % 360;
+    return { s: o.s, page: S.page, rot, vp1: S.page.getViewport({ scale: 1, rotation: rot }), fields: S.fields };
+  });
+  cur.pagesN = PDFV.pages.length;
+  PDFV.texts = null;
+}
+const vpOf = (P, scale) => P.page.getViewport({ scale, rotation: P.rot });
 function pdfFitScale() {
   const wrap = $('#pdfScroll'), w = Math.max(...PDFV.pages.map(P => P.vp1.width), 100);
   return Math.max(0.3, Math.min(3, (wrap.clientWidth - (isPhone() ? 16 : 48)) / w));
 }
 function renderPdf(keepPage) {
   const box = $('#pdfPages');
-  const cur = state.cur;
   if (PDFV.mode === 'pages') { renderPdfGrid(); updatePdfBar(); return; }
   const top = keepPage != null ? keepPage : pdfCurrentPage();
   if (PDFV.fit) PDFV.scale = pdfFitScale();
@@ -3912,27 +3953,58 @@ function renderPdf(keepPage) {
   box.className = 'pdf-pages';
   box.innerHTML = PDFV.pages.map((P, i) => `<div class="pp" data-p="${i}" style="width:${Math.round(P.vp1.width * S)}px;height:${Math.round(P.vp1.height * S)}px"><canvas></canvas><div class="textLayer"></div><div class="pa" data-p="${i}"></div><span class="pp-n">${i + 1}</span></div>`).join('');
   if (PDFV.obs) PDFV.obs.disconnect();
-  PDFV.obs = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) renderPdfPage(+e.target.dataset.p); }), { root: $('#pdfScroll'), rootMargin: '600px 0px' });
+  // les pages proches de l'écran sont dessinées, les pages éloignées libèrent leur mémoire
+  PDFV.obs = new IntersectionObserver(es => es.forEach(e => { const i = +e.target.dataset.p; if (e.isIntersecting) renderPdfPage(i); else releasePdfPage(e.target); }), { root: $('#pdfScroll'), rootMargin: '1200px 0px' });
   $$('.pp', box).forEach(el => PDFV.obs.observe(el));
   PDFV.pages.forEach((_, i) => drawAnns(i));
   if (top > 0) { const el = box.children[top]; if (el) $('#pdfScroll').scrollTop = el.offsetTop - 8; }
   updatePdfBar();
-  void cur;
 }
-async function renderPdfPage(i) {
-  const el = $(`#pdfPages .pp[data-p="${i}"]`); if (!el || el._done === PDFV.scale + '|' + PDFV.gen + '|' + PDFV.mode) return;
-  el._done = PDFV.scale + '|' + PDFV.gen + '|' + PDFV.mode;
-  const P = PDFV.pages[i], S = PDFV.scale, dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-  const vp = P.page.getViewport({ scale: S });
+function releasePdfPage(el) {
+  if (!el._done) return;
+  if (el._task) try { el._task.cancel(); } catch {}
+  const cv = el.querySelector('canvas'); cv.width = 0; cv.height = 0;
+  const tl = el.querySelector('.textLayer'); tl.innerHTML = '';
+  el._done = null;
+}
+// file de rendu : une page à la fois, les plus proches d'abord
+const RQ = { list: [], busy: false };
+function renderPdfPage(i) {
+  const el = $(`#pdfPages .pp[data-p="${i}"]`); if (!el) return Promise.resolve();
+  const key = PDFV.scale + '|' + PDFV.gen + '|' + PDFV.mode + '|' + PDFV.pages[i].s + '|' + PDFV.pages[i].rot;
+  if (el._done === key) return el._prom || Promise.resolve();
+  el._done = key;
+  el._prom = new Promise(res => { RQ.list.push({ i, el, key, res }); pumpRender(); });
+  return el._prom;
+}
+async function pumpRender() {
+  if (RQ.busy) return; RQ.busy = true;
+  while (RQ.list.length) {
+    // la page la plus proche de la page affichée passe en premier
+    const here = pdfCurrentPage();
+    RQ.list.sort((a, b) => Math.abs(a.i - here) - Math.abs(b.i - here));
+    const job = RQ.list.shift();
+    if (job.el._done !== job.key || !job.el.isConnected) { job.res(); continue; }
+    try { await drawPdfPage(job.i, job.el); } catch {}
+    job.res();
+  }
+  RQ.busy = false;
+}
+async function drawPdfPage(i, el) {
+  const P = PDFV.pages[i], S = PDFV.scale, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const vp = vpOf(P, S);
   const cv = el.querySelector('canvas');
-  cv.width = Math.floor(vp.width * dpr); cv.height = Math.floor(vp.height * dpr);
+  // limite de taille du dessin (mémoire des téléphones)
+  const k = Math.min(dpr, Math.sqrt(9e6 / (vp.width * vp.height)));
+  cv.width = Math.floor(vp.width * k); cv.height = Math.floor(vp.height * k);
   cv.style.width = vp.width + 'px'; cv.style.height = vp.height + 'px';
   try {
-    if (el._task) el._task.cancel();
-    el._task = P.page.render({ canvasContext: cv.getContext('2d'), viewport: vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null });
+    el._task = P.page.render({ canvasContext: cv.getContext('2d', { alpha: false }), viewport: vp, transform: k !== 1 ? [k, 0, 0, k, 0, 0] : null });
     await el._task.promise;
   } catch (e) { if (e && e.name === 'RenderingCancelledException') return; }
-  // calque de texte (sélection, copie, recherche)
+  // la page affichée sert aussi de miniature
+  const tk = P.s + ':' + P.rot;
+  if (!PDFV.thumbC.has(tk)) { PDFV.thumbC.set(tk, null); canvasToThumb(shrinkCanvas(cv)).then(u => { if (u) { PDFV.thumbC.set(tk, u); PDFV.pages.forEach((Q, j) => { if (Q.s === P.s && Q.rot === P.rot) paintThumb(j); }); } else PDFV.thumbC.delete(tk); }); }
   const tl = el.querySelector('.textLayer');
   tl.innerHTML = ''; tl.style.setProperty('--scale-factor', S);
   if (PDFV.mode === 'read') {
@@ -3943,6 +4015,15 @@ async function renderPdfPage(i) {
     } catch {}
   }
   drawFields(i);
+}
+const THUMB_W = () => Math.round(130 * Math.min(window.devicePixelRatio || 1, 2));
+// miniature compressée en JPEG (peu de mémoire, même pour des centaines de pages)
+function canvasToThumb(c) { return new Promise(res => { try { c.toBlob(b => res(b ? URL.createObjectURL(b) : null), 'image/jpeg', 0.8); } catch { res(null); } }); }
+function shrinkCanvas(src) {
+  const w = THUMB_W(), h = Math.round(src.height * w / src.width);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, w, h);
+  return c;
 }
 function pdfCurrentPage() {
   const sc = $('#pdfScroll'), kids = $$('#pdfPages .pp');
@@ -4015,16 +4096,19 @@ $('#pdfOpts').addEventListener('click', e => {
 
 /* --- annotations */
 const annById = id => (state.cur.ann || []).find(a => a.id === id);
-function pdfHist() { PDFV.hist.push({ pdf: state.cur.pdf, ann: JSON.stringify(state.cur.ann), form: JSON.stringify(state.cur.form) }); if (PDFV.hist.length > 30) PDFV.hist.shift(); PDFV.fut = []; }
+const pdfSnap = () => ({ bytes: PDFV.bytes, order: JSON.stringify(state.cur.order), ann: JSON.stringify(state.cur.ann), form: JSON.stringify(state.cur.form) });
+function pdfHist() { PDFV.hist.push(pdfSnap()); if (PDFV.hist.length > 40) PDFV.hist.shift(); PDFV.fut = []; }
 function pdfChanged() { scheduleSave(); }
 async function pdfUndo(redo) {
   const from = redo ? PDFV.fut : PDFV.hist, to = redo ? PDFV.hist : PDFV.fut;
   const s = from.pop(); if (!s) return;
   const cur = state.cur;
-  to.push({ pdf: cur.pdf, ann: JSON.stringify(cur.ann), form: JSON.stringify(cur.form) });
-  const pdfChangedNow = s.pdf !== cur.pdf;
-  cur.pdf = s.pdf; cur.ann = JSON.parse(s.ann); cur.form = JSON.parse(s.form); PDFV.sel = null;
-  if (pdfChangedNow) await loadPdfDoc(); else { PDFV.pages.forEach((_, i) => drawAnns(i)); PDFV.pages.forEach((_, i) => drawFields(i)); if (PDFV.mode === 'pages') renderPdfGrid(); }
+  to.push(pdfSnap());
+  const bytesChanged = s.bytes && s.bytes !== PDFV.bytes, orderChanged = s.order !== JSON.stringify(cur.order);
+  cur.order = JSON.parse(s.order); cur.ann = JSON.parse(s.ann); cur.form = JSON.parse(s.form); PDFV.sel = null; PDFV.pageSel = new Set();
+  if (bytesChanged) { PDFV.bytes = s.bytes; await Store.putBlob(cur.pdfId, s.bytes); await loadPdfDoc(); }
+  else if (orderChanged) { rebuildPages(); renderPdf(); }
+  else { PDFV.pages.forEach((_, i) => { drawAnns(i); drawFields(i); }); if (PDFV.mode === 'pages') renderPdfGrid(); }
   scheduleSave();
 }
 function deleteAnn(id) {
@@ -4251,7 +4335,7 @@ function drawFields(i) {
   const pa = $(`#pdfPages .pa[data-p="${i}"]`); if (!pa) return;
   pa.querySelectorAll('.fld').forEach(x => x.remove());
   const P = PDFV.pages[i]; if (!P || !P.fields.length || PDFV.mode !== 'read') return;
-  const vp = P.page.getViewport({ scale: PDFV.scale }), vals = state.cur.form;
+  const vp = vpOf(P, PDFV.scale), vals = state.cur.form;
   P.fields.forEach(f => {
     const [x1, y1, x2, y2] = vp.convertToViewportRectangle(f.rect);
     const x = Math.min(x1, x2), y = Math.min(y1, y2), w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
@@ -4297,28 +4381,60 @@ function renderPdfGrid() {
   const box = $('#pdfPages');
   if (PDFV.obs) PDFV.obs.disconnect();
   box.className = 'pdf-grid';
-  box.innerHTML = PDFV.pages.map((P, i) => `<div class="pg-card${PDFV.pageSel.has(i) ? ' on' : ''}" data-i="${i}"><div class="pg-th" style="aspect-ratio:${P.vp1.width}/${P.vp1.height}">${PDFV.thumbs[i] ? `<img src="${PDFV.thumbs[i]}" alt="">` : ''}${(state.cur.ann || []).some(a => a.p === i) ? '<span class="pg-ann" title="Page annotée">✎</span>' : ''}</div><span class="pg-n">${i + 1}</span><span class="pg-chk" aria-hidden="true"></span></div>`).join('');
-  $('#pdfSelInfo').textContent = PDFV.pageSel.size ? `${PDFV.pageSel.size} page${PDFV.pageSel.size > 1 ? 's' : ''} sélectionnée${PDFV.pageSel.size > 1 ? 's' : ''}` : 'Touchez des pages pour les sélectionner';
-  $$('#pdfPageTools [data-pg]').forEach(b => { if (b.dataset.need) b.disabled = !PDFV.pageSel.size; });
-  thumbQueue();
+  const annP = new Set((state.cur.ann || []).map(a => a.p));
+  box.innerHTML = PDFV.pages.map((P, i) => `<div class="pg-card${PDFV.pageSel.has(i) ? ' on' : ''}" data-i="${i}"><div class="pg-th" style="aspect-ratio:${P.vp1.width}/${P.vp1.height}"><img class="pg-cv" alt="" draggable="false">${annP.has(i) ? '<span class="pg-ann" title="Page annotée">✎</span>' : ''}</div><span class="pg-n">${i + 1}</span><span class="pg-chk" aria-hidden="true"></span></div>`).join('');
+  updatePageSelUI();
+  // miniatures déjà prêtes : affichées tout de suite ; les autres sont demandées dans l'ordre d'apparition à l'écran
+  if (PDFV.gridObs) PDFV.gridObs.disconnect();
+  PDFV.gridObs = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { PDFV.gridObs.unobserve(e.target); needThumb(+e.target.dataset.i); } }), { root: $('#pdfScroll'), rootMargin: '400px 0px' });
+  $$('.pg-card', box).forEach(c => { const i = +c.dataset.i; if (!paintThumb(i)) PDFV.gridObs.observe(c); });
   updatePdfBar();
 }
-let thumbBusy = false;
-async function thumbQueue() {
-  if (thumbBusy) return; thumbBusy = true;
+function updatePageSelUI() {
+  const n = PDFV.pageSel.size;
+  $$('#pdfPages .pg-card').forEach(c => c.classList.toggle('on', PDFV.pageSel.has(+c.dataset.i)));
+  $('#pdfSelInfo').textContent = n ? `${n} page${n > 1 ? 's' : ''} sélectionnée${n > 1 ? 's' : ''}` : 'Touchez des pages pour les sélectionner';
+  $$('#pdfPageTools [data-pg]').forEach(b => { if (b.dataset.need) b.disabled = !n; });
+}
+function paintThumb(i) {
+  const P = PDFV.pages[i]; if (!P) return false;
+  const url = PDFV.thumbC.get(P.s + ':' + P.rot); if (!url) return false;
+  const im = $(`#pdfPages .pg-card[data-i="${i}"] .pg-cv`); if (!im) return true;
+  if (im.getAttribute('src') !== url) { im.onload = () => im.classList.add('ok'); im.src = url; }
+  return true;
+}
+// Miniatures : celles qu'on voit d'abord (file prioritaire), les autres en arrière-plan quand rien d'autre ne se dessine.
+const TQ = { hi: [], lo: [], busy: false };
+function needThumb(i) { TQ.hi.push(i); pumpThumbs(); }
+function prefetchThumbs() { TQ.lo = PDFV.pages.map((_, i) => i); pumpThumbs(); }
+const pause = ms => new Promise(r => setTimeout(r, ms));
+async function pumpThumbs() {
+  if (TQ.busy) return; TQ.busy = true;
   const gen = PDFV.gen;
-  try {
-    for (let i = 0; i < PDFV.pages.length; i++) {
-      if (gen !== PDFV.gen || PDFV.mode !== 'pages') break;
-      if (PDFV.thumbs[i]) continue;
-      const P = PDFV.pages[i], vp = P.page.getViewport({ scale: 220 / Math.max(P.vp1.width, P.vp1.height) * 1.4 });
-      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
-      await P.page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-      PDFV.thumbs[i] = c.toDataURL('image/jpeg', 0.75);
-      const th = $(`#pdfPages .pg-card[data-i="${i}"] .pg-th`); if (th && !th.querySelector('img')) th.insertAdjacentHTML('afterbegin', `<img src="${PDFV.thumbs[i]}" alt="">`);
+  while ((TQ.hi.length || TQ.lo.length) && gen === PDFV.gen && state.view === 'pdfv') {
+    let i;
+    if (TQ.hi.length) i = TQ.hi.shift();
+    else {
+      // l'affichage des pages passe avant la préparation des miniatures
+      if (RQ.busy || RQ.list.length || PD.op) { await pause(250); continue; }
+      i = TQ.lo.shift();
     }
-  } catch {}
-  thumbBusy = false;
+    const P = PDFV.pages[i]; if (!P) continue;
+    const tk = P.s + ':' + P.rot;
+    if (!PDFV.thumbC.has(tk)) {
+      try {
+        PDFV.thumbC.set(tk, null);
+        const vp = vpOf(P, THUMB_W() / P.vp1.width);
+        const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+        await P.page.render({ canvasContext: c.getContext('2d', { alpha: false }), viewport: vp }).promise;
+        const url = await canvasToThumb(c);
+        if (url) PDFV.thumbC.set(tk, url); else PDFV.thumbC.delete(tk);
+      } catch { PDFV.thumbC.delete(tk); continue; }
+    }
+    // toutes les cartes qui montrent cette page (pages dupliquées)
+    if (PDFV.mode === 'pages') PDFV.pages.forEach((Q, j) => { if (Q.s === P.s && Q.rot === P.rot) paintThumb(j); });
+  }
+  TQ.busy = false;
 }
 // sélection et glisser-déposer pour réordonner
 const PG = { drag: null, last: null };
@@ -4330,26 +4446,26 @@ $('#pdfPages').addEventListener('pointerdown', e => {
 $('#pdfPages').addEventListener('pointermove', e => {
   const d = PG.drag; if (!d || PDFV.mode !== 'pages') return;
   if (!d.on && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 8) {
-    if (e.pointerType === 'touch' && !d.hold) { PG.drag = null; return; }
+    if (e.pointerType === 'touch' && !d.hold) { clearTimeout(d.holdT); PG.drag = null; return; }
     d.on = true; d.card.classList.add('dragging');
     try { d.card.setPointerCapture(e.pointerId); } catch {}
   }
   if (!d.on) return;
   e.preventDefault();
   const el = document.elementFromPoint(e.clientX, e.clientY), over = el && el.closest('.pg-card');
-  $$('#pdfPages .pg-card').forEach(c => c.classList.remove('drop-b', 'drop-a'));
-  if (over && over !== d.card) { const r = over.getBoundingClientRect(); const after = e.clientX > r.left + r.width / 2; over.classList.add(after ? 'drop-a' : 'drop-b'); d.to = +over.dataset.i + (after ? 1 : 0); }
-  else d.to = null;
+  if (d.over && d.over !== over) d.over.classList.remove('drop-b', 'drop-a');
+  if (over && over !== d.card) { const r = over.getBoundingClientRect(); const after = e.clientX > r.left + r.width / 2; over.classList.toggle('drop-a', after); over.classList.toggle('drop-b', !after); d.to = +over.dataset.i + (after ? 1 : 0); d.over = over; }
+  else { d.to = null; d.over = null; }
   const sc = $('#pdfScroll').getBoundingClientRect();
   if (e.clientY > sc.bottom - 40) $('#pdfScroll').scrollTop += 16; else if (e.clientY < sc.top + 40) $('#pdfScroll').scrollTop -= 16;
 });
 // appui long au doigt pour déplacer une page
-$('#pdfPages').addEventListener('touchstart', e => { const d = PG.drag; if (!d) return; d.holdT = setTimeout(() => { if (PG.drag === d) { d.hold = true; d.card.classList.add('lift'); navigator.vibrate && navigator.vibrate(15); } }, 380); }, { passive: true });
+$('#pdfPages').addEventListener('touchstart', () => { const d = PG.drag; if (!d) return; d.holdT = setTimeout(() => { if (PG.drag === d) { d.hold = true; d.card.classList.add('lift'); navigator.vibrate && navigator.vibrate(15); } }, 380); }, { passive: true });
 $('#pdfPages').addEventListener('touchmove', e => { const d = PG.drag; if (d && d.hold) e.preventDefault(); else if (d) clearTimeout(d.holdT); }, { passive: false });
 function endPgDrag() {
   const d = PG.drag; PG.drag = null; if (!d) return;
   clearTimeout(d.holdT);
-  $$('#pdfPages .pg-card').forEach(c => c.classList.remove('drop-b', 'drop-a', 'dragging', 'lift'));
+  d.card.classList.remove('dragging', 'lift'); if (d.over) d.over.classList.remove('drop-b', 'drop-a');
   if (d.on) {
     if (d.to == null) return;
     const moving = PDFV.pageSel.has(d.i) ? [...PDFV.pageSel].sort((a, b) => a - b) : [d.i];
@@ -4366,60 +4482,40 @@ function endPgDrag() {
   if (d.shift && PG.last != null) { const [a, b] = [Math.min(PG.last, i), Math.max(PG.last, i)]; for (let k = a; k <= b; k++) PDFV.pageSel.add(k); }
   else if (PDFV.pageSel.has(i)) PDFV.pageSel.delete(i); else PDFV.pageSel.add(i);
   PG.last = i;
-  renderPdfGrid();
+  updatePageSelUI();
 }
 $('#pdfPages').addEventListener('pointerup', e => { if (PDFV.mode === 'pages') endPgDrag(e); });
-$('#pdfPages').addEventListener('pointercancel', () => { if (PDFV.mode === 'pages') { const d = PG.drag; if (d && !d.hold) PG.drag = null; } });
-$('#pdfPages').addEventListener('dblclick', e => { if (PDFV.mode !== 'pages') return; const c = e.target.closest('.pg-card'); if (c) { const i = +c.dataset.i; setPdfMode('read'); setTimeout(() => { const el = $(`#pdfPages .pp[data-p="${i}"]`); if (el) $('#pdfScroll').scrollTop = el.offsetTop - 8; }, 30); } });
+$('#pdfPages').addEventListener('pointercancel', () => { if (PDFV.mode === 'pages') { const d = PG.drag; if (d && !d.hold) { clearTimeout(d.holdT); PG.drag = null; } } });
+$('#pdfPages').addEventListener('dblclick', e => { if (PDFV.mode !== 'pages') return; const c = e.target.closest('.pg-card'); if (c) { const i = +c.dataset.i; PDFV.lastPage = i; PDFV.pageSel = new Set(); setPdfMode('read'); } });
 
-// Applique un nouvel ordre de pages (avec doublons possibles), des rotations et des pages ajoutées.
-async function applyOrder(order, rot, msg, extra) {
-  const PDFLib = await ensurePdfLib();
+// Nouvel ordre des pages (doublons possibles) et rotations : instantané, le fichier n'est pas réécrit.
+function applyOrder(order, rot, msg) {
   const cur = state.cur;
   pdfHist();
-  try {
-    const pdf = await PDFLib.PDFDocument.load(b64ToBytes(cur.pdf), { ignoreEncryption: true });
-    const orig = pdf.getPages();
-    const seen = new Set(), pages = [];
-    for (const k of order) {
-      if (typeof k === 'object') { pages.push(k); continue; }
-      if (!seen.has(k)) { seen.add(k); pages.push(orig[k]); }
-      else { const [cp] = await pdf.copyPages(pdf, [k]); pages.push(cp); }
-    }
-    for (let i = orig.length - 1; i >= 0; i--) pdf.removePage(i);
-    for (const k of pages) {
-      if (k && k.kind === 'blank') pdf.addPage(k.size);
-      else if (k && k.kind === 'ext') pdf.addPage(k.page);
-      else pdf.addPage(k);
-    }
-    if (rot) Object.entries(rot).forEach(([j, d]) => { const pg = pdf.getPage(+j); pg.setRotation(PDFLib.degrees(((pg.getRotation().angle + d) % 360 + 360) % 360)); });
-    if (extra) await extra(pdf, PDFLib);
-    const bytes = await pdf.save({ useObjectStreams: true });
-    // annotations : suivent leur page, sont dupliquées avec elle, et tournent avec elle
-    const ann = [], firstSeen = new Set(), byP = new Map();
-    cur.ann.forEach(a => { if (!byP.has(a.p)) byP.set(a.p, []); byP.get(a.p).push(a); });
-    order.forEach((k, j) => {
-      if (typeof k === 'object') return;
-      (byP.get(k) || []).forEach(a => { const c = firstSeen.has(k) ? { ...JSON.parse(JSON.stringify(a)), id: uid() } : a; c.p = j; ann.push(c); });
-      firstSeen.add(k);
+  const old = cur.order, oldPages = PDFV.pages;
+  cur.order = order.map((k, j) => ({ s: old[k].s, r: (((old[k].r + ((rot && rot[j]) || 0)) % 360) + 360) % 360 }));
+  // annotations : suivent leur page, sont dupliquées avec elle, et tournent avec elle
+  const ann = [], firstSeen = new Set(), byP = new Map();
+  cur.ann.forEach(a => { if (!byP.has(a.p)) byP.set(a.p, []); byP.get(a.p).push(a); });
+  order.forEach((k, j) => {
+    (byP.get(k) || []).forEach(a => {
+      const c = firstSeen.has(k) ? { ...JSON.parse(JSON.stringify(a)), id: uid() } : a;
+      c.p = j;
+      if (rot && rot[j]) rotateAnn(c, oldPages[k], rot[j]);
+      ann.push(c);
     });
-    if (rot) Object.entries(rot).forEach(([j, d]) => ann.filter(a => a.p === +j).forEach(a => rotateAnn(a, +j, d, order)));
-    cur.ann = ann;
-    cur.pdf = bytesToB64(bytes); cur.text = ''; cur.pagesN = pages.length;
-    PDFV.pageSel = new Set();
-    await loadPdfDoc();
-    scheduleSave();
-    if (msg) toast(msg);
-  } catch (e) {
-    PDFV.hist.pop();
-    console.warn(e);
-    toast('Modification impossible : ce PDF est peut-être protégé ou endommagé.', true);
-  }
+    firstSeen.add(k);
+  });
+  cur.ann = ann;
+  PDFV.pageSel = new Set();
+  rebuildPages();
+  renderPdf();
+  scheduleSave();
+  if (msg) toast(msg);
 }
 // Rotation d'une annotation avec sa page (d = +90 ou -90) : passage par les coordonnées du PDF
-function rotateAnn(a, j, d, order) {
-  const src = typeof order[j] === 'number' ? order[j] : j;
-  const P = PDFV.pages[src]; if (!P) return;
+function rotateAnn(a, P, d) {
+  if (!P) return;
   const vA = P.page.getViewport({ scale: 1, rotation: P.rot }), vB = P.page.getViewport({ scale: 1, rotation: ((P.rot + d) % 360 + 360) % 360 });
   const cv = (x, y) => { const [px, py] = vA.convertToPdfPoint(x, y); return vB.convertToViewportPoint(px, py); };
   if (a.t === 'ink') a.pts = a.pts.map(p => cv(p[0], p[1]));
@@ -4429,14 +4525,39 @@ function rotateAnn(a, j, d, order) {
     else { a.x = Math.min(x1, x2); a.y = Math.min(y1, y2); a.w = Math.abs(x2 - x1); a.h = Math.abs(y2 - y1); }
   }
 }
+// Ajout de pages (fichiers, page blanche) : elles sont ajoutées à la fin du fichier source, puis placées dans l'ordre voulu.
+async function appendSourcePages(at, build) {
+  const PDFLib = await ensurePdfLib();
+  const cur = state.cur;
+  try {
+    const pdf = await PDFLib.PDFDocument.load(PDFV.bytes, { ignoreEncryption: true });
+    const n0 = pdf.getPageCount();
+    await build(pdf, PDFLib);
+    const added = pdf.getPageCount() - n0;
+    if (!added) return 0;
+    const bytes = await pdf.save({ useObjectStreams: true });
+    pdfHist();
+    PDFV.hist[PDFV.hist.length - 1].bytes = PDFV.bytes;
+    PDFV.bytes = bytes;
+    await Store.putBlob(cur.pdfId, bytes);
+    const ins = Array.from({ length: added }, (_, k) => ({ s: n0 + k, r: 0 }));
+    cur.order = [...cur.order.slice(0, at), ...ins, ...cur.order.slice(at)];
+    cur.ann.forEach(a => { if (a.p >= at) a.p += added; });
+    cur.textDone = false;
+    PDFV.pageSel = new Set();
+    await loadPdfDoc();
+    scheduleSave();
+    return added;
+  } catch (e) { console.warn(e); toast('Ajout impossible : ce PDF est peut-être protégé ou endommagé.', true); return 0; }
+}
 const selOrAll = () => PDFV.pageSel.size ? [...PDFV.pageSel].sort((a, b) => a - b) : [];
 async function pagesOp(k) {
   const n = PDFV.pages.length, sel = selOrAll(), all = PDFV.pages.map((_, i) => i);
-  if (k === 'all') { PDFV.pageSel = PDFV.pageSel.size === n ? new Set() : new Set(all); return renderPdfGrid(); }
+  if (k === 'all') { PDFV.pageSel = PDFV.pageSel.size === n ? new Set() : new Set(all); return updatePageSelUI(); }
   if (k === 'rotL' || k === 'rotR') {
     if (!sel.length) return toast('Sélectionnez les pages à faire pivoter.');
     const rot = {}; sel.forEach(i => { rot[i] = k === 'rotR' ? 90 : -90; });
-    const keep = new Set(sel); await applyOrder(all, rot, 'Pages pivotées'); PDFV.pageSel = keep; return renderPdfGrid();
+    applyOrder(all, rot, 'Pages pivotées'); PDFV.pageSel = new Set(sel); return updatePageSelUI();
   }
   if (k === 'del') {
     if (!sel.length) return;
@@ -4451,8 +4572,9 @@ async function pagesOp(k) {
   if (k === 'blank') {
     const at = sel.length ? sel[sel.length - 1] + 1 : n;
     const ref = PDFV.pages[Math.max(0, at - 1)].vp1;
-    const order = [...all.slice(0, at), { kind: 'blank', size: [ref.width, ref.height] }, ...all.slice(at)];
-    return applyOrder(order, null, 'Page blanche ajoutée');
+    const ok = await appendSourcePages(at, pdf => { pdf.addPage([ref.width, ref.height]); });
+    if (ok) toast('Page blanche ajoutée');
+    return;
   }
   if (k === 'insert') { PDFV.insertAt = sel.length ? sel[sel.length - 1] + 1 : n; $('#pdfIns').click(); return; }
   if (k === 'extract') { if (!sel.length) return toast('Sélectionnez les pages à extraire.'); return splitPdf([sel], 'grimoire', 'extrait'); }
@@ -4490,24 +4612,18 @@ async function pagesFromFiles(pdf, PDFLib, files) {
   }
   return out;
 }
+function addBuiltPages(pdf, pages) {
+  pages.forEach(k => {
+    if (k.kind === 'ext') pdf.addPage(k.page);
+    else { const pg = pdf.addPage([k.W, k.H]); pg.drawImage(k.emb, { x: (k.W - k.w) / 2, y: (k.H - k.h) / 2, width: k.w, height: k.h }); }
+  });
+}
 $('#pdfIns').addEventListener('change', async e => {
   const files = [...e.target.files]; e.target.value = ''; if (!files.length) return;
-  const PDFLib = await ensurePdfLib();
-  const at = PDFV.insertAt ?? PDFV.pages.length, all = PDFV.pages.map((_, i) => i);
+  const at = PDFV.insertAt ?? PDFV.pages.length;
   toast('Ajout en cours…');
-  let added = [];
-  const order = [...all.slice(0, at), '__ins__', ...all.slice(at)];
-  // les pages ajoutées sont créées dans le document lui-même
-  await applyOrder(order.filter(x => x !== '__ins__'), null, null, async (pdf) => {
-    added = await pagesFromFiles(pdf, PDFLib, files);
-    let pos = at;
-    added.forEach(k => {
-      if (k.kind === 'ext') pdf.insertPage(pos++, k.page);
-      else { const pg = pdf.insertPage(pos++, [k.W, k.H]); pg.drawImage(k.emb, { x: (k.W - k.w) / 2, y: (k.H - k.h) / 2, width: k.w, height: k.h }); }
-    });
-  });
-  // décale les annotations des pages situées après l'insertion
-  if (added.length) { state.cur.ann.forEach(a => { if (a.p >= at) a.p += added.length; }); PDFV.pages.forEach((_, i) => drawAnns(i)); if (PDFV.mode === 'pages') renderPdfGrid(); scheduleSave(); toast(`${added.length} page${added.length > 1 ? 's ajoutées' : ' ajoutée'}`); }
+  const added = await appendSourcePages(at, async (pdf, PDFLib) => addBuiltPages(pdf, await pagesFromFiles(pdf, PDFLib, files)));
+  if (added) toast(`${added} page${added > 1 ? 's ajoutées' : ' ajoutée'}`);
 });
 
 /* --- export : PDF avec annotations et formulaire intégrés */
@@ -4533,7 +4649,18 @@ const hexRgbPdf = (PDFLib, hex) => { const [r, g, b] = hexRgb(hex); return PDFLi
 async function pdfExportBytes(opts = {}) {
   const PDFLib = await ensurePdfLib();
   const cur = state.cur;
-  const pdf = await PDFLib.PDFDocument.load(b64ToBytes(cur.pdf), { ignoreEncryption: true });
+  const pdf = await PDFLib.PDFDocument.load(PDFV.bytes, { ignoreEncryption: true });
+  // pages dans l'ordre affiché, avec leurs rotations
+  const order = cur.order || [], identity = order.length === pdf.getPageCount() && order.every((o, k) => o.s === k && !o.r);
+  if (!identity) {
+    const orig = pdf.getPages(), seen = new Set(), list = [];
+    for (const o of order) {
+      if (!seen.has(o.s)) { seen.add(o.s); list.push(orig[o.s]); }
+      else { const [cp] = await pdf.copyPages(pdf, [o.s]); list.push(cp); }
+    }
+    for (let i = orig.length - 1; i >= 0; i--) pdf.removePage(i);
+    list.forEach((pg, j) => { pdf.addPage(pg); pg.setRotation(PDFLib.degrees(PDFV.pages[j].rot)); });
+  }
   // formulaire
   const vals = cur.form || {};
   if (Object.keys(vals).length) {
@@ -4558,7 +4685,7 @@ async function pdfExportBytes(opts = {}) {
     const pages = pdf.getPages(), imgCache = new Map();
     for (const a of ann) {
       const pg = pages[a.p], P = PDFV.pages[a.p]; if (!pg || !P) continue;
-      const vp = P.page.getViewport({ scale: 1 }), rot = P.rot;
+      const vp = vpOf(P, 1), rot = P.rot;
       const U = (x, y) => vp.convertToPdfPoint(x, y);
       const box = () => { const [x1, y1] = U(a.x, a.y), [x2, y2] = U(a.x + a.w, a.y + a.h); return { x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) }; };
       try {
@@ -4622,7 +4749,8 @@ async function splitPdf(parts, dest, label) {
     else {
       const now = Date.now();
       for (const [k, o] of outs.entries()) {
-        const doc = { id: uid(), type: 'pdf', title: nameOf(o), pdf: bytesToB64(o.bytes), ann: [], form: {}, pagesN: o.idx.length, createdAt: now + k, updatedAt: now + k };
+        const pdfId = uid(); await Store.putBlob(pdfId, o.bytes);
+        const doc = { id: uid(), type: 'pdf', title: nameOf(o), pdfId, ann: [], form: {}, pagesN: o.idx.length, createdAt: now + k, updatedAt: now + k };
         await Store.save(doc);
       }
       toast(outs.length === 1 ? `« ${nameOf(outs[0])} » ajouté à vos documents` : `${outs.length} PDF ajoutés à vos documents`);
@@ -4669,8 +4797,9 @@ const PF = { q: '', hits: [], i: -1 };
 async function ensurePdfTexts() {
   if (PDFV.texts) return PDFV.texts;
   const out = [];
-  for (let i = 0; i < PDFV.pages.length; i++) {
-    try { const tc = await PDFV.pages[i].page.getTextContent(); out.push(norm(tc.items.map(it => it.str || '').join(''))); } catch { out.push(''); }
+  for (const P of PDFV.pages) {
+    if (PDFV.srcText[P.s] == null) { try { const tc = await P.page.getTextContent(); PDFV.srcText[P.s] = norm(tc.items.map(it => it.str || '').join('')); } catch { PDFV.srcText[P.s] = ''; } }
+    out.push(PDFV.srcText[P.s]);
   }
   return (PDFV.texts = out);
 }
@@ -4730,7 +4859,7 @@ async function pdfToDoc() {
   toast('Extraction du texte…');
   const parts = [];
   for (let i = 0; i < PDFV.pages.length; i++) {
-    const t = await pageText(PDFV.doc, i, true);
+    const t = await pageText(PDFV.src, PDFV.pages[i].s, true);
     const paras = t.split(/\n\s*\n|\n(?=[A-ZÀ-Ý0-9•\-–])/).map(s => s.replace(/\s*\n\s*/g, ' ').trim()).filter(Boolean);
     parts.push(paras.map(p => `<p>${esc(p)}</p>`).join(''));
   }
@@ -4775,14 +4904,15 @@ async function importPdfFiles(files) {
       const pdf = await PDFLib.PDFDocument.create();
       const pages = await pagesFromFiles(pdf, PDFLib, files);
       if (!pages.length) return toast('Aucun fichier PDF ou image utilisable.', true);
-      pages.forEach(k => { if (k.kind === 'ext') pdf.addPage(k.page); else { const pg = pdf.addPage([k.W, k.H]); pg.drawImage(k.emb, { x: (k.W - k.w) / 2, y: (k.H - k.h) / 2, width: k.w, height: k.h }); } });
+      addBuiltPages(pdf, pages);
       bytes = await pdf.save({ useObjectStreams: true });
       title = files.length > 1 ? `Fusion de ${files.length} fichiers` : files[0].name.replace(/\.[^.]+$/, '');
     }
-    // vérification rapide (PDF lisible)
+    // vérification rapide (PDF lisible) : seule la structure est lue, pas les pages
     const doc = await pdfjsOpen(bytes);
-    const text = await pdfAllText(doc).catch(() => ''), n = doc.numPages; doc.destroy();
-    await createDoc('pdf', { title, pdf: bytesToB64(bytes), ann: [], form: {}, text, pagesN: n });
+    const n = doc.numPages; doc.destroy();
+    const pdfId = uid(); await Store.putBlob(pdfId, bytes);
+    await createDoc('pdf', { title, pdfId, ann: [], form: {}, pagesN: n });
     toast(one ? `PDF ouvert : ${n} page${n > 1 ? 's' : ''}` : `PDF créé : ${n} page${n > 1 ? 's' : ''}. Réorganisez-les dans l'onglet Pages.`);
   } catch (e) {
     console.warn(e);
@@ -6050,7 +6180,11 @@ $('#exportPop').addEventListener('click', async e => {
     show('home'); renderHome(); return;
   }
   closeExport();
-  if (k === 'dup') { commitEdit(false); await flushSave(); const c = clone(state.cur); delete c.id; delete c._saved; c.title = (c.title || 'Sans titre') + ' (copie)'; return createDoc(c.type, c); }
+  if (k === 'dup') {
+    commitEdit(false); await flushSave(); const c = clone(state.cur); delete c.id; delete c._saved; c.title = (c.title || 'Sans titre') + ' (copie)';
+    if (c.type === 'pdf') { const b = PDFV.bytes || await Store.getBlob(c.pdfId); c.pdfId = uid(); await Store.putBlob(c.pdfId, b); }
+    return createDoc(c.type, c);
+  }
   try { await runExport(k); } catch { toast('Export impossible : la bibliothèque n\'a pas pu être chargée.', true); }
 });
 document.addEventListener('click', e => { if (!$('#exportPop').hidden && !e.target.closest('#exportPop')) closeExport(); });
@@ -6454,7 +6588,11 @@ $('#aiTest').addEventListener('click', async () => {
 });
 async function backupAll() {
   if (state.cur) { if (state.view === 'sheet') commitEdit(false); await flushSave(); }
-  const docs = [...state.docs.values()].map(({ _saved, ...d }) => d);
+  const docs = [];
+  for (const { _saved, ...d } of state.docs.values()) {
+    if (d.type === 'pdf' && d.pdfId) { const b = await Store.getBlob(d.pdfId); if (b) d.pdfData = bytesToB64(b); }
+    docs.push(d);
+  }
   const day = new Date().toISOString().slice(0, 10);
   await saveFile(`grimoire-sauvegarde-${day}.json`, JSON.stringify({ app: 'grimoire', format: 1, exportedAt: new Date().toISOString(), docs }));
 }
@@ -6467,9 +6605,14 @@ $('#restoreIn').addEventListener('change', async e => {
     if (!data || data.app !== 'grimoire' || !Array.isArray(data.docs)) throw 0;
     let added = 0, kept = 0;
     for (const d of data.docs) {
-      if (!d || !d.id || !/^(texte|feuille)$/.test(d.type)) continue;
+      if (!d || !d.id || !/^(texte|feuille|pdf)$/.test(d.type)) continue;
       const cur = state.docs.get(d.id);
       if (cur && (cur.updatedAt || 0) >= (d.updatedAt || 0)) { kept++; continue; }
+      if (d.type === 'pdf') {
+        const b64 = d.pdfData || d.pdf; delete d.pdfData; delete d.pdf;
+        if (!b64) continue;
+        d.pdfId ||= uid(); await Store.putBlob(d.pdfId, b64ToBytes(b64));
+      }
       await Store.putRaw(d); added++;
     }
     toast(`${added} document${added > 1 ? 's' : ''} restauré${added > 1 ? 's' : ''}` + (kept ? `, ${kept} déjà à jour.` : '.'));
