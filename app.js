@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -212,6 +212,7 @@ const Store = {
     if (this.mode === 'idb') await this.req(this.tx('readwrite').put(clone(data)));
     else this.writeLocal();
     doc._saved = true;
+    if (typeof scheduleSync === 'function') scheduleSync();
   },
   async putRaw(doc) {
     state.docs.set(doc.id, doc);
@@ -219,7 +220,8 @@ const Store = {
     else this.writeLocal();
   },
   // Fichiers lourds (PDF) : rangés à part, pour que les documents restent légers à enregistrer
-  async putBlob(id, bytes) {
+  async putBlob(id, bytes, rev) {
+    const m = ls.get('grim.blobrev', {}); m[id] = rev || 'r' + Date.now(); ls.set('grim.blobrev', m);
     if (this.mode === 'idb') await this.req(this.db.transaction('blobs', 'readwrite').objectStore('blobs').put({ id, bytes }));
     else if (!ls.set('grim.blob.' + id, bytesToB64(bytes))) throw { code: 'local_full' };
   },
@@ -232,11 +234,12 @@ const Store = {
     if (!id) return;
     try { if (this.mode === 'idb') await this.req(this.db.transaction('blobs', 'readwrite').objectStore('blobs').delete(id)); else localStorage.removeItem('grim.blob.' + id); } catch {}
   },
-  async remove(id) {
+  async remove(id, fromSync) {
     const d = state.docs.get(id); if (d && d.pdfId) await this.delBlob(d.pdfId);
     state.docs.delete(id);
     if (this.mode === 'idb') await this.req(this.tx('readwrite').delete(id));
     else this.writeLocal();
+    if (!fromSync) { const t = ls.get('grim.tomb', {}); t[id] = Date.now(); ls.set('grim.tomb', t); if (typeof scheduleSync === 'function') scheduleSync(); }
   }
 };
 
@@ -624,6 +627,147 @@ async function focusNote(id) {
   NT.showDone = false; renderNotes();
   const el = $(`.note[data-nid="${CSS.escape(id)}"]`); if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600); }
 }
+/* =========================================================
+   Sauvegarde en ligne : dépôt GitHub privé, synchronisé entre appareils
+   ========================================================= */
+const SY = { cfg: ls.get('grim.sync', null), busy: false, again: false, timer: 0, last: ls.get('grim.sync.last', 0), err: '' };
+const utf8B64 = s => bytesToB64(new TextEncoder().encode(s));
+const b64Utf8 = b => new TextDecoder().decode(b64ToBytes(b.replace(/\s/g, '')));
+async function gh(path, opt = {}, cfg = SY.cfg) {
+  const h = { Authorization: 'Bearer ' + cfg.token, Accept: opt.raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (opt.body) h['Content-Type'] = 'application/json';
+  return fetch('https://api.github.com' + (path.startsWith('/user') ? '' : '/repos/' + cfg.repo) + path, { method: opt.method || 'GET', headers: h, body: opt.body ? JSON.stringify(opt.body) : undefined, cache: 'no-store', keepalive: !!opt.keepalive });
+}
+const ghErr = async r => { let m = ''; try { m = (await r.json()).message; } catch {} return Object.assign(new Error(m || 'HTTP ' + r.status), { status: r.status }); };
+async function ghShaOf(path) { const r = await gh('/contents/' + path); return r.ok ? (await r.json()).sha : undefined; }
+async function ghPut(path, b64, sha) {
+  for (let k = 0; k < 2; k++) {
+    const r = await gh('/contents/' + path, { method: 'PUT', body: { message: 'Grimoire : ' + path.split('/').pop(), content: b64, ...(sha ? { sha } : {}) } });
+    if (r.ok) return (await r.json()).content.sha;
+    if (k === 0 && (r.status === 409 || r.status === 422)) { sha = await ghShaOf(path); continue; }
+    throw await ghErr(r);
+  }
+}
+async function ghDel(path, sha) {
+  sha ||= await ghShaOf(path); if (!sha) return;
+  const r = await gh('/contents/' + path, { method: 'DELETE', body: { message: 'Grimoire : suppression', sha } });
+  if (!r.ok && r.status !== 404 && r.status !== 409 && r.status !== 422) throw await ghErr(r);
+}
+const blobRevs = () => ls.get('grim.blobrev', {});
+function blobRevOf(id) { const m = blobRevs(); if (!m[id]) { m[id] = 'r' + Date.now(); ls.set('grim.blobrev', m); } return m[id]; }
+async function syncNow() {
+  if (!SY.cfg || !navigator.onLine) return;
+  if (SY.busy) { SY.again = true; return; }
+  SY.busy = true; SY.again = false; syncUI('run');
+  let down = 0;
+  try {
+    if (state.cur && !state.cur._saved) { try { await flushSave(); } catch {} }
+    let idx = { v: 1, docs: {} }, idxSha;
+    const r = await gh('/contents/grimoire/index.json');
+    if (r.ok) { const j = await r.json(); idxSha = j.sha; idx = JSON.parse(b64Utf8(j.content)); idx.docs ||= {}; }
+    else if (r.status !== 404) throw await ghErr(r);
+    const tomb = ls.get('grim.tomb', {});
+    let changed = false;
+    const upload = async (L, R) => {
+      const { _saved, ...data } = L, e = { u: L.updatedAt || 0, t: L.type };
+      if (L.type === 'pdf' && L.pdfId) {
+        const rev = blobRevOf(L.pdfId);
+        if (R && R.pid === L.pdfId && R.b === rev) Object.assign(e, { pid: R.pid, b: R.b, ps: R.ps });
+        else { const bytes = await Store.getBlob(L.pdfId); if (bytes) Object.assign(e, { pid: L.pdfId, b: rev, ps: await ghPut('grimoire/pdf/' + L.pdfId + '.pdf', bytesToB64(bytes), R && R.pid === L.pdfId ? R.ps : undefined) }); }
+      }
+      e.s = await ghPut('grimoire/docs/' + L.id + '.json', utf8B64(JSON.stringify(data)), R && R.s);
+      idx.docs[L.id] = e; changed = true;
+    };
+    const download = async (id, R) => {
+      const rd = await gh('/contents/grimoire/docs/' + id + '.json', { raw: true }); if (!rd.ok) throw await ghErr(rd);
+      const d = JSON.parse(await rd.text()); d.id = id; d.updatedAt = R.u;
+      if (d.type === 'pdf' && d.pdfId && (blobRevs()[d.pdfId] !== R.b || !(await Store.getBlob(d.pdfId)))) {
+        const rb = await gh('/contents/grimoire/pdf/' + d.pdfId + '.pdf', { raw: true }); if (!rb.ok) throw await ghErr(rb);
+        await Store.putBlob(d.pdfId, new Uint8Array(await rb.arrayBuffer()), R.b);
+      }
+      await Store.putRaw(d); down++;
+    };
+    const ids = new Set([...state.docs.keys(), ...Object.keys(idx.docs), ...Object.keys(tomb)]);
+    for (const id of ids) {
+      const L = state.docs.get(id), R = idx.docs[id], T = tomb[id];
+      if (state.cur && state.cur.id === id && R && L && R.u > (L.updatedAt || 0)) continue; // document ouvert : à la prochaine fois
+      if (R && R.d) {
+        if (L && (L.updatedAt || 0) > R.d) await upload(L, null);
+        else if (L) { await Store.remove(id, true); down++; }
+        continue;
+      }
+      if (!L) {
+        if (T) { if (R && T >= R.u) { await ghDel('grimoire/docs/' + id + '.json', R.s); if (R.pid) await ghDel('grimoire/pdf/' + R.pid + '.pdf', R.ps); idx.docs[id] = { d: T }; changed = true; } else if (R) await download(id, R); }
+        else if (R) await download(id, R);
+        continue;
+      }
+      if (!R || (L.updatedAt || 0) > R.u || (L.type === 'pdf' && L.pdfId && R.b && blobRevOf(L.pdfId) !== R.b && (L.updatedAt || 0) >= R.u)) await upload(L, R);
+      else if (R.u > (L.updatedAt || 0)) await download(id, R);
+    }
+    if (changed) {
+      idx.at = Date.now();
+      try { await ghPut('grimoire/index.json', utf8B64(JSON.stringify(idx)), idxSha); }
+      catch (e) { if (e.status === 409 || e.status === 422) SY.again = true; else throw e; }
+    }
+    // suppressions appliquées : les marques locales ne servent plus
+    Object.keys(tomb).forEach(id => { if (!idx.docs[id] || idx.docs[id].d) delete tomb[id]; });
+    ls.set('grim.tomb', tomb);
+    SY.last = Date.now(); ls.set('grim.sync.last', SY.last); SY.err = '';
+    syncUI('ok');
+  } catch (e) {
+    console.warn('sync', e);
+    SY.err = e.status === 401 ? 'Jeton refusé ou expiré : collez un nouveau jeton dans Réglages.' : e.status === 404 ? 'Dépôt introuvable ou inaccessible avec ce jeton.' : e.status === 403 ? 'Accès refusé : le jeton doit avoir « Contents : Read and write » sur ce dépôt.' : 'Sauvegarde en ligne impossible pour le moment' + (navigator.onLine ? '' : ' (hors connexion)') + '.';
+    syncUI('err');
+  } finally {
+    SY.busy = false;
+    if (down) { if (state.view === 'home') renderHome(); scheduleReminders(); }
+    if (SY.again) setTimeout(syncNow, 1500);
+  }
+}
+function scheduleSync(ms = 4000) { if (!SY.cfg) return; clearTimeout(SY.timer); SY.timer = setTimeout(syncNow, ms); }
+function syncUI(s) {
+  const st = $('#syncSt'), when = SY.last ? HF2.format(new Date(SY.last)) : '';
+  const txt = !SY.cfg ? '' : s === 'run' ? 'Sauvegarde en ligne…' : s === 'err' ? SY.err : when ? 'Sauvegardé en ligne à ' + when + '.' : '';
+  if (st) { st.textContent = txt; st.className = 'set-res' + (s === 'err' ? ' err' : s === 'ok' ? ' ok' : ''); }
+  const f = $('#syncFoot'); if (f) { f.textContent = SY.cfg ? txt : ''; f.classList.toggle('err', s === 'err'); }
+  const w = $('#syncWarn'); if (w) w.hidden = !!SY.cfg || ss.get('grim.syncLater');
+  $('#syncOn') && ($('#syncOn').hidden = !!SY.cfg); $('#syncNow') && ($('#syncNow').hidden = !SY.cfg); $('#syncOff') && ($('#syncOff').hidden = !SY.cfg);
+}
+const ss = { get: k => { try { return sessionStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} } };
+async function syncEnable() {
+  const repo = $('#syncRepo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/$/, ''), token = $('#syncTok').value.trim();
+  const res = $('#syncSt');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !token) { res.textContent = 'Indiquez le dépôt (nom/grimoire-data) et le jeton.'; res.className = 'set-res err'; return; }
+  const cfg = { repo, token };
+  res.textContent = 'Vérification…'; res.className = 'set-res';
+  try {
+    let r = await gh('', {}, cfg);
+    if (r.status === 404) { // dépôt absent : création si le jeton le permet
+      const c = await gh('/user/repos', { method: 'POST', body: { name: repo.split('/')[1], private: true, description: 'Données Grimoire (privé)' } }, cfg);
+      if (!c.ok) throw Object.assign(new Error(), { status: 404 });
+      r = await gh('', {}, cfg);
+    }
+    if (!r.ok) throw await ghErr(r);
+    const j = await r.json();
+    if (!j.private) { res.textContent = 'Ce dépôt est public : vos documents seraient visibles de tous. Utilisez un dépôt privé.'; res.className = 'set-res err'; return; }
+    if (j.permissions && !j.permissions.push) throw Object.assign(new Error(), { status: 403 });
+    SY.cfg = cfg; ls.set('grim.sync', cfg); $('#syncTok').value = '';
+    await syncNow();
+    if (!SY.err) toast('Sauvegarde en ligne activée.');
+  } catch (e) {
+    res.textContent = e.status === 401 ? 'Jeton refusé : vérifiez qu\'il est bien copié en entier.' : e.status === 404 ? 'Dépôt introuvable : créez le dépôt privé (étape 1) et donnez-y accès au jeton.' : e.status === 403 ? 'Le jeton n\'a pas le droit d\'écrire : « Contents : Read and write » est nécessaire.' : 'Connexion à GitHub impossible.';
+    res.className = 'set-res err';
+  }
+}
+$('#syncOn').addEventListener('click', syncEnable);
+$('#syncNow').addEventListener('click', () => syncNow());
+$('#syncOff').addEventListener('click', () => { SY.cfg = null; ls.set('grim.sync', null); try { localStorage.removeItem('grim.sync'); } catch {} syncUI(); toast('Sauvegarde en ligne désactivée sur cet appareil (les données en ligne sont conservées).'); });
+$('#syncLater').addEventListener('click', () => { ss.set('grim.syncLater', '1'); syncUI(); });
+$('#syncGo').addEventListener('click', () => openSettings().then(() => setTimeout(() => $('#syncCard').scrollIntoView({ block: 'start', behavior: 'smooth' }), 80)));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { if (SY.cfg && !SY.busy) syncNow(); } else scheduleSync(500); });
+addEventListener('online', () => scheduleSync(500));
+setInterval(() => { if (document.visibilityState === 'visible') scheduleSync(0); }, 120000);
+
 if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.note) focusNote(e.data.note); });
 
 $('#docs').addEventListener('click', e => { const b = e.target.closest('.drow'); if (b) openDoc(b.dataset.id); });
@@ -7182,5 +7326,5 @@ window.addEventListener('error', e => { toast('Un problème est survenu : ' + (e
 window.addEventListener('unhandledrejection', e => { const m = e.reason && (e.reason.message || e.reason.code); toast('Un problème est survenu' + (m ? ' : ' + m : '.'), true); });
 applyMode();
 renderHome();
-Store.init().then(() => { scheduleReminders(); const nid = new URLSearchParams(location.search).get('note'); if (nid) { history.replaceState(null, '', location.pathname); focusNote(nid); } });
+Store.init().then(() => { syncUI(); if (SY.cfg) syncNow(); scheduleReminders(); const nid = new URLSearchParams(location.search).get('note'); if (nid) { history.replaceState(null, '', location.pathname); focusNote(nid); } });
 })();
