@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -7326,5 +7326,111 @@ window.addEventListener('error', e => { toast('Un problème est survenu : ' + (e
 window.addEventListener('unhandledrejection', e => { const m = e.reason && (e.reason.message || e.reason.code); toast('Un problème est survenu' + (m ? ' : ' + m : '.'), true); });
 applyMode();
 renderHome();
+/* =========================================================
+   Correction automatique (comme Word) : documents, notes, texte des cellules
+   ========================================================= */
+const AC_WORDS = (() => {
+  const m = {}, add = s => s.trim().split(/\s+/).forEach(p => { const [a, b] = p.split('='); m[a] = b.replace(/_/g, ' '); });
+  // apostrophes oubliées
+  add(`jai=j’ai cest=c’est nest=n’est quil=qu’il quils=qu’ils quelle=quelle daccord=d’accord aujourdhui=aujourd’hui jusqua=jusqu’à jusquau=jusqu’au lorsquil=lorsqu’il puisquil=puisqu’il presquile=presqu’île quelquun=quelqu’un dabord=d’abord dailleurs=d’ailleurs jen=j’en jy=j’y ny=n’y sil=s’il sils=s’ils cetait=c’était jetais=j’étais javais=j’avais jaurai=j’aurai jaurais=j’aurais jespere=j’espère`);
+  // accents oubliés (mots sans ambiguïté)
+  add(`deja=déjà voila=voilà tres=très apres=après etre=être meme=même memes=mêmes probleme=problème problemes=problèmes reunion=réunion reunions=réunions numero=numéro numeros=numéros telephone=téléphone general=général generale=générale interessant=intéressant systeme=système premiere=première derniere=dernière deuxieme=deuxième troisieme=troisième quatrieme=quatrième bientot=bientôt plutot=plutôt tot=tôt ete=été evenement=événement evenements=événements reponse=réponse reponses=réponses reseau=réseau securite=sécurité societe=société qualite=qualité realite=réalité activite=activité electricite=électricité propriete=propriété proprietaire=propriétaire proprietaires=propriétaires verifier=vérifier verification=vérification etude=étude etudes=études etat=état equipe=équipe equipes=équipes ecole=école role=rôle hopital=hôpital theatre=théâtre foret=forêt fenetre=fenêtre tete=tête fete=fête noel=Noël aout=août fevrier=février decembre=décembre ca=ça oeuvre=œuvre coeur=cœur soeur=sœur soeurs=sœurs oeil=œil oeuf=œuf oeufs=œufs boeuf=bœuf voeux=vœux noeud=nœud manoeuvre=manœuvre controle=contrôle controles=contrôles diagnostic=diagnostic batiment=bâtiment batiments=bâtiments chateau=château age=âge agee=âgée gateau=gâteau grace=grâce hotel=hôtel hotels=hôtels cote=côté interet=intérêt different=différent differente=différente difference=différence necessaire=nécessaire precedent=précédent prochainement=prochainement repondre=répondre recu=reçu recue=reçue facon=façon garcon=garçon lecon=leçon francais=français francaise=française deplacement=déplacement developpement=développement echeance=échéance echeancier=échéancier etablissement=établissement experience=expérience strategie=stratégie modele=modèle resultat=résultat resultats=résultats reference=référence references=références numerique=numérique methode=méthode periode=période preparer=préparer presentation=présentation priorite=priorité regle=règle regles=règles telecharger=télécharger tache=tâche taches=tâches`);
+  // fautes de frappe courantes
+  add(`ets=est aps=pas psa=pas puor=pour poru=pour aves=avec acev=avec dnas=dans dasn=dans uen=une qeu=que mias=mais msi=mis cmme=comme comem=comme`);
+  ['quelle', 'diagnostic', 'prochainement', 'cote', 'tache', 'taches'].forEach(k => delete m[k]);
+  return m;
+})();
+const AC = { on: ls.get('grim.autocorr', true), mine: ls.get('grim.autocorr.mine', ''), ignore: new Set(), last: null };
+function acMineMap() { const m = {}; String(AC.mine).split('\n').forEach(l => { const i = l.indexOf('='); if (i > 0) { const a = l.slice(0, i).trim().toLowerCase(), b = l.slice(i + 1).trim(); if (a && b) m[a] = b; } }); return m; }
+let AC_MINE = acMineMap();
+const isL = ch => /[\p{L}\p{N}]/u.test(ch || '');
+const matchCase = (w, r) => w === w.toUpperCase() && w.length > 1 && w !== w.toLowerCase() ? r.toUpperCase() : w[0] !== w[0].toLowerCase() ? r[0].toUpperCase() + r.slice(1) : r;
+// Calcule la correction de la fin du texte (ctx = tout le texte du paragraphe jusqu'au curseur, déclencheur compris)
+function acFix(ctx, trig, cell) {
+  const body = ctx.slice(0, -1);
+  let tail = trig, start = ctx.length - 1; // portion remplacée : [start, fin]
+  if (!cell && trig === '"') { const prev = body.slice(-1); tail = (!prev || /[\s(\[« ]/.test(prev)) ? '« ' : ' »'; }
+  else if (!cell && trig === "'") tail = '’';
+  // mot qui précède (avec élision : l’equipe → l’ + equipe)
+  const tm = /([\p{L}’']+)$/u.exec(body), token = tm ? tm[1] : '';
+  const before = body.slice(0, body.length - token.length);
+  const urlish = /(https?:\/\/|www\.|@)\S*$/i.test(body) || /[\/\\_.\d-]$/.test(before);
+  let fixed = token;
+  if (token && !urlish && trig !== "'" && !/^(https?|www|ftp|mailto)$/i.test(token) && !AC.ignore.has(token.toLowerCase())) {
+    const seg = (/(\p{L}+)$/u.exec(token) || ['', ''])[1], pre = token.slice(0, token.length - seg.length).replace(/'/g, '’');
+    let fs = seg;
+    const caps = seg.length > 1 && seg === seg.toUpperCase();
+    const mine = AC_MINE[token.toLowerCase()] ?? AC_MINE[seg.toLowerCase()];
+    if (mine) { fixed = AC_MINE[token.toLowerCase()] ? mine : pre + mine; }
+    else {
+      const rep = caps ? null : AC_WORDS[seg.toLowerCase()];
+      if (rep) fs = (pre && rep.includes('’')) ? seg : matchCase(seg, rep);
+      else if (/^\p{Lu}{2}\p{Ll}{2,}$/u.test(seg)) fs = seg[0] + seg.slice(1).toLowerCase(); // DEux MAjuscules
+      fixed = pre + fs;
+      // majuscule en début de phrase
+      if (!cell && /^\p{Ll}/u.test(fixed) && (/^\s*$/.test(before) || /[.!?]\s+$/.test(before)) && !/(^|\s)(etc|cf|ex|p|art|env|M|Mme|n°|vol|chap|tél|av|bd)\.\s+$/i.test(before) && !/\d\.\s+$/.test(before))
+        fixed = fixed[0].toUpperCase() + fixed.slice(1);
+    }
+  }
+  // espace insécable avant ; : ! ? (pas pour 14:30 ni http:)
+  if (!cell && /[;:!?]/.test(trig) && !/(https?|www\.\S*)$/i.test(body)) {
+    const p = body.slice(-1);
+    if (p === ' ') { tail = ' ' + trig; start = ctx.length - 2; }
+    else if (p && (isL(p) || p === '»' || p === ')') && !(trig === ':' && /\d$/.test(body))) tail = ' ' + trig;
+  }
+  if (!cell && trig === '.' && body.endsWith('..')) { tail = '…'; start = ctx.length - 3; }
+  if (fixed !== token) { const ws = body.length - token.length; return { start: ws, text: fixed + ctx.slice(body.length, start) + tail, word: token }; }
+  if (tail !== trig || start !== ctx.length - 1) return { start, text: tail };
+  return null;
+}
+const AC_TRIG = /^[\s .,;:!?)"'…]$/;
+function acApply(el, trig) {
+  if (!AC.on || AC.busy) return;
+  AC.busy = true;
+  try { acApply2(el, trig); } finally { AC.busy = false; }
+}
+function acApply2(el, trig) {
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+    const pos = el.selectionStart; if (pos !== el.selectionEnd) return;
+    const lineStart = el.value.lastIndexOf('\n', pos - 1) + 1, ctx = el.value.slice(lineStart, pos);
+    const cell = el.classList.contains('cell-ed');
+    if (cell && /^[=+\-]/.test(el.value)) return; // formule
+    const f = acFix(ctx, trig, cell); if (!f) return;
+    el.setSelectionRange(lineStart + f.start, pos);
+    if (!document.execCommand('insertText', false, f.text)) { el.setRangeText(f.text, lineStart + f.start, pos, 'end'); el.dispatchEvent(new Event('input', { bubbles: true })); }
+    AC.last = f.word ? { word: f.word, t: Date.now() } : null;
+    return;
+  }
+  const sel = getSelection(); if (!sel.rangeCount || !sel.isCollapsed) return;
+  const node = sel.anchorNode, off = sel.anchorOffset;
+  if (!node || node.nodeType !== 3) return;
+  const block = node.parentElement.closest('p,li,h1,h2,h3,td,th,blockquote,.note-t,div') || el;
+  if (!el.contains(block) || node.parentElement.closest('[contenteditable=false]')) return;
+  const r = document.createRange(); r.setStart(block, 0); r.setEnd(node, off);
+  const ctx = r.toString(), f = acFix(ctx, trig); if (!f) return;
+  const len = ctx.length - f.start; if (len > off) return; // la portion à remplacer déborde du nœud texte (mise en forme au milieu du mot)
+  const rr = document.createRange(); rr.setStart(node, off - len); rr.setEnd(node, off);
+  sel.removeAllRanges(); sel.addRange(rr);
+  document.execCommand('insertText', false, f.text);
+  AC.last = f.word ? { word: f.word, t: Date.now() } : null;
+}
+function acListen(el) {
+  el.addEventListener('input', e => {
+    if (e.inputType === 'historyUndo' && AC.last && Date.now() - AC.last.t < 8000) { AC.ignore.add(AC.last.word.toLowerCase()); AC.last = null; return; } // Ctrl+Z annule la correction et ne la refait plus
+    if (e.inputType === 'insertText' && e.data && AC_TRIG.test(e.data.slice(-1)) && !e.isComposing) acApply(e.target.closest('textarea,input') || el, e.data.slice(-1));
+  });
+  el.setAttribute('autocorrect', 'on'); if (el.tagName !== 'INPUT') el.setAttribute('autocapitalize', 'sentences');
+}
+acListen($('#ed')); acListen($('#qnText')); acListen($('#notes'));
+// Cellules : correction pour le texte, jamais pour les formules
+(() => {
+  const ce = $('#cellEd'); acListen(ce);
+  const upd = () => { const f = /^[=+\-]/.test(ce.value); ce.setAttribute('autocorrect', f ? 'off' : 'on'); ce.setAttribute('autocapitalize', f ? 'off' : 'sentences'); ce.spellcheck = !f; };
+  ce.addEventListener('input', upd); ce.addEventListener('focus', upd);
+})();
+$('#acOn').checked = AC.on; $('#acMine').value = AC.mine;
+$('#acOn').addEventListener('change', e => { AC.on = e.target.checked; ls.set('grim.autocorr', AC.on); toast(AC.on ? 'Correction automatique activée.' : 'Correction automatique désactivée.'); });
+$('#acMine').addEventListener('change', e => { AC.mine = e.target.value; ls.set('grim.autocorr.mine', AC.mine); AC_MINE = acMineMap(); toast('Remplacements enregistrés.'); });
+
 Store.init().then(() => { syncUI(); if (SY.cfg) syncNow(); scheduleReminders(); const nid = new URLSearchParams(location.search).get('note'); if (nid) { history.replaceState(null, '', location.pathname); focusNote(nid); } });
 })();
