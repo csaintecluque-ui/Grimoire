@@ -1,6 +1,6 @@
 // Grimoire — service worker : fonctionnement hors connexion.
 // À chaque mise en ligne d'une nouvelle version, augmenter VERSION.
-const VERSION = 'grimoire-1.7.0';
+const VERSION = 'grimoire-1.8.0';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './manifest.webmanifest',
   './icons/favicon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png', './icons/apple-touch-icon.png',
@@ -41,4 +41,15 @@ self.addEventListener('fetch', e => {
     if (r.ok) caches.open(VERSION).then(c => c.put(req, r.clone()));
     return r;
   })));
+});
+
+// Rappels : toucher la notification ouvre Grimoire sur la note
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const id = e.notification.data && e.notification.data.note;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const c = list[0];
+    if (c) { c.postMessage({ note: id }); return c.focus(); }
+    return self.clients.openWindow('./' + (id ? '?note=' + encodeURIComponent(id) : ''));
+  }));
 });

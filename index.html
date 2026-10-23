@@ -57,6 +57,18 @@
           <span class="k">Ctrl K</span>
         </label>
 
+        <div class="sec" id="notesSec">
+          <div class="sec-h"><p class="eyebrow">Notes rapides</p><button type="button" class="lnk" id="notesDone" hidden></button></div>
+          <form class="qnote" id="qnForm" autocomplete="off">
+            <textarea id="qnText" rows="1" placeholder="Noter quelque chose…" aria-label="Nouvelle note" enterkeyhint="done"></textarea>
+            <button type="button" class="qn-bell" id="qnBell" aria-pressed="false" title="Ajouter un rappel" aria-label="Ajouter un rappel" data-ic="bell"></button>
+            <button type="submit" class="pbtn">Ajouter</button>
+          </form>
+          <p class="qn-rem" id="qnRemTxt" aria-live="polite"></p>
+          <div id="qnWhen" hidden></div>
+          <div class="notes" id="notes"></div>
+        </div>
+
         <div class="sec">
           <p class="eyebrow">Créer</p>
           <div class="create">

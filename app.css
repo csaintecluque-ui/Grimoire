@@ -663,3 +663,39 @@ body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-heigh
 .textLayer[data-main-rotation="180"]{transform:rotate(180deg) translate(-100%,-100%)}
 .textLayer[data-main-rotation="270"]{transform:rotate(270deg) translateX(-100%)}
 .textLayer > :not(.markedContent),.textLayer .markedContent span:not(.markedContent){z-index:1}
+
+/* Notes rapides */
+.qnote{display:flex;gap:8px;align-items:flex-end;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:8px 8px 8px 14px}
+.qnote:focus-within{border-color:var(--line-strong)}
+.qnote textarea{flex:1;min-width:0;border:0;background:none;resize:none;font:inherit;font-size:15px;line-height:1.45;padding:6px 0;color:var(--fg);outline:none;max-height:160px}
+.qnote .pbtn{align-self:auto}
+.qn-bell{width:38px;height:38px;border-radius:10px;border:1px solid var(--line);background:none;color:var(--muted);display:grid;place-items:center;flex:none}
+.qn-bell.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.qn-rem{margin:-6px 0 0 4px;font-size:12.5px;color:var(--accent);min-height:0}
+.qn-rem:empty{display:none}
+.rem-ch{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.rem-ch .chip{color:var(--fg);padding:7px 12px}
+.rem-pick{display:inline-flex;align-items:center;gap:6px}
+.rem-pick input{border:0;background:none;font:inherit;color:inherit;padding:0;max-width:190px}
+.notes{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.notes:empty{display:none}
+.note{background:#FBF3DF;border:1px solid #EAD9B8;border-radius:12px;padding:12px 12px 6px;display:flex;flex-direction:column;gap:8px;min-width:0;transition:box-shadow .2s}
+.note.late{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.note.done .note-t{text-decoration:line-through;color:var(--muted)}
+.note.flash{box-shadow:0 0 0 3px var(--accent)}
+.note-t{white-space:pre-wrap;word-break:break-word;font-size:14.5px;line-height:1.45;outline:none;min-height:1.4em;color:#1E1814}
+.note-t:focus{background:rgba(255,255,255,.55);border-radius:6px;box-shadow:0 0 0 4px rgba(255,255,255,.55)}
+.note-rem{align-self:flex-start;display:inline-flex;align-items:center;gap:5px;border:0;background:rgba(163,94,44,.12);color:#8A4D22;border-radius:999px;padding:3px 10px 3px 7px;font-size:12px;font-weight:600}
+.note-rem .ic{width:14px;height:14px}
+.note-a{display:flex;gap:2px;margin:0 -4px;justify-content:flex-end}
+.note-a button{width:34px;height:32px;border:0;background:none;border-radius:8px;color:#6B5F56;display:grid;place-items:center}
+.note-a button:hover{background:rgba(0,0,0,.06)}
+.note.armed [data-na=del]{background:#B23F33;color:#fff}
+.note .rem-ch .chip{background:rgba(255,255,255,.7)}
+.note .lnk{align-self:flex-start}
+:root[data-theme="dark"] .note{background:#2E2618;border-color:#4A3D28}
+:root[data-theme="dark"] .note-t{color:#F1E8DA}
+:root[data-theme="dark"] .note-a button{color:#C9BBAA}
+:root[data-theme="dark"] .note-rem{color:#E8A877;background:rgba(232,168,119,.14)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .note{background:#2E2618;border-color:#4A3D28}:root:not([data-theme="light"]) .note-t{color:#F1E8DA}:root:not([data-theme="light"]) .note-a button{color:#C9BBAA}:root:not([data-theme="light"]) .note-rem{color:#E8A877;background:rgba(232,168,119,.14)}}
+@media (max-width:560px){.notes{grid-template-columns:1fr}}

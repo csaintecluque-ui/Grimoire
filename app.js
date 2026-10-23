@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -32,6 +32,9 @@ function loadScript(src) {
 }
 
 const IC = {
+  tick: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
+  cal: '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/>',
   left: '<path d="M15 6l-6 6 6 6"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>',
   doc: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h5"/>',
@@ -432,7 +435,8 @@ function snippet(text, q) {
 function renderHome() {
   if (state.view !== 'home') return;
   const list = $('#docs');
-  const all = [...state.docs.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  renderNotes();
+  const all = [...state.docs.values()].filter(d => d.type !== 'note').sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   $('#nAll').textContent = all.length || '';
   $('#nTxt').textContent = all.filter(d => d.type === 'texte').length || '';
   $('#nSh').textContent = all.filter(d => d.type === 'feuille').length || '';
@@ -462,6 +466,166 @@ function renderHome() {
       <span class="dmeta">${relDate(d.updatedAt)}<br>${meta}</span></button>`;
   }).join('');
 }
+/* =========================================================
+   Notes rapides et rappels
+   ========================================================= */
+const NT = { showDone: false, open: null, timer: 0 };
+const notesAll = () => [...state.docs.values()].filter(d => d.type === 'note');
+const DAYF = new Intl.DateTimeFormat('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' });
+const HF2 = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
+function whenTxt(t) {
+  const d = new Date(t), now = new Date(), day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(d) - day(now)) / 864e5);
+  return (diff === 0 ? "aujourd'hui" : diff === 1 ? 'demain' : diff === -1 ? 'hier' : DAYF.format(d)) + ' ' + HF2.format(d);
+}
+function remChoices() {
+  const now = new Date(), at = (dd, h, m = 0) => { const x = new Date(now); x.setDate(x.getDate() + dd); x.setHours(h, m, 0, 0); return x.getTime(); };
+  const out = [['Dans 1 h', Date.now() + 36e5]];
+  if (now.getHours() < 18) out.push(['Ce soir 19 h', at(0, 19)]);
+  out.push(['Demain 9 h', at(1, 9)]);
+  const toMon = ((8 - now.getDay()) % 7) || 7; out.push(['Lundi 9 h', at(toMon, 9)]);
+  const pad = n => String(n).padStart(2, '0'), d0 = new Date(Date.now() + 36e5);
+  const local = `${d0.getFullYear()}-${pad(d0.getMonth() + 1)}-${pad(d0.getDate())}T${pad(d0.getHours())}:00`;
+  return `<div class="rem-ch">${out.map(([l, t]) => `<button type="button" class="chip" data-rt="${t}">${l}</button>`).join('')}
+    <label class="chip rem-pick">${ic('cal')}<input type="datetime-local" data-rpick value="${local}" aria-label="Choisir la date et l'heure"></label><button type="button" class="chip" data-rok>OK</button></div>`;
+}
+function renderNotes() {
+  const box = $('#notes'); if (!box || !state.loaded) return;
+  const q = norm((state.q || '').trim());
+  let all = notesAll();
+  const done = all.filter(n => n.done).length;
+  all = all.filter(n => !!n.done === NT.showDone && (!q || norm(n.text).includes(q)));
+  const now = Date.now();
+  // rappels proches en premier, puis les plus récentes
+  all.sort((a, b) => (!!b.remind && !b.done) - (!!a.remind && !a.done) || (a.remind && b.remind ? a.remind - b.remind : (b.updatedAt || 0) - (a.updatedAt || 0)));
+  box.innerHTML = all.map(n => {
+    const late = n.remind && !n.done && n.remind <= now;
+    return `<div class="note${late ? ' late' : ''}${n.done ? ' done' : ''}" data-nid="${esc(n.id)}">
+      <div class="note-t" contenteditable="${n.done ? 'false' : 'true'}" spellcheck="true" lang="fr">${esc(n.text)}</div>
+      ${n.remind ? `<button type="button" class="note-rem" data-na="bell">${ic('bell')}${late ? 'En retard · ' : ''}${whenTxt(n.remind)}</button>` : ''}
+      <div class="note-a">
+        <button type="button" data-na="done" title="${n.done ? 'Remettre en cours' : 'Fait'}" aria-label="${n.done ? 'Remettre en cours' : 'Marquer comme fait'}">${ic(n.done ? 'undo' : 'tick')}</button>
+        ${n.done ? '' : `<button type="button" data-na="bell" title="Rappel" aria-label="Rappel">${ic('bell')}</button>`}
+        ${n.remind && !n.done ? `<button type="button" data-na="cal" title="Ajouter au calendrier du téléphone (alarme garantie)" aria-label="Ajouter au calendrier du téléphone">${ic('cal')}</button>` : ''}
+        <button type="button" data-na="doc" title="Transformer en document" aria-label="Transformer en document">${ic('doc')}</button>
+        <button type="button" data-na="del" title="Supprimer" aria-label="Supprimer">${ic('trash')}</button>
+      </div>
+      ${NT.open === n.id ? remChoices() + (n.remind ? '<button type="button" class="lnk" data-rclear>Retirer le rappel</button>' : '') : ''}
+    </div>`;
+  }).join('') || (q || NT.showDone ? '' : '');
+  $('#notesDone').hidden = !done && !NT.showDone;
+  $('#notesDone').textContent = NT.showDone ? 'Notes en cours' : `${done} faite${done > 1 ? 's' : ''}`;
+}
+async function saveNote(n) { try { await Store.save(n); } catch { toast('Note non enregistrée pour le moment.', true); } scheduleReminders(); }
+async function addNote(text, remind) {
+  text = text.trim(); if (!text) return;
+  const now = Date.now();
+  const n = { id: uid(), type: 'note', title: text.split('\n')[0].slice(0, 80), text, remind: remind || null, notified: false, done: false, createdAt: now, updatedAt: now };
+  await saveNote(n); renderNotes();
+  if (remind) { askNotify(); toast('Note ajoutée, rappel ' + whenTxt(remind)); }
+}
+// Saisie rapide
+const QN = { remind: null };
+function qnRefresh() {
+  $('#qnWhen').innerHTML = QN.open ? remChoices() : '';
+  $('#qnWhen').hidden = !QN.open;
+  $('#qnBell').classList.toggle('on', !!QN.remind);
+  $('#qnBell').setAttribute('aria-pressed', String(!!QN.remind));
+  $('#qnRemTxt').textContent = QN.remind ? 'Rappel ' + whenTxt(QN.remind) : '';
+}
+$('#qnForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const t = $('#qnText');
+  await addNote(t.value, QN.remind);
+  t.value = ''; t.style.height = ''; QN.remind = null; QN.open = false; qnRefresh();
+});
+$('#qnText').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#qnForm').requestSubmit(); } });
+$('#qnText').addEventListener('input', e => { const t = e.target; t.style.height = ''; t.style.height = Math.min(160, t.scrollHeight) + 'px'; });
+$('#qnBell').addEventListener('click', () => { QN.open = !QN.open; qnRefresh(); });
+function pickFrom(root, e) {
+  const b = e.target.closest('[data-rt]'); if (b) return +b.dataset.rt;
+  if (e.target.closest('[data-rok]')) { const v = root.querySelector('[data-rpick]').value; const t = v ? new Date(v).getTime() : NaN; if (!(t > Date.now())) { toast('Choisissez une date à venir.', true); return null; } return t; }
+  return null;
+}
+$('#qnWhen').addEventListener('click', e => { const t = pickFrom($('#qnWhen'), e); if (t) { QN.remind = t; QN.open = false; qnRefresh(); askNotify(); $('#qnText').focus(); } });
+// Actions sur les notes
+$('#notes').addEventListener('click', async e => {
+  const card = e.target.closest('.note'); if (!card) return;
+  const n = state.docs.get(card.dataset.nid); if (!n) return;
+  const t = pickFrom(card, e);
+  if (t) { n.remind = t; n.notified = false; NT.open = null; await saveNote(n); renderNotes(); askNotify(); toast('Rappel ' + whenTxt(t)); return; }
+  if (e.target.closest('[data-rclear]')) { n.remind = null; NT.open = null; await saveNote(n); renderNotes(); return; }
+  const a = e.target.closest('[data-na]'); if (!a) return;
+  const k = a.dataset.na;
+  if (k === 'done') { n.done = !n.done; NT.open = null; await saveNote(n); renderNotes(); if (n.done) toast('Note faite.'); }
+  else if (k === 'bell') { NT.open = NT.open === n.id ? null : n.id; renderNotes(); }
+  else if (k === 'cal') noteToCalendar(n);
+  else if (k === 'doc') await createDoc('texte', { title: n.title || 'Note', html: n.text.split(/\n/).map(l => `<p>${esc(l) || '<br>'}</p>`).join('') });
+  else if (k === 'del') {
+    if (!card.classList.contains('armed')) { card.classList.add('armed'); a.title = 'Toucher encore pour supprimer'; toast('Toucher encore la corbeille pour supprimer la note.'); setTimeout(() => card.classList.remove('armed'), 3000); return; }
+    try { await Store.remove(n.id); } catch {} renderNotes(); scheduleReminders(); toast('Note supprimée.');
+  }
+});
+$('#notes').addEventListener('focusout', async e => {
+  const el = e.target.closest('.note-t'); if (!el) return;
+  const n = state.docs.get(el.closest('.note').dataset.nid); if (!n) return;
+  const v = el.innerText.replace(/\n$/, '').trim();
+  if (!v) { el.textContent = n.text; return; }
+  if (v !== n.text) { n.text = v; n.title = v.split('\n')[0].slice(0, 80); await saveNote(n); }
+});
+$('#notesDone').addEventListener('click', () => { NT.showDone = !NT.showDone; NT.open = null; renderNotes(); });
+
+// Calendrier du téléphone : fichier .ics avec alarme (fonctionne même appli fermée)
+function noteToCalendar(n) {
+  const z = t => new Date(t).toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const e = s => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+  const fold = l => { const out = []; let cur = ''; for (const ch of l) { if (new TextEncoder().encode(cur + ch).length > 73) { out.push(cur); cur = ' ' + ch; } else cur += ch; } out.push(cur); return out.join('\r\n'); };
+  const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Grimoire//Notes//FR', 'CALSCALE:GREGORIAN', 'BEGIN:VEVENT', `UID:${n.id}@grimoire`, `DTSTAMP:${z(Date.now())}`, `DTSTART:${z(n.remind)}`, `DTEND:${z(n.remind + 9e5)}`,
+    `SUMMARY:${e(n.title || 'Rappel')}`, `DESCRIPTION:${e(n.text)}`, 'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${e(n.title || 'Rappel')}`, 'TRIGGER:PT0M', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR'].map(fold).join('\r\n');
+  if (/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+    // iPhone : le fichier s'ouvre dans Calendrier, qui propose « Ajouter »
+    const a = document.createElement('a'); a.href = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(ics); a.target = '_blank'; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+  } else saveFile('Rappel ' + safeName(n.title).slice(0, 40) + '.ics', ics);
+}
+
+// Rappels : notification quand l'heure arrive (appli ouverte ou en arrière-plan récent), pastille sur l'icône
+async function askNotify() {
+  if (!('Notification' in window) || Notification.permission !== 'default') return;
+  try { await Notification.requestPermission(); } catch {}
+}
+async function fireReminder(n) {
+  const body = n.text.length > 180 ? n.text.slice(0, 177) + '…' : n.text;
+  let shown = false;
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try { const reg = await navigator.serviceWorker.ready; await reg.showNotification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { note: n.id }, requireInteraction: true }); shown = true; }
+    catch { try { new Notification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png' }); shown = true; } catch {} }
+  }
+  if (!shown || document.visibilityState === 'visible') toast('🔔 ' + body);
+}
+async function checkReminders() {
+  if (!state.loaded) return;
+  const now = Date.now(); let changed = false;
+  for (const n of notesAll()) if (n.remind && !n.done && n.remind <= now && !n.notified) { n.notified = true; changed = true; await fireReminder(n); try { await Store.save(n); } catch {} }
+  const due = notesAll().filter(n => n.remind && !n.done && n.remind <= now).length;
+  try { if (navigator.setAppBadge) due ? navigator.setAppBadge(due) : navigator.clearAppBadge(); } catch {}
+  if (changed || due) renderNotes();
+}
+function scheduleReminders() {
+  clearTimeout(NT.timer);
+  const next = notesAll().filter(n => n.remind && !n.done && !n.notified).map(n => n.remind).sort((a, b) => a - b)[0];
+  checkReminders();
+  if (next) NT.timer = setTimeout(scheduleReminders, Math.max(500, Math.min(next - Date.now() + 200, 6e4)));
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleReminders(); });
+// clic sur une notification : afficher la note
+async function focusNote(id) {
+  if (state.view !== 'home') await goHome();
+  NT.showDone = false; renderNotes();
+  const el = $(`.note[data-nid="${CSS.escape(id)}"]`); if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600); }
+}
+if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.note) focusNote(e.data.note); });
+
 $('#docs').addEventListener('click', e => { const b = e.target.closest('.drow'); if (b) openDoc(b.dataset.id); });
 $('#q').addEventListener('input', debounce(e => { state.q = e.target.value; renderHome(); }, 120));
 $('#chips').addEventListener('click', e => {
@@ -6973,7 +7137,7 @@ $('#restoreIn').addEventListener('change', async e => {
     if (!data || data.app !== 'grimoire' || !Array.isArray(data.docs)) throw 0;
     let added = 0, kept = 0;
     for (const d of data.docs) {
-      if (!d || !d.id || !/^(texte|feuille|pdf)$/.test(d.type)) continue;
+      if (!d || !d.id || !/^(texte|feuille|pdf|note)$/.test(d.type)) continue;
       const cur = state.docs.get(d.id);
       if (cur && (cur.updatedAt || 0) >= (d.updatedAt || 0)) { kept++; continue; }
       if (d.type === 'pdf') {
@@ -7018,5 +7182,5 @@ window.addEventListener('error', e => { toast('Un problème est survenu : ' + (e
 window.addEventListener('unhandledrejection', e => { const m = e.reason && (e.reason.message || e.reason.code); toast('Un problème est survenu' + (m ? ' : ' + m : '.'), true); });
 applyMode();
 renderHome();
-Store.init();
+Store.init().then(() => { scheduleReminders(); const nid = new URLSearchParams(location.search).get('note'); if (nid) { history.replaceState(null, '', location.pathname); focusNote(nid); } });
 })();
