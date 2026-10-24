@@ -116,7 +116,7 @@
           <button class="tb" data-w="redo" title="Rétablir (Ctrl+Y)" data-ic="redo"></button>
           <span class="tb-sep"></span>
           <select class="tb-select" id="blockSel" aria-label="Style de paragraphe">
-            <option value="p">Paragraphe</option><option value="h1">Titre 1</option><option value="h2">Titre 2</option><option value="h3">Titre 3</option><option value="blockquote">Citation</option>
+            <option value="p">Paragraphe</option><option value="h1">Titre 1</option><option value="h2">Titre 2</option><option value="h3">Titre 3</option><option value="blockquote">Citation</option><option value="__sty">Modifier les styles…</option>
           </select>
           <select class="tb-select" id="fontSel" aria-label="Police"><option value="">Police</option><option value="Source Serif 4" style="font-family:Source Serif 4">Source Serif</option><option value="Instrument Sans" style="font-family:Instrument Sans">Instrument Sans</option><option value="Arial" style="font-family:Arial">Arial</option><option value="Calibri" style="font-family:Calibri">Calibri</option><option value="Georgia" style="font-family:Georgia">Georgia</option><option value="Times New Roman" style="font-family:Times New Roman">Times New Roman</option><option value="Verdana" style="font-family:Verdana">Verdana</option><option value="Courier New" style="font-family:Courier New">Courier New</option></select>
           <select class="tb-select" id="sizeSel" aria-label="Taille du texte"><option value="">Taille</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="14">14</option><option value="16">16</option><option value="18">18</option><option value="20">20</option><option value="24">24</option><option value="28">28</option><option value="36">36</option><option value="48">48</option></select>
@@ -148,6 +148,8 @@
           <button class="tb" data-w="pagebreak" title="Saut de page (Ctrl+Entrée)" data-ic="pagebreak"></button>
           <button class="tb" data-w="toc" title="Insérer un sommaire" data-ic="toc"></button>
           <span class="tb-sep"></span>
+          <button class="tb" data-w="cols" title="Colonnes : mettre le passage en 2 ou 3 colonnes" data-ic="cols2"></button>
+          <button class="tb" data-w="track" title="Suivi des modifications (Ctrl+Maj+E)" aria-pressed="false" data-ic="pen"></button>
           <button class="tb" data-w="comment" title="Nouveau commentaire sur la sélection (Ctrl+Alt+M)" data-ic="comment"></button>
           <button class="tb" data-w="find" title="Rechercher et remplacer (Ctrl+F)" data-ic="search"></button>
           <button class="tb" data-w="layout" title="Mise en page, en-tête et pied de page" data-ic="layout"></button>
@@ -173,9 +175,10 @@
           <button class="pbtn" data-f="all">Tout remplacer</button>
         </div>
       </div>
+      <div class="trk-bar" id="trackBar" hidden></div>
       <div class="w-body">
         <nav class="outline" id="outline" aria-label="Plan du document"><p class="eyebrow">Plan</p><ol id="outlineList"></ol></nav>
-        <div class="w-scroll" id="wScroll"><div class="page-wrap"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article><div id="pgMarks" aria-hidden="true"></div><aside class="cmt-rail" id="cmtRail" aria-label="Commentaires"></aside></div></div><style id="cmtCss"></style>
+        <div class="w-scroll" id="wScroll"><div class="page-wrap"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article><div id="pgMarks" aria-hidden="true"></div><aside class="cmt-rail" id="cmtRail" aria-label="Commentaires"></aside></div></div><style id="cmtCss"></style><style id="docStyles"></style>
         <div class="img-bar tbl-bar" id="tblBar" hidden role="toolbar" aria-label="Tableau">
           <button data-tb="rowAbove">+ Ligne au-dessus</button><button data-tb="rowBelow">+ Ligne en dessous</button><button data-tb="colLeft">+ Colonne à gauche</button><button data-tb="colRight">+ Colonne à droite</button>
           <button data-tb="rowDel">− Ligne</button><button data-tb="colDel">− Colonne</button><button data-tb="merge">Fusionner →</button><button data-tb="split">Scinder</button>
@@ -199,6 +202,7 @@
         <div class="set-acts"><button class="pbtn" type="submit">Appliquer</button><button class="pbtn ghost" type="button" id="lpDel">Retirer le lien</button></div>
       </form>
       <div class="mini-pop page-pop" id="pagePop" hidden></div>
+      <div class="mini-pop page-pop style-pop" id="stylePop" hidden></div>
     </section>
 
 
