@@ -829,3 +829,6 @@ body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-heigh
 #aiMe{width:100%;resize:vertical;font:inherit;font-size:14px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--paper);color:var(--fg)}
 .pl-err{color:var(--err,#B23F33);font-size:13px;margin:6px 0 0}
 #plumeOut p{margin:0 0 6px}
+.mp-types{display:flex;flex-wrap:wrap;gap:4px;padding:2px 6px 6px}
+.mp-types button{border:1px solid var(--line);background:var(--paper);border-radius:7px;padding:4px 8px;font-size:12.5px}
+.mp-types button[aria-pressed="true"]{border-color:var(--copper);background:var(--accent-soft);color:var(--accent)}

@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.17.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -2026,11 +2026,13 @@ async function ensureHF() {
   SH.sid = SH.hf.getSheetId(SH.hf.addSheet('Feuille1'));
   return true;
 }
+// Une cellule au format Texte garde exactement ce qui est tapé (« 0612… », « 10045822 »).
+const hfVal = x => x && x.f && x.f.n === 'txt' && x.v !== '' && String(x.v)[0] !== '=' ? "'" + String(x.v).replace(/^'/, '') : toHF(x ? x.v : '');
 function toHF(raw) {
   if (raw == null || raw === '') return null;
   const s = String(raw);
   if (s[0] === '=') return '=' + (SH.fr ? frNamesToEn(s.slice(1)) : frToExcel(s.slice(1)));
-  if (s[0] === "'") return s.slice(1);
+  if (s[0] === "'") return s;
   if (/^(VRAI|FAUX)$/i.test(s.trim())) return /^VRAI$/i.test(s.trim());
   const n = parseNum(s);
   if (n != null) return n;
@@ -2060,7 +2062,7 @@ function ensureSheets(doc) {
 const refName = n => /^[A-Za-zÀ-ÿ_][A-Za-z0-9À-ÿ_.]*$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`;
 function sheetData(sh) {
   const data = [];
-  for (let r = 0; r < sh.rows; r++) { const row = []; for (let c = 0; c < sh.cols; c++) { const x = sh.cells[addr(r, c)]; row.push(x ? toHF(x.v) : null); } data.push(row); }
+  for (let r = 0; r < sh.rows; r++) { const row = []; for (let c = 0; c < sh.cols; c++) { const x = sh.cells[addr(r, c)]; row.push(x ? hfVal(x) : null); } data.push(row); }
   return data;
 }
 function serToRaw(v) {
@@ -2131,10 +2133,15 @@ function buildGrid() {
 const ERR_FR = { '#NAME?': '#NOM?', '#VALUE!': '#VALEUR!', '#NUM!': '#NOMBRE!', '#SPILL!': '#PROPAGATION!', '#ERROR!': '#ERREUR!', '#DIV/0!': '#DIV/0!', '#N/A': '#N/A', '#REF!': '#REF!', '#CYCLE!': '#CYCLE!' };
 const ERR_WHY = { NAME: 'nom de fonction ou de plage inconnu', VALUE: 'type de valeur incorrect (texte à la place d\'un nombre ?)', NUM: 'nombre impossible', SPILL: 'le résultat déborde sur des cellules déjà remplies', DIV_BY_ZERO: 'division par zéro', NA: 'valeur introuvable', REF: 'référence vers une cellule supprimée', CYCLE: 'la formule fait référence à elle-même', ERROR: 'formule incorrecte' };
 const NF_CACHE = {};
+// Devises proposées : code ISO → nom affiché et symbole pour Excel
+const CURRENCIES = [['EUR', 'Euro', '€'], ['USD', 'Dollar US', '$'], ['GBP', 'Livre sterling', '£'], ['CHF', 'Franc suisse', 'CHF'], ['CAD', 'Dollar canadien', 'CA$'], ['AUD', 'Dollar australien', 'AU$'], ['JPY', 'Yen', '¥'], ['CNY', 'Yuan', 'CN¥'], ['MAD', 'Dirham marocain', 'MAD'], ['TND', 'Dinar tunisien', 'TND'], ['DZD', 'Dinar algérien', 'DZD'], ['XOF', 'Franc CFA', 'F CFA'], ['XPF', 'Franc pacifique', 'F CFP']];
+const curOf = n => n === 'eur' ? 'EUR' : /^cur:[A-Z]{3}$/.test(n || '') ? n.slice(4) : null;
+const curDec = code => ['JPY', 'XOF', 'XPF'].includes(code) ? 0 : ['TND'].includes(code) ? 3 : 2;
 function numFmt(n, d) {
   const k = (n || '') + '|' + (d ?? '');
   if (NF_CACHE[k]) return NF_CACHE[k];
-  const o = n === 'eur' ? { style: 'currency', currency: 'EUR' } : n === 'pct' ? { style: 'percent', maximumFractionDigits: 2 } : n === 'dec2' ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : { maximumFractionDigits: 6 };
+  const cu = curOf(n);
+  const o = cu ? { style: 'currency', currency: cu, currencyDisplay: ['USD', 'GBP', 'JPY', 'EUR'].includes(cu) ? 'narrowSymbol' : 'symbol' } : n === 'eur' ? { style: 'currency', currency: 'EUR' } : n === 'pct' ? { style: 'percent', maximumFractionDigits: 2 } : n === 'dec2' ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : { maximumFractionDigits: 6 };
   if (d != null) { o.minimumFractionDigits = d; o.maximumFractionDigits = d; }
   return (NF_CACHE[k] = new Intl.NumberFormat('fr-FR', o));
 }
@@ -2149,6 +2156,7 @@ function display(r, c) {
   else if (v == null || v === '') txt = '';
   else if (typeof v === 'object') { txt = ERR_FR[v.value] || v.value || '#ERREUR'; cls = 'err'; }
   else if (typeof v === 'number') { txt = f.n === 'date' ? fmtDate(v) : numFmt(f.n, f.d).format(v); cls = 'num'; }
+  else if (f.n === 'txt' && x && String(x.v)[0] !== '=') txt = String(x.v);
   else if (typeof v === 'boolean') { txt = v ? 'VRAI' : 'FAUX'; cls = 'ac'; }
   else txt = String(v);
   const cf = SH.cfMap && SH.cfMap[r + ',' + c];
@@ -2368,7 +2376,7 @@ function stepDecimals(delta) {
   const v = (SH.vals[SH.sel.r] || [])[SH.sel.c];
   let base = first.d;
   if (base == null) {
-    if (first.n === 'dec2' || first.n === 'eur') base = 2;
+    if (first.n === 'dec2' || first.n === 'eur') base = 2; else if (curOf(first.n)) base = curDec(curOf(first.n));
     else if (typeof v === 'number') { const t = String(+v.toPrecision(12)); base = first.n === 'pct' ? Math.max(0, (String(+(v * 100).toPrecision(12)).split('.')[1] || '').length) : (t.split('.')[1] || '').length; }
     else base = 0;
   }
@@ -2501,10 +2509,10 @@ function applyRaw(r, c, raw) {
   else {
     const cell = old || (cells[k] = { v: '', f: {} }); cell.f ||= {};
     cell.v = raw;
-    if (raw[0] !== '=' && !cell.f.n) { const t = raw.trim(); if (t.endsWith('%') && parseNum(t) != null) cell.f.n = 'pct'; else if (t.endsWith('€') && parseNum(t) != null) cell.f.n = 'eur'; }
+    if (raw[0] !== '=' && !cell.f.n) { const t = raw.trim(); if (t.endsWith('%') && parseNum(t) != null) cell.f.n = 'pct'; else if (t.endsWith('€') && parseNum(t) != null) cell.f.n = 'eur'; else { const m = /^([$£¥])\s*(-?[\d\s.,]+)$|^(-?[\d\s.,]+)\s*([$£¥]|CHF)$/.exec(t); if (m) { const sym = m[1] || m[4], num = m[2] || m[3]; const code = { $: 'USD', '£': 'GBP', '¥': 'JPY', CHF: 'CHF' }[sym]; if (code && parseNum(num) != null) { cell.f.n = 'cur:' + code; cell.v = raw = numToRaw(parseNum(num)); } } } }
     if (!cell.f.n && (raw[0] === '=' ? DATE_FN.test(raw) : parseNum(raw) == null && parseDate(raw) != null)) cell.f.n = 'date';
   }
-  if (SH.hf) SH.hf.setCellContents({ sheet: SH.sid, row: r, col: c }, [[toHF(raw)]]);
+  if (SH.hf) SH.hf.setCellContents({ sheet: SH.sid, row: r, col: c }, [[hfVal(cells[k] || { v: raw })]]);
 }
 function afterChange() { renderValues(); updateFx(); updateSelStatus(); updateSheetTools(); scheduleSave(); }
 function setRaw(r, c, raw) { pushHist(); applyRaw(r, c, raw); afterChange(); }
@@ -2521,6 +2529,7 @@ function setFmt(key, val) {
     const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
     if (val) x.f[key] = val; else delete x.f[key];
     if (!x.v && !Object.keys(x.f).length) delete state.cur.cells[k];
+    if (key === 'n' && x.v !== '' && SH.hf) SH.hf.setCellContents({ sheet: SH.sid, row: r, col: c }, [[hfVal(x)]]);
   });
   afterChange();
 }
@@ -3717,7 +3726,7 @@ function openSheetMenu(kind) {
   const cur = state.cur;
   const F = cur.frz || {};
   p.innerHTML = kind === 'struct'
-    ? `<div class="mp-t">Lignes et colonnes</div><button data-m="rowIns">${ic('rowIns')}Insérer une ligne au-dessus</button><button data-m="rowDel">${ic('rowDel')}Supprimer la ligne</button><button data-m="colIns">${ic('colIns')}Insérer une colonne à gauche</button><button data-m="colDel">${ic('colDel')}Supprimer la colonne</button><hr>`
+    ? `<div class="mp-t">Lignes et colonnes</div>${structItems()}<hr>`
       + `<button data-m="hideR">${ic('eyeOff')}Masquer les lignes</button><button data-m="hideC">${ic('eyeOff')}Masquer les colonnes</button>`
       + (cur.hid && cur.hid.r.length ? `<button data-m="showR">${ic('eye')}Afficher les ${cur.hid.r.length} ligne${cur.hid.r.length > 1 ? 's' : ''} masquée${cur.hid.r.length > 1 ? 's' : ''}</button>` : '')
       + (cur.hid && cur.hid.c.length ? `<button data-m="showC">${ic('eye')}Afficher les ${cur.hid.c.length} colonne${cur.hid.c.length > 1 ? 's' : ''} masquée${cur.hid.c.length > 1 ? 's' : ''}</button>` : '')
@@ -3731,12 +3740,47 @@ function openSheetMenu(kind) {
       + (cur.filter ? `<button data-m="unfilter">${ic('filter')}Retirer tous les filtres</button>` : '');
   placePop(p, anchor);
 }
+function structItems() {
+  const R = rng(), nr = R.r2 - R.r1 + 1, nc = R.c2 - R.c1 + 1;
+  const L = (n, one, many) => n > 1 ? `${n} ${many}` : one;
+  return `<button data-m="rowIns">${ic('rowIns')}Insérer ${L(nr, 'une ligne', 'lignes')} au-dessus</button><button data-m="rowInsB">${ic('rowIns')}Insérer ${L(nr, 'une ligne', 'lignes')} en dessous</button><button data-m="rowDel">${ic('rowDel')}Supprimer ${L(nr, 'la ligne', 'lignes')}${nr === 1 ? ' ' + (R.r1 + 1) : ` ${R.r1 + 1} à ${R.r2 + 1}`}</button>`
+    + `<button data-m="colIns">${ic('colIns')}Insérer ${L(nc, 'une colonne', 'colonnes')} à gauche</button><button data-m="colInsR">${ic('colIns')}Insérer ${L(nc, 'une colonne', 'colonnes')} à droite</button><button data-m="colDel">${ic('colDel')}Supprimer ${L(nc, 'la colonne', 'colonnes')}${nc === 1 ? ' ' + COLN(R.c1) : ` ${COLN(R.c1)} à ${COLN(R.c2)}`}</button>`;
+}
+// Clic droit sur une cellule ou un en-tête : lignes, colonnes et type de cellule
+function openCellMenu(e) {
+  commitEdit(false); closeMini();
+  const p = $('#fmtPop'); p.dataset.k = 'ctx';
+  const f = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
+  const T = [['', 'Standard'], ['dec2', 'Nombre'], ['txt', 'Texte'], ['eur', 'Euros (€)'], ['pct', 'Pourcentage'], ['date', 'Date']];
+  p.innerHTML = structItems() + `<hr><div class="mp-t">Type de cellule</div><div class="mp-types">${T.map(([v, l]) => `<button data-nt="${v}" aria-pressed="${(f.n || '') === v}">${l}</button>`).join('')}<button data-nt="__cur" aria-pressed="${!!(f.n && f.n.startsWith('cur:'))}">Autre devise…</button></div>`
+    + `<hr><button data-m="note">${ic('note')}${f.note ? 'Modifier la note' : 'Ajouter une note'}</button><button data-m="dd">${ic('list')}Liste déroulante</button><button data-m="clear">${ic('eraser')}Effacer le contenu<small>Suppr</small></button>`;
+  p.hidden = false;
+  const host = $('#sheet').getBoundingClientRect();
+  p.style.bottom = 'auto';
+  p.style.left = Math.max(8, Math.min(e.clientX - host.left, host.width - p.offsetWidth - 8)) + 'px';
+  p.style.top = Math.max(8, Math.min(e.clientY - host.top, host.height - p.offsetHeight - 8)) + 'px';
+}
+$('#fmtPop').addEventListener('click', e => {
+  const b = e.target.closest('[data-nt]'); if (!b) return; e.stopImmediatePropagation();
+  if (b.dataset.nt === '__cur') { $('#fmtPop').innerHTML = `<div class="mp-t">Devise</div>` + CURRENCIES.map(([c, n, sym]) => `<button data-nt="${c === 'EUR' ? 'eur' : 'cur:' + c}">${n} <small>${sym}</small></button>`).join(''); return; }
+  closeMini(); setFmt('n', b.dataset.nt); toast('Type : ' + (b.textContent.trim() || 'Standard'));
+}, true);
+gw.addEventListener('contextmenu', e => {
+  const td = e.target.closest('td[data-r]'), th = e.target.closest('th');
+  if (!td && !th) return;
+  e.preventDefault();
+  if (td) { const r = +td.dataset.r, c = +td.dataset.c, R = rng(); if (r < R.r1 || r > R.r2 || c < R.c1 || c > R.c2) select(r, c); }
+  else if (th.dataset.c != null && th.classList.contains('ch')) { const c = +th.dataset.c, R = rng(); if (c < R.c1 || c > R.c2) { th.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: e.clientX, clientY: e.clientY })); th.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } }
+  else if (th.closest('tbody')) { th.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: e.clientX, clientY: e.clientY })); th.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); }
+  openCellMenu(e);
+});
 const SMENU = {
   chart: () => openChartEditor(), pivot: () => openPivot(), dd: openDdEditor, chk: toggleCheckboxFmt, note: openNoteEditor,
   fn: () => { if (!SH.editing) startEdit('=', false); $('#fxKeys').hidden = false; $('#fnList').hidden = false; $('#fxBtn').setAttribute('aria-pressed', 'true'); requestAnimationFrame(drawSel); },
   cf: () => openCF(), find: () => openSFind(true), names: openNames,
   hideR: () => setHidden('r', true), hideC: () => setHidden('c', true), showR: () => setHidden('r', false), showC: () => setHidden('c', false), unfilter: clearFilters,
   rowIns: () => structural('rowIns'), rowDel: () => structural('rowDel'), colIns: () => structural('colIns'), colDel: () => structural('colDel'),
+  rowInsB: () => structural('rowIns', true), colInsR: () => structural('colIns', true),
   frz1: () => setFreeze(1, (state.cur.frz || {}).c || 0), frzC: () => setFreeze((state.cur.frz || {}).r || 0, 1), frz0: () => setFreeze(0, 0),
   fillDown: () => fillDown(), clear: () => { commitEdit(false); clearRange(); },
   sortAsc: () => sortZone(false), sortDesc: () => sortZone(true), filter: () => openFilter()
@@ -3746,6 +3790,8 @@ $('#fmtPop').addEventListener('click', e => { const b = e.target.closest('[data-
 /* police et taille des cellules */
 $('#sFont').innerHTML = '<option value="">Police</option>' + GRID_FONTS.map(f => `<option value="${f}" style="font-family:${FONT_STACK[f]}">${f}</option>`).join('');
 $('#sSize').innerHTML = '<option value="">Taille</option>' + GRID_SIZES.map(z => `<option value="${z}">${z}</option>`).join('');
+$('#sNum').innerHTML = '<option value="">Standard</option><option value="dec2">Nombre</option><option value="txt">Texte</option><option value="pct">Pourcentage</option><option value="date">Date</option>'
+  + '<optgroup label="Monnaie">' + CURRENCIES.map(([c, n, sym]) => `<option value="${c === 'EUR' ? 'eur' : 'cur:' + c}">${n} (${sym})</option>`).join('') + '</optgroup>';
 $('#sNum').addEventListener('change', e => { setFmt('n', e.target.value); gw.focus({ preventScroll: true }); });
 $('#sFont').addEventListener('change', e => { setFmt('ff', e.target.value === 'Instrument Sans' ? '' : e.target.value); gw.focus({ preventScroll: true }); });
 $('#sSize').addEventListener('change', e => { setFmt('fs', e.target.value === '10' ? '' : +e.target.value); gw.focus({ preventScroll: true }); });
@@ -4137,39 +4183,43 @@ function shiftSheetObjects(op, at) {
   const sname = cur.sheets[cur.active].name;
   Object.values(state.cur.names || {}).forEach(nm => { if (nm.s !== sname) return; const o = rangeObj(nm.ref); if (!o || !fixR(o)) return; nm.ref = rngRef(o); });
 }
-function structural(op) {
+function structural(op, after) {
   commitEdit(false);
   if (!SH.hf) return toast('Le moteur de calcul est nécessaire pour insérer ou supprimer des lignes.', true);
-  const cur = state.cur, { r, c } = SH.sel;
+  const cur = state.cur, R = rng();
+  // autant de lignes (ou colonnes) que la sélection en compte ; au-dessus/à gauche, ou en dessous/à droite
+  const isR = op[0] === 'r', n = isR ? R.r2 - R.r1 + 1 : R.c2 - R.c1 + 1;
+  const r = isR ? (op === 'rowIns' && after ? R.r2 + 1 : R.r1) : SH.sel.r, c = !isR ? (op === 'colIns' && after ? R.c2 + 1 : R.c1) : SH.sel.c;
   if (cur.filter) { cur.filter = undefined; SH.hiddenRows = 0; toast('Filtre retiré pour modifier la structure.'); }
-  if (op === 'rowDel' && cur.rows <= 1 || op === 'colDel' && cur.cols <= 1) return;
+  if (op === 'rowDel' && cur.rows - n < 1 || op === 'colDel' && cur.cols - n < 1) return toast('Impossible de tout supprimer.');
   pushHist();
   const fm = {}; Object.entries(cur.cells).forEach(([k, x]) => { if (x.f && Object.keys(x.f).length) fm[k] = x.f; });
   const shift = (k, dr, dc) => { const p = parseAddr(k); return addr(p.r + dr, p.c + dc); };
   const nf = {};
   Object.entries(fm).forEach(([k, f]) => {
     const p = parseAddr(k);
-    if (op === 'rowIns') nf[p.r >= r ? shift(k, 1, 0) : k] = f;
-    else if (op === 'rowDel') { if (p.r !== r) nf[p.r > r ? shift(k, -1, 0) : k] = f; }
-    else if (op === 'colIns') nf[p.c >= c ? shift(k, 0, 1) : k] = f;
-    else if (op === 'colDel') { if (p.c !== c) nf[p.c > c ? shift(k, 0, -1) : k] = f; }
+    if (op === 'rowIns') nf[p.r >= r ? shift(k, n, 0) : k] = f;
+    else if (op === 'rowDel') { if (p.r < r || p.r >= r + n) nf[p.r >= r + n ? shift(k, -n, 0) : k] = f; }
+    else if (op === 'colIns') nf[p.c >= c ? shift(k, 0, n) : k] = f;
+    else if (op === 'colDel') { if (p.c < c || p.c >= c + n) nf[p.c >= c + n ? shift(k, 0, -n) : k] = f; }
   });
-  if (op === 'rowIns') { SH.hf.addRows(SH.sid, [r, 1]); cur.rows++; }
-  if (op === 'rowDel') { SH.hf.removeRows(SH.sid, [r, 1]); }
+  if (op === 'rowIns') { SH.hf.addRows(SH.sid, [r, n]); cur.rows += n; }
+  if (op === 'rowDel') { SH.hf.removeRows(SH.sid, [r, n]); }
   if (op === 'colIns') {
-    SH.hf.addColumns(SH.sid, [c, 1]); cur.cols++;
-    const w = {}; Object.entries(cur.colW).forEach(([i, v]) => { w[+i >= c ? +i + 1 : i] = v; }); cur.colW = w;
+    SH.hf.addColumns(SH.sid, [c, n]); cur.cols += n;
+    const w = {}; Object.entries(cur.colW).forEach(([i, v]) => { w[+i >= c ? +i + n : i] = v; }); cur.colW = w;
   }
   if (op === 'colDel') {
-    SH.hf.removeColumns(SH.sid, [c, 1]);
-    const w = {}; Object.entries(cur.colW).forEach(([i, v]) => { if (+i !== c) w[+i > c ? +i - 1 : i] = v; }); cur.colW = w;
+    SH.hf.removeColumns(SH.sid, [c, n]);
+    const w = {}; Object.entries(cur.colW).forEach(([i, v]) => { if (+i < c || +i >= c + n) w[+i >= c + n ? +i - n : i] = v; }); cur.colW = w;
   }
-  shiftSheetObjects(op, op[0] === 'r' ? r : c);
+  for (let k = 0; k < n; k++) shiftSheetObjects(op, isR ? r : c);
   const cells = cellsFromHF(SH.sid, {}, true);
   Object.entries(nf).forEach(([k, f]) => { (cells[k] ||= { v: '', f: {} }).f = f; });
   cur.cells = fixDates(cells);
   cur.sheets.forEach((sh, i) => { if (i !== cur.active) sh.cells = cellsFromHF(SH.ids[i], sh.cells); });
   buildGrid(); afterChange(); select(Math.min(r, cur.rows - 1), Math.min(c, cur.cols - 1));
+  if (n > 1) toast(`${n} ${isR ? 'lignes' : 'colonnes'} ${/Ins/.test(op) ? 'insérées' : 'supprimées'}. Ctrl+Z pour annuler.`);
 }
 const S = {
   undo: () => { commitEdit(false); undo(); }, redo: () => { commitEdit(false); redo(); },
@@ -6109,6 +6159,13 @@ async function docxToHtml(buf) {
   return { html, page, comments: CMT.filter(c => used.has(c.id)) };
 }
 
+// Devise d'un format de nombre Excel ([$$-409], "CHF", £…)
+function xlCur(z) {
+  const m = /\[\$([^\]-]*)-[0-9A-F]+\]/i.exec(z); const sym = m ? m[1] : (/"([^"]+)"/.exec(z) || [])[1] || (/[$£¥]/.exec(z) || [])[0];
+  if (!sym) return null;
+  const s2 = sym.trim(), hit = CURRENCIES.find(([c, , y]) => y === s2 || c === s2.toUpperCase());
+  return hit && hit[0] !== 'EUR' ? hit[0] : s2 === '$' ? 'USD' : null;
+}
 async function importFile(f) {
   if (state.cur) { if (state.view === 'sheet') commitEdit(false); await flushSave(); }
   const ext = (f.name.split('.').pop() || '').toLowerCase();
@@ -6147,7 +6204,8 @@ async function importFile(f) {
         let v, fm = {};
         if (cl.f) v = '=' + excelToFr(cl.f);
         else if (cl.t === 'n' && cl.z && X.SSF.is_date(cl.z)) { v = fmtDate(cl.v); fm.n = 'date'; }
-        else if (cl.t === 'n') { v = numToRaw(cl.v); const z = String(cl.z || ''); if (z.includes('%')) fm.n = 'pct'; else if (z.includes('€')) fm.n = 'eur'; else if (/0\.00/.test(z)) fm.n = 'dec2'; }
+        else if (cl.t === 'n') { v = numToRaw(cl.v); const z = String(cl.z || ''); if (z.includes('%')) fm.n = 'pct'; else if (z.includes('€')) fm.n = 'eur'; else if (xlCur(z)) fm.n = 'cur:' + xlCur(z); else if (/0\.00/.test(z)) fm.n = 'dec2'; }
+        if (cl.t === 's' && String(cl.z || '') === '@') fm.n = 'txt';
         else if (cl.t === 'b') v = cl.v ? 'VRAI' : 'FAUX';
         else if (cl.t === 'd') v = cl.w || String(cl.v);
         else v = cl.v == null ? '' : String(cl.v);
@@ -7098,6 +7156,9 @@ const XL_PAL = ['2A78D6', 'EB6834', '1BAF7A', 'EDA100', 'E87BA4', '008300', '625
 const xmlE = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 function xlNumFmt(n, d) {
   if (n === 'date') return 'dd/mm/yyyy';
+  if (n === 'txt') return '@';
+  const cu = n !== 'eur' && curOf(n);
+  if (cu) { const dd = d ?? curDec(cu), fr = dd ? '.' + '0'.repeat(dd) : ''; return `#,##0${fr} "${(CURRENCIES.find(x => x[0] === cu) || [, , cu])[2]}"`; }
   const dec = d ?? (n === 'dec2' || n === 'eur' || n === 'pct' ? 2 : null);
   const frac = dec ? '.' + '0'.repeat(dec) : '';
   if (n === 'eur') return `#,##0${frac} "€"`;
@@ -7478,7 +7539,8 @@ async function exportXlsx(macro) {
       else if (String(x.v)[0] === '=') {
         const fv = typeof v === 'number' ? { t: 'n', v } : typeof v === 'boolean' ? { t: 'b', v } : typeof v === 'object' && v ? { t: 'e', v: 0, w: v.value } : { t: 's', v: v == null ? '' : String(v) };
         cell = { ...fv, f: xlF(String(x.v).slice(1)) };
-      } else {
+      } else if (f.n === 'txt') cell = { t: 's', v: String(x.v), z: '@' };
+      else {
         const n = parseNum(x.v), d = n == null ? parseDate(x.v) : null;
         cell = /^(VRAI|FAUX)$/i.test(String(x.v).trim()) ? { t: 'b', v: /^VRAI$/i.test(String(x.v).trim()) } : n != null ? { t: 'n', v: n } : d != null ? { t: 'n', v: d } : { t: 's', v: String(x.v).replace(/^'/, '') };
       }
@@ -7977,7 +8039,7 @@ Règles à respecter :
 - Formules à la française : noms français (SOMME, SI, SOMME.SI, SOMME.SI.ENS, NB.SI, MOYENNE, MAX, MIN, RECHERCHEX, AUJOURDHUI, MOIS, ANNEE, TEXTE, ARRONDI…), point-virgule entre les arguments, virgule décimale. Une formule ne doit jamais faire référence à sa propre cellule ni à une plage qui la contient.
 - Préfère des plages bornées (D3:D500) aux colonnes entières.
 - Dates au format JJ/MM/AAAA.
-- Mise en forme possible : "gras", "italique" (true), "fond" et "couleur" parmi jaune, vert, bleu, rouge, violet, orange, gris, cuivre ; "format" parmi eur, pct, dec2, date ; "align" parmi gauche, centre, droite ; "bordure" (true) ; "retour" (true, retour à la ligne).
+- Mise en forme possible : "gras", "italique" (true), "fond" et "couleur" parmi jaune, vert, bleu, rouge, violet, orange, gris, cuivre ; "format" parmi eur, pct, dec2, date, txt (texte : numéros de téléphone, codes) ou un code de devise (USD, GBP, CHF, CAD, JPY…) ; "align" parmi gauche, centre, droite ; "bordure" (true) ; "retour" (true, retour à la ligne).
 - Conditions des règles : gt, ge, lt, le, eq, ne, between (avec "valeur2"), contains, empty, dup, above, below, scale (dégradé, avec "bas" et "haut" en couleurs).
 - Types de graphiques : col (colonnes), bar (barres), line (courbes), stack (colonnes empilées), pie (secteurs / camembert). "donnees" = plage avec en première colonne les libellés et en première ligne les noms de séries. "position" = cellule où placer le coin du graphique, dans une zone libre.
 - Ne remplis pas de cellules inutiles. Si on te demande un modèle de suivi, ajoute 3 à 5 lignes d'exemple réalistes pour que les formules et les graphiques montrent quelque chose.`;
@@ -7987,7 +8049,8 @@ function buildFmt(m) {
   const f = {}; if (!m || typeof m !== 'object') return f;
   if (m.gras) f.b = 1; if (m.italique) f.i = 1; if (m.souligne) f.u = 1;
   if (BCOL.has(m.fond)) f.bg = m.fond; if (BCOL.has(m.couleur)) f.fc = m.couleur;
-  if (['eur', 'pct', 'dec2', 'date'].includes(m.format)) f.n = m.format;
+  if (['eur', 'pct', 'dec2', 'date', 'txt'].includes(m.format)) f.n = m.format;
+  else if (/^[A-Z]{3}$/.test(String(m.format || '').toUpperCase()) && CURRENCIES.some(([c]) => c === String(m.format).toUpperCase())) f.n = String(m.format).toUpperCase() === 'EUR' ? 'eur' : 'cur:' + String(m.format).toUpperCase();
   const A = { gauche: 'al', centre: 'ac', droite: 'ar' }; if (A[m.align]) f.a = A[m.align];
   if (m.bordure) Object.assign(f, { bt: 1, bb: 1, bl: 1, br: 1 });
   if (m.retour) f.w = 1;
@@ -8193,6 +8256,10 @@ function commands() {
     add('Cellules', 'Format standard', 'grid', () => setFmt('n', ''));
     add('Cellules', 'Gras', 'type', () => setFmt('b'), 'Ctrl B');
     add('Structure', 'Insérer une ligne au-dessus', 'rowIns', () => structural('rowIns'));
+    add('Structure', 'Insérer une ligne en dessous', 'rowIns', () => structural('rowIns', true));
+    add('Structure', 'Insérer une colonne à droite', 'colIns', () => structural('colIns', true));
+    add('Cellules', 'Format texte (garder les zéros, numéros…)', 'type', () => setFmt('n', 'txt'));
+    CURRENCIES.filter(([c]) => c !== 'EUR').forEach(([c, n, sym]) => add('Cellules', `Format monétaire : ${n} (${sym})`, 'grid', () => setFmt('n', 'cur:' + c)));
     add('Structure', 'Supprimer la ligne', 'rowDel', () => structural('rowDel'));
     add('Structure', 'Insérer une colonne à gauche', 'colIns', () => structural('colIns'));
     add('Structure', 'Supprimer la colonne', 'colDel', () => structural('colDel'));
