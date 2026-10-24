@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.12.1';
+const APP_VERSION = '1.13.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -118,6 +118,7 @@ const IC = {
   pagePlus: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 9v6M9 12h6"/>',
   move: '<path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4"/>',
   selAll: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12l3 3 5-6"/>',
+  comment: '<path d="M4 5h16v11h-9l-5 4v-4H4z"/><path d="M8 9h8M8 12h5"/>',
   save: '<path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/>',
   saveAs: '<path d="M11 20H5V4h11l3 3v3"/><path d="M8 4v5h7V4"/><path d="M14 20v-2.2l5.4-5.4 2.2 2.2-5.4 5.4z"/>',
   printer: '<path d="M7 9V3h10v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 14h10v7H7z"/>'
@@ -871,6 +872,12 @@ function clean(node, doc) {
       under: /underline/.test(deco), strike: /line-through/.test(deco), va: st.verticalAlign
     };
     if (tag === 'B' && st.fontWeight === 'normal') { clean(ch, doc); ch.replaceWith(...ch.childNodes); continue; }
+    if (tag === 'SPAN' && /^[\w-]{1,48}$/.test(ch.getAttribute('data-c') || '')) {
+      // ancre de commentaire, éventuellement avec une mise en forme : la mise en forme passe à l'intérieur
+      const id = ch.getAttribute('data-c'), sp = doc.createElement('span'); sp.setAttribute('data-c', id);
+      ch.removeAttribute('data-c'); const inner = doc.createElement('span'); inner.setAttribute('style', ch.getAttribute('style') || '');
+      inner.append(...ch.childNodes); sp.appendChild(inner); clean(sp, doc); ch.replaceWith(sp); continue;
+    }
     // Éléments de mise en forme en ligne : on ne garde que les styles connus
     if (tag === 'SPAN' || tag === 'FONT' || tag === 'MARK' || !(KEEP[tag] || MAP[tag])) {
       clean(ch, doc);
@@ -950,7 +957,8 @@ function openWriter() {
   $('#wScroll').scrollTop = 0;
   savedRange = null;
   if (ls.get('grim.outline', true) === false) document.body.classList.add('no-outline');
-  refreshWriter();
+  CM.active = CM.edit = null; CM.panel = false; cmPurgeOrphans();
+  refreshWriter(); renderComments();
 }
 const refreshWriter = () => { updateOutline(); updateStats(); updateToolState(); };
 const refreshSoon = debounce(() => { updateOutline(); updateStats(); }, 350);
@@ -1487,6 +1495,7 @@ function updatePageMarks() {
 
 /* --- barre d'outils */
 const W = {
+  comment: () => addComment(),
   undo: () => exec('undo'), redo: () => exec('redo'),
   bold: () => exec('bold'), italic: () => exec('italic'), underline: () => exec('underline'),
   strike: () => exec('strikeThrough'), sup: () => exec('superscript'), sub: () => exec('subscript'),
@@ -1621,7 +1630,8 @@ function updateStats() {
   const pg = updatePageMarks();
   const pages = pg || Math.max(1, Math.ceil(words / 480));
   const P = pageOf();
-  $('#wStatus').innerHTML = `<span><b>${words.toLocaleString('fr-FR')}</b> mots · ${chars.toLocaleString('fr-FR')} caractères · ${mins} min de lecture</span><span>${pg ? '' : '≈ '}${pages} page${pages > 1 ? 's' : ''} A4 ${P.orient === 'landscape' ? 'paysage' : ''}</span>`;
+  const nCm = (state.cur && state.cur.comments || []).filter(c => !c.done).length;
+  $('#wStatus').innerHTML = `<span><b>${words.toLocaleString('fr-FR')}</b> mots · ${chars.toLocaleString('fr-FR')} caractères · ${mins} min de lecture${nCm ? ` · <button type="button" class="w-cmt" id="wCmtBtn">${ic('comment')}${nCm} commentaire${nCm > 1 ? 's' : ''}</button>` : ''}</span><span>${pg ? '' : '≈ '}${pages} page${pages > 1 ? 's' : ''} A4 ${P.orient === 'landscape' ? 'paysage' : ''}</span>`;
 }
 
 /* =========================================================
@@ -5764,6 +5774,30 @@ async function docxToHtml(buf) {
   const FN = {}; const fnOrder = [];
   const fnX = xml(await read('word/footnotes.xml'));
   if (fnX) desc(fnX.documentElement, 'footnote').forEach(f => { const id = wAt(f, 'id'); if (+id > 0) FN[id] = f; });
+  // commentaires (fils de discussion et état « résolu » de Word 2013+)
+  const CMT = [], CMW = {}, CM_ACTIVE = [];
+  const cmPath = Object.values(RELS).find(r => /\/comments$/.test(r.type));
+  const cmxPath = Object.values(RELS).find(r => /commentsExtended$/.test(r.type));
+  const cmX = cmPath ? xml(await read('word/' + cmPath.target.replace(/^\/?word\//, '').replace(/^\//, ''))) : null;
+  if (cmX) {
+    const ex = {};
+    const exX = cmxPath ? xml(await read('word/' + cmxPath.target.replace(/^\/?word\//, '').replace(/^\//, ''))) : null;
+    if (exX) desc(exX.documentElement, 'commentEx').forEach(e => { const g = n => e.getAttribute('w15:' + n) || e.getAttributeNS('http://schemas.microsoft.com/office/word/2012/wordml', n); ex[g('paraId')] = { parent: g('paraIdParent'), done: g('done') === '1' }; });
+    const byPid = {};
+    desc(cmX.documentElement, 'comment').forEach(c => {
+      const ps = desc(c, 'p');
+      const text = ps.map(p => desc(p, 't').map(t => t.textContent).join('')).join('\n').trim();
+      const last = ps[ps.length - 1];
+      const pid = last && (last.getAttribute('w14:paraId') || last.getAttributeNS('http://schemas.microsoft.com/office/word/2010/wordml', 'paraId'));
+      const at = Date.parse(wAt(c, 'date') || '') || Date.now();
+      const it = { wid: wAt(c, 'id'), author: wAt(c, 'author') || 'Anonyme', ini: wAt(c, 'initials') || '', at, text, pid };
+      const e = pid && ex[pid];
+      const par = e && e.parent && byPid[e.parent];
+      if (par) { par.replies.push({ id: 'r' + uid(), author: it.author, ini: it.ini, at, text }); CMW[it.wid] = par.id; }
+      else { const root = { id: 'c' + uid(), author: it.author, ini: it.ini, at, text, done: !!(e && e.done), replies: [] }; CMT.push(root); CMW[it.wid] = root.id; if (pid) byPid[pid] = root; }
+    });
+  }
+  const cw = h => CM_ACTIVE.length ? `<span data-c="${CM_ACTIVE[CM_ACTIVE.length - 1]}">${h}</span>` : h;
   // images
   const imgCache = {};
   const imgData = async rid => {
@@ -5812,6 +5846,8 @@ async function docxToHtml(buf) {
       for (const c of node.children) {
         const n = c.localName;
         if (n === 'r') await run(c);
+        else if (n === 'commentRangeStart') { const id = CMW[wAt(c, 'id')]; if (id && !CM_ACTIVE.includes(id)) CM_ACTIVE.push(id); }
+        else if (n === 'commentRangeEnd') { const id = CMW[wAt(c, 'id')]; const i = CM_ACTIVE.indexOf(id); if (i >= 0) CM_ACTIVE.splice(i, 1); }
         else if (n === 'hyperlink') {
           const rel = RELS[rAt(c, 'id')];
           cur = null; const save = parts.length; await visit(c);
@@ -5850,7 +5886,7 @@ async function docxToHtml(buf) {
         if (n === 'instrText') { if (fld.length) fld[fld.length - 1].instr += c.textContent; continue; }
         if (fld.length && fld[fld.length - 1].phase === 'instr') continue;
         if (rp.hidden) continue;
-        const target = linkParts ? { push: (css, html) => linkParts.push({ css, html }) } : { push };
+        const target = linkParts ? { push: (css, html) => linkParts.push({ css, html: cw(html) }) } : { push: (css, html) => push(css, cw(html)) };
         if (n === 't') { let t = c.textContent; if (rp.caps) t = t.toUpperCase(); if (t) target.push(rp.css, esc(t)); }
         else if (n === 'tab' || n === 'ptab') target.push(rp.css, '    ');
         else if (n === 'noBreakHyphen') target.push(rp.css, '‑');
@@ -6029,7 +6065,8 @@ async function docxToHtml(buf) {
     }
     html += notes;
   }
-  return { html, page };
+  const used = new Set([...html.matchAll(/data-c="([\w-]+)"/g)].map(m => m[1]));
+  return { html, page, comments: CMT.filter(c => used.has(c.id)) };
 }
 
 async function importFile(f) {
@@ -6042,7 +6079,8 @@ async function importFile(f) {
     if (ext === 'docx') {
       droppedImages = 0;
       let raw, page;
-      try { ({ html: raw, page } = await docxToHtml(await f.arrayBuffer())); }
+      let comments = [];
+      try { ({ html: raw, page, comments } = await docxToHtml(await f.arrayBuffer())); }
       catch (err) {
         console.warn('Import direct impossible, repli sur mammoth', err);
         droppedImages = 0;
@@ -6051,9 +6089,9 @@ async function importFile(f) {
       }
       const box = document.createElement('div'); box.innerHTML = restoreChecklists(sanitize(raw));
       const html = attachFloats(box).innerHTML;
-      await createDoc('texte', page ? { title, html, page } : { title, html });
+      await createDoc('texte', Object.assign({ title, html }, page ? { page } : {}, comments && comments.length ? { comments } : {}));
       toast(droppedImages ? `Document importé. ${droppedImages} image${droppedImages > 1 ? 's' : ''} dans un format non pris en charge.` : 'Document importé.');
-    } else if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) {
+    } else if (['xlsx', 'xlsm', 'xls', 'ods', 'csv'].includes(ext)) {
       await loadScript(LIB.xlsx);
       const X = window.XLSX;
       const wb = ext === 'csv' ? X.read(await f.text(), { type: 'string', FS: guessSep(await f.text()) }) : X.read(await f.arrayBuffer(), { cellFormula: true, cellStyles: true });
@@ -6074,6 +6112,7 @@ async function importFile(f) {
         else if (cl.t === 'd') v = cl.w || String(cl.v);
         else v = cl.v == null ? '' : String(cl.v);
         if (cl.f && cl.z) { const z = String(cl.z); if (z.includes('%')) fm.n = 'pct'; else if (z.includes('€')) fm.n = 'eur'; else if (X.SSF.is_date(z)) fm.n = 'date'; }
+        if (cl.c && cl.c.length) { const t = cl.c.map(x => String(x.t || '').replace(/^\[Threaded comment\][\s\S]*?Comment:\s*/i, '').trim()).filter(Boolean).join('\n'); if (t) fm.note = t.slice(0, 2000); }
         if (cl.s && cl.s.font) {
           if (cl.s.font.bold) fm.b = 1; if (cl.s.font.italic) fm.i = 1; if (cl.s.font.underline) fm.u = 1;
           const fn = mapFont(cl.s.font.name || ''); if (fn && fn !== 'Calibri' && GRID_FONTS.includes(fn)) fm.ff = fn;
@@ -6091,7 +6130,9 @@ async function importFile(f) {
       const colW = {}; (ws['!cols'] || []).slice(0, maxC + 1).forEach((cw, i) => { if (cw && cw.wpx) colW[i] = Math.round(Math.max(40, Math.min(cw.wpx, 420))); else if (cw && cw.wch) colW[i] = Math.round(Math.max(40, Math.min(cw.wch * 7.5, 420))); });
       return { id: uid(), src: name, name: String(name).replace(/[\[\]:*?\/\\']/g, '').slice(0, 31) || 'Feuille', cells, rows: Math.max(60, maxR + 21), cols: Math.max(12, maxC + 2), colW, hid, cf: [], charts: [] };
       });
-      if (ext === 'xlsx') {
+      let vba = null;
+      if (ext === 'xlsm') { try { vba = await readVba(await f.arrayBuffer(), sheets); } catch (err) { console.warn('Macros non lues', err); } }
+      if (ext === 'xlsx' || ext === 'xlsm') {
         try {
           const extra = await xlsxReadExtras(await f.arrayBuffer(), sheets.map(s => s.src));
           sheets.forEach(sh => {
@@ -6110,9 +6151,10 @@ async function importFile(f) {
         if (sh && o && nameOk(n.Name)) names[n.Name] = { s: sh.name, ref: rngRef(o) };
       });
       sheets.forEach(s => { delete s.src; });
-      await createDoc('feuille', { title, sheets, active: 0, names });
+      await createDoc('feuille', Object.assign({ title, sheets, active: 0, names }, vba ? { vba } : {}));
       const more = wb.SheetNames.length > 20 ? ' (20 premières feuilles)' : '';
-      toast(cut ? `Classeur importé${more}, limité à 1 000 lignes et 52 colonnes par feuille.` : `Classeur importé : ${sheets.length} feuille${sheets.length > 1 ? 's' : ''}${more}.`);
+      if (vba) toast('Classeur importé. Ses macros sont conservées telles quelles : Grimoire ne les exécute pas, Excel les retrouvera à l\'enregistrement en .xlsm.');
+      else toast(cut ? `Classeur importé${more}, limité à 1 000 lignes et 52 colonnes par feuille.` : `Classeur importé : ${sheets.length} feuille${sheets.length > 1 ? 's' : ''}${more}.`);
     } else if (ext === 'txt' || ext === 'md') {
       const text = await f.text();
       const html = text.split(/\n{2,}/).map(p => { const t = p.trim(); const h = /^(#{1,3})\s+(.*)$/.exec(t); return h ? `<h${h[1].length}>${esc(h[2])}</h${h[1].length}>` : `<p>${esc(t).replace(/\n/g, '<br>')}</p>`; }).join('');
@@ -6128,7 +6170,7 @@ function guessSep(t) { const l = t.split('\n')[0] || ''; return (l.match(/;/g) |
 /* =========================================================
    Export
    ========================================================= */
-const MIME = { pdf: 'application/pdf', zip: 'application/zip', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', csv: 'text/csv', md: 'text/markdown', html: 'text/html', json: 'application/json' };
+const MIME = { pdf: 'application/pdf', zip: 'application/zip', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xlsm: 'application/vnd.ms-excel.sheet.macroEnabled.12', csv: 'text/csv', md: 'text/markdown', html: 'text/html', json: 'application/json' };
 let CAPTURE = null;
 async function saveFile(filename, data) {
   if (CAPTURE) { CAPTURE({ filename, data }); return; }
@@ -6147,6 +6189,194 @@ async function saveFile(filename, data) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
   toast('Fichier enregistré dans vos téléchargements : ' + filename);
 }
+/* =========================================================
+   Commentaires (documents) : dans la marge de droite, comme Word et Google Docs
+   ========================================================= */
+const CM = { active: null, edit: null, showDone: false, panel: false };
+const cmAuthor = () => Object.assign({ name: 'Cyril', ini: 'CSC' }, ls.get('grim.author', {}));
+const cmList = () => (state.cur.comments ||= []);
+const cmFind = id => (state.cur && state.cur.comments || []).find(c => c.id === id);
+const cmAnchors = id => [...ed.querySelectorAll('[data-c]')].filter(el => el.dataset.c === id);
+const cmRail = $('#cmtRail');
+function cmWordRange(sel) {
+  const n = sel.anchorNode; if (!n || n.nodeType !== 3) return null;
+  const t = n.nodeValue, o = sel.anchorOffset, W1 = /[\p{L}\p{N}'’\-]/u;
+  let s = o, e = o; while (s > 0 && W1.test(t[s - 1])) s--; while (e < t.length && W1.test(t[e])) e++;
+  if (s === e) return null;
+  const r = document.createRange(); r.setStart(n, s); r.setEnd(n, e); return r;
+}
+function cmWrap(r, id) {
+  const root = r.commonAncestorContainer.nodeType === 1 ? r.commonAncestorContainer : r.commonAncestorContainer.parentNode;
+  const nodes = [], tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n; while ((n = tw.nextNode())) if (n.nodeValue.length && r.intersectsNode(n) && ed.contains(n)) nodes.push(n);
+  const out = [];
+  nodes.forEach(t => {
+    let s = t === r.startContainer ? r.startOffset : 0, e = t === r.endContainer ? r.endOffset : t.nodeValue.length;
+    if (s >= e || !t.nodeValue.slice(s, e).trim() && nodes.length > 1) return;
+    if (t.parentNode.closest('[data-toc],[contenteditable="false"]')) return;
+    if (e < t.nodeValue.length) t.splitText(e);
+    if (s > 0) t = t.splitText(s);
+    const sp = document.createElement('span'); sp.dataset.c = id; t.replaceWith(sp); sp.appendChild(t); out.push(sp);
+  });
+  return out;
+}
+function addComment() {
+  if (state.view !== 'writer') return;
+  if (document.activeElement !== ed) restoreRange();
+  const sel = getSelection();
+  if (!sel.rangeCount || !ed.contains(sel.anchorNode)) { toast('Sélectionnez le texte à commenter.'); return; }
+  let r = sel.getRangeAt(0);
+  if (r.collapsed || !r.toString().trim()) r = cmWordRange(sel);
+  if (!r) { toast('Sélectionnez le texte à commenter.'); return; }
+  const id = 'c' + uid();
+  if (!cmWrap(r, id).length) { toast('Ce passage ne peut pas recevoir de commentaire.', true); return; }
+  const a = cmAuthor();
+  cmList().push({ id, author: a.name, ini: a.ini, at: Date.now(), text: '', done: false, replies: [] });
+  sel.removeAllRanges();
+  CM.active = id; CM.edit = id; CM.panel = true;
+  state.cur.html = edHtml(); scheduleSave();
+  renderComments();
+  setTimeout(() => { const ta = cmRail.querySelector(`[data-cid="${id}"] textarea`); if (ta) ta.focus(); }, 30);
+}
+function cmUnwrap(id) { cmAnchors(id).forEach(sp => sp.replaceWith(...sp.childNodes)); ed.normalize(); }
+function deleteComment(id) {
+  cmUnwrap(id);
+  state.cur.comments = cmList().filter(c => c.id !== id);
+  if (CM.active === id) CM.active = null; if (CM.edit === id) CM.edit = null;
+  state.cur.html = edHtml(); scheduleSave(); renderComments();
+}
+function cmPurgeOrphans() {
+  if (!state.cur || !state.cur.comments) return;
+  const ids = new Set([...ed.querySelectorAll('[data-c]')].map(el => el.dataset.c));
+  const keep = state.cur.comments.filter(c => ids.has(c.id) && (c.text || (c.replies || []).length));
+  if (keep.length !== state.cur.comments.length) state.cur.comments = keep;
+  // ancres sans commentaire (copier-coller, annulation) : on les retire
+  const known = new Set(keep.map(c => c.id));
+  let changed = false;
+  ed.querySelectorAll('[data-c]').forEach(sp => { if (!known.has(sp.dataset.c)) { sp.replaceWith(...sp.childNodes); changed = true; } });
+  if (changed) { ed.normalize(); state.cur.html = edHtml(); }
+}
+const cmTxt = t => esc(t || '').replace(/\n/g, '<br>');
+function cmItem(c, k) {
+  return `<div class="cmt-h"><span class="cmt-av">${esc(c.ini || (c.author || '?').slice(0, 2).toUpperCase())}</span><span class="cmt-who"><b>${esc(c.author || 'Anonyme')}</b><time>${relDate(c.at)}</time></span>${k == null ? `<button type="button" data-ca="done" title="${c.done ? 'Rouvrir' : 'Résoudre'}" aria-label="${c.done ? 'Rouvrir le commentaire' : 'Résoudre le commentaire'}">${ic(c.done ? 'undo' : 'tick')}</button><button type="button" data-ca="del" title="Supprimer le commentaire" aria-label="Supprimer le commentaire">${ic('trash')}</button>` : `<button type="button" data-ca="rdel" data-k="${k}" title="Supprimer la réponse" aria-label="Supprimer la réponse">${ic('close')}</button>`}</div>`
+    + `<div class="cmt-t" ${k == null ? 'data-ca="edit"' : ''}>${cmTxt(c.text) || '<em>Sans texte</em>'}</div>`;
+}
+function renderComments() {
+  if (!cmRail) return;
+  if (state.view !== 'writer' || !state.cur) { cmRail.innerHTML = ''; $('#cmtCss').textContent = ''; return; }
+  const list = state.cur.comments || [];
+  const firsts = new Map(); ed.querySelectorAll('[data-c]').forEach(el => { if (!firsts.has(el.dataset.c)) firsts.set(el.dataset.c, el); });
+  const live = list.filter(c => firsts.has(c.id));
+  const open = live.filter(c => !c.done), done = live.length - open.length;
+  const shown = live.filter(c => CM.showDone || !c.done || c.id === CM.active);
+  shown.sort((a, b) => { const x = firsts.get(a.id), y = firsts.get(b.id); return x === y ? 0 : x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1; });
+  // surlignage : actif plus marqué, résolus discrets
+  const sel = id => `.page [data-c="${CSS.escape(id)}"]`;
+  $('#cmtCss').textContent = live.filter(c => c.done && c.id !== CM.active).map(c => sel(c.id)).join(',') + (done ? '{background:none;border-bottom:0}' : '')
+    + (CM.active && firsts.has(CM.active) ? sel(CM.active) + '{background:var(--cmt-on);border-bottom-color:var(--copper)}' : '');
+  const wrap = ed.parentNode, scroll = $('#wScroll');
+  cmRail.innerHTML = (live.length ? `<div class="cmt-top"><span>${open.length} commentaire${open.length > 1 ? 's' : ''}</span>${done ? `<button type="button" class="lnk" data-ca="showdone">${CM.showDone ? 'Masquer' : 'Afficher'} les résolus (${done})</button>` : ''}<button type="button" class="cmt-x" data-ca="close" aria-label="Fermer les commentaires">${ic('close')}</button></div>` : '')
+    + shown.map(c => {
+      const editing = CM.edit === c.id, act = CM.active === c.id;
+      return `<div class="cmt-card${act ? ' on' : ''}${c.done ? ' done' : ''}" data-cid="${esc(c.id)}">
+        ${editing ? `<div class="cmt-h"><span class="cmt-av">${esc(c.ini || '')}</span><span class="cmt-who"><b>${esc(c.author || '')}</b></span></div><textarea class="cmt-in" rows="2" placeholder="Votre commentaire…" data-ci="main">${esc(c.text || '')}</textarea><div class="cmt-acts"><button type="button" class="pbtn" data-ca="save">Commenter</button><button type="button" class="lnk" data-ca="cancel">Annuler</button></div>`
+          : cmItem(c)}
+        ${(c.replies || []).map((r, k) => `<div class="cmt-rep">${cmItem(r, k)}</div>`).join('')}
+        ${act && !editing && !c.done ? `<textarea class="cmt-in" rows="1" placeholder="Répondre…" data-ci="reply"></textarea>` : ''}
+      </div>`;
+    }).join('');
+  const compact = !live.length ? false : layoutComments(shown, firsts);
+  scroll.classList.toggle('cmt-compact', compact);
+  scroll.classList.toggle('cmt-open', compact && CM.panel);
+  updateStats();
+}
+function layoutComments(shown, firsts) {
+  const wrap = ed.parentNode, scroll = $('#wScroll');
+  wrap.style.transform = '';
+  const cs = getComputedStyle(scroll), inner = scroll.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const free = (inner - wrap.offsetWidth) / 2, need = 304;
+  const compact = isPhone() || free * 2 < need;
+  if (compact) { cmRail.querySelectorAll('.cmt-card').forEach(el => { el.style.top = ''; }); return true; }
+  if (free < need) wrap.style.transform = `translateX(${-(need - free)}px)`;
+  const top0 = wrap.getBoundingClientRect().top;
+  let y = cmRail.querySelector('.cmt-top') ? cmRail.querySelector('.cmt-top').offsetHeight + 8 : 0;
+  const cards = [...cmRail.querySelectorAll('.cmt-card')];
+  const want = cards.map(el => { const a = firsts.get(el.dataset.cid); return a ? a.getBoundingClientRect().top - top0 - 6 : 0; });
+  // la carte active est alignée sur son texte, les autres s'écartent autour
+  const ai = cards.findIndex(el => el.dataset.cid === CM.active);
+  const pos = new Array(cards.length);
+  if (ai >= 0) {
+    pos[ai] = Math.max(want[ai], y);
+    for (let i = ai - 1, lim = pos[ai]; i >= 0; i--) { pos[i] = Math.min(want[i], lim - cards[i].offsetHeight - 8); lim = pos[i]; }
+    for (let i = ai + 1, lim = pos[ai] + cards[ai].offsetHeight + 8; i < cards.length; i++) { pos[i] = Math.max(want[i], lim); lim = pos[i] + cards[i].offsetHeight + 8; }
+    const under = y - Math.min(...pos.slice(0, ai + 1)); if (under > 0) for (let i = 0; i < cards.length; i++) pos[i] += under;
+  } else cards.forEach((el, i) => { pos[i] = Math.max(want[i], y); y = pos[i] + el.offsetHeight + 8; });
+  cards.forEach((el, i) => { el.style.top = pos[i] + 'px'; });
+  return false;
+}
+// Repositionne les cartes sans les reconstruire (on ne perd pas la saisie en cours).
+const relayoutComments = debounce(() => {
+  if (state.view !== 'writer' || !state.cur || !(state.cur.comments || []).length) return;
+  const firsts = new Map(); ed.querySelectorAll('[data-c]').forEach(el => { if (!firsts.has(el.dataset.c)) firsts.set(el.dataset.c, el); });
+  const cards = [...cmRail.querySelectorAll('.cmt-card')];
+  const typing = cmRail.contains(document.activeElement);
+  if (!typing && (cards.some(c => !firsts.has(c.dataset.cid)) || state.cur.comments.some(c => firsts.has(c.id) && !c.done && !cards.some(x => x.dataset.cid === c.id)))) { renderComments(); return; }
+  const scroll = $('#wScroll'), compact = cards.length ? layoutComments(null, firsts) : false;
+  scroll.classList.toggle('cmt-compact', compact); scroll.classList.toggle('cmt-open', compact && CM.panel);
+}, 160);
+function cmSaveEdit(card) {
+  const c = cmFind(card.dataset.cid); if (!c) return;
+  const ta = card.querySelector('[data-ci="main"]'); const t = ta ? ta.value.trim() : '';
+  if (!t && !c.text) { deleteComment(c.id); return; }
+  if (t) { c.text = t; c.at = c.at || Date.now(); }
+  CM.edit = null; scheduleSave(); renderComments();
+}
+function cmReply(card, ta) {
+  const c = cmFind(card.dataset.cid); const t = ta.value.trim(); if (!c || !t) return;
+  const a = cmAuthor(); (c.replies ||= []).push({ id: 'r' + uid(), author: a.name, ini: a.ini, at: Date.now(), text: t });
+  scheduleSave(); renderComments();
+  setTimeout(() => { const n = cmRail.querySelector(`[data-cid="${c.id}"] [data-ci="reply"]`); if (n) n.focus(); }, 20);
+}
+cmRail.addEventListener('click', e => {
+  const b = e.target.closest('[data-ca]'), card = e.target.closest('.cmt-card');
+  const a = b && b.dataset.ca;
+  if (a === 'close') { CM.panel = false; CM.active = null; renderComments(); return; }
+  if (a === 'showdone') { CM.showDone = !CM.showDone; renderComments(); return; }
+  if (!card) return;
+  const id = card.dataset.cid, c = cmFind(id); if (!c) return;
+  if (a === 'del') { deleteComment(id); toast('Commentaire supprimé'); return; }
+  if (a === 'done') { c.done = !c.done; if (c.done && CM.active === id) CM.active = null; scheduleSave(); renderComments(); toast(c.done ? 'Commentaire résolu' : 'Commentaire rouvert'); return; }
+  if (a === 'rdel') { c.replies.splice(+b.dataset.k, 1); scheduleSave(); renderComments(); return; }
+  if (a === 'save') { cmSaveEdit(card); return; }
+  if (a === 'cancel') { if (!c.text) deleteComment(id); else { CM.edit = null; renderComments(); } return; }
+  if (a === 'edit' && CM.active === id && !c.done) { CM.edit = id; renderComments(); const ta = cmRail.querySelector(`[data-cid="${id}"] textarea`); if (ta) { ta.focus(); ta.selectionStart = ta.value.length; } return; }
+  if (e.target.closest('textarea')) return;
+  if (CM.active !== id) { CM.active = id; renderComments(); const an = cmAnchors(id)[0]; if (an) an.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+});
+cmRail.addEventListener('keydown', e => {
+  const ta = e.target.closest('textarea'); if (!ta) return;
+  const card = ta.closest('.cmt-card');
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ta.dataset.ci === 'main' ? cmSaveEdit(card) : cmReply(card, ta); }
+  else if (e.key === 'Escape') { e.preventDefault(); const c = cmFind(card.dataset.cid); if (ta.dataset.ci === 'main' && c && !c.text) deleteComment(c.id); else { CM.edit = null; renderComments(); } ed.focus(); }
+  e.stopPropagation();
+});
+cmRail.addEventListener('input', e => { const ta = e.target.closest('textarea'); if (ta) { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; relayoutComments(); } });
+ed.addEventListener('click', e => {
+  const sp = e.target.closest('[data-c]');
+  const id = sp ? sp.dataset.c : null;
+  if (id === CM.active) return;
+  if (!id && !CM.active) return;
+  if (CM.edit && CM.edit !== id) { const c = cmFind(CM.edit); if (c && !c.text) { deleteComment(CM.edit); return; } CM.edit = null; }
+  CM.active = id; if (id) CM.panel = true; renderComments();
+});
+ed.addEventListener('input', relayoutComments);
+$('#wStatus').addEventListener('click', e => { if (e.target.closest('#wCmtBtn')) { CM.panel = !CM.panel || !$('#wScroll').classList.contains('cmt-compact'); if (!$('#wScroll').classList.contains('cmt-compact')) { const c = (state.cur.comments || []).find(x => !x.done); if (c) { CM.active = c.id; const an = cmAnchors(c.id)[0]; if (an) an.scrollIntoView({ block: 'center', behavior: 'smooth' }); } } renderComments(); } });
+window.addEventListener('resize', relayoutComments);
+if (window.ResizeObserver) new ResizeObserver(relayoutComments).observe(ed);
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'm' || e.key === 'M' || e.code === 'KeyM') && state.view === 'writer') { e.preventDefault(); addComment(); }
+});
+
 /* --- Enregistrer / Enregistrer sous : un document Grimoire lié à un vrai fichier de l'ordinateur */
 const FH = {
   db: null, links: new Map(),
@@ -6159,7 +6389,7 @@ const FH = {
 };
 const SAVE_FMT = {
   texte: [{ ext: 'docx', k: 'docx', d: 'Document Word' }],
-  feuille: [{ ext: 'xlsx', k: 'xlsx', d: 'Classeur Excel' }, { ext: 'csv', k: 'csv', d: 'CSV (point-virgule)' }],
+  feuille: [{ ext: 'xlsx', k: 'xlsx', d: 'Classeur Excel' }, { ext: 'xlsm', k: 'xlsm', d: 'Classeur Excel avec macros' }, { ext: 'csv', k: 'csv', d: 'CSV (point-virgule)' }],
   pdf: [{ ext: 'pdf', k: 'pdf', d: 'PDF' }]
 };
 const fileExt = n => (String(n).split('.').pop() || '').toLowerCase();
@@ -6184,8 +6414,10 @@ async function saveDoc(asNew) {
   const cur = state.cur; if (!cur) return;
   if (state.view === 'sheet') commitEdit(false);
   await flushSave();
-  const fmts = SAVE_FMT[cur.type] || [];
+  const fmts = (SAVE_FMT[cur.type] || []).filter(f => f.ext !== 'xlsm' || cur.vba);
+  if (cur.vba) fmts.sort((a, b) => (b.ext === 'xlsm') - (a.ext === 'xlsm'));
   let h = asNew ? null : await FH.get(cur.id);
+  if (h && cur.vba && fileExt(h.name) === 'xlsx') { toast('Ce classeur contient des macros : choisissez un fichier .xlsm pour les garder.'); h = null; }
   if (h && !kindFor(cur.type, h.name)) { toast(`Grimoire ne sait pas réécrire un fichier .${fileExt(h.name)} : choisissez où l'enregistrer.`); h = null; }
   if (h && h.queryPermission) {
     try { if (await h.queryPermission({ mode: 'readwrite' }) !== 'granted' && await h.requestPermission({ mode: 'readwrite' }) !== 'granted') h = null; }
@@ -6194,7 +6426,7 @@ async function saveDoc(asNew) {
   // Premier enregistrement par-dessus un fichier ouvert depuis l'ordinateur : prévenir de ce qui pourrait s'y perdre.
   const imp = ls.get('grim.fimp', {});
   if (h && imp[cur.id]) {
-    if (!confirm(`Grimoire va remplacer « ${h.name} » par sa version.\n\nCe que Grimoire ne gère pas dans ce fichier (commentaires, macros, graphiques d'un fichier Excel, mises en forme avancées) y sera perdu.\n\nOK : remplacer le fichier.\nAnnuler : choisir un autre nom (Enregistrer sous).`)) return saveDoc(true);
+    if (!confirm(`Grimoire va remplacer « ${h.name} » par sa version.\n\nCe que Grimoire ne gère pas dans ce fichier (certaines mises en forme avancées, objets spéciaux) y sera perdu.\n\nOK : remplacer le fichier.\nAnnuler : choisir un autre nom (Enregistrer sous).`)) return saveDoc(true);
     delete imp[cur.id]; ls.set('grim.fimp', imp);
   }
   const fresh = !h;
@@ -6223,7 +6455,7 @@ async function saveDoc(asNew) {
 async function openFromComputer() {
   if (!window.showOpenFilePicker || isPhone()) { $('#fileIn').click(); return; }
   let hs;
-  try { hs = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'Word, Excel, CSV, PDF, texte', accept: { 'application/octet-stream': ['.docx', '.xlsx', '.xls', '.ods', '.csv', '.txt', '.md', '.pdf'] } }] }); }
+  try { hs = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'Word, Excel, CSV, PDF, texte', accept: { 'application/octet-stream': ['.docx', '.xlsx', '.xlsm', '.xls', '.ods', '.csv', '.txt', '.md', '.pdf'] } }] }); }
   catch (e) { if (e && e.name !== 'AbortError') $('#fileIn').click(); return; }
   await importHandles(hs);
 }
@@ -6277,6 +6509,28 @@ function rPr(f) {
   if (f.sup) x += '<w:vertAlign w:val="superscript"/>'; else if (f.sub) x += '<w:vertAlign w:val="subscript"/>';
   return x ? `<w:rPr>${x}</w:rPr>` : '';
 }
+let CMX = { ids: new Map(), first: new Map(), last: new Map() };
+const wDate = t => new Date(t || Date.now()).toISOString().replace(/\.\d+Z$/, 'Z');
+const paraId = () => (1 + Math.floor(Math.random() * 0x7FFFFFFE)).toString(16).toUpperCase().padStart(8, '0');
+function commentsXml(list) {
+  const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
+  let cx = '', ex = '';
+  list.forEach(c => {
+    const ws = CMX.ids.get(c.id);
+    [c, ...(c.replies || [])].forEach((it, k) => {
+      const pid = paraId(), w = ws[k];
+      const runs = String(it.text || '').split('\n').map((l, i) => (i ? '<w:r><w:br/></w:r>' : '') + `<w:r><w:t xml:space="preserve">${xmlEsc(l)}</w:t></w:r>`).join('');
+      cx += `<w:comment w:id="${w}" w:author="${xmlEsc(it.author || 'Anonyme')}" w:date="${wDate(it.at)}" w:initials="${xmlEsc(it.ini || '')}"><w:p w14:paraId="${pid}" w14:textId="77777777"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:annotationRef/></w:r>${runs}</w:p></w:comment>`;
+      if (!k) it._pid = pid;
+      ex += `<w15:commentEx w15:paraId="${pid}"${k ? ` w15:paraIdParent="${c._pid}"` : ''} w15:done="${c.done ? 1 : 0}"/>`;
+    });
+    delete c._pid;
+  });
+  return {
+    comments: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="${W14}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14">${cx}</w:comments>`,
+    ext: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w15">${ex}</w15:commentsEx>`
+  };
+}
 function runsOf(node, fmt = {}) {
   let out = '';
   node.childNodes.forEach(n => {
@@ -6289,6 +6543,12 @@ function runsOf(node, fmt = {}) {
       if (tg === 'BR') out += '<w:r><w:br/></w:r>';
       else if (tg === 'IMG') out += imgRun(n);
       else if (/^(UL|OL|TABLE)$/.test(tg)) return;
+      else if (tg === 'SPAN' && n.hasAttribute('data-c') && CMX.ids.has(n.getAttribute('data-c'))) {
+        const cid = n.getAttribute('data-c'), ws = CMX.ids.get(cid);
+        if (CMX.first.get(cid) === n) out += ws.map(w => `<w:commentRangeStart w:id="${w}"/>`).join('');
+        out += runsOf(n, fmt);
+        if (CMX.last.get(cid) === n) out += ws.map(w => `<w:commentRangeEnd w:id="${w}"/><w:r><w:commentReference w:id="${w}"/></w:r>`).join('');
+      }
       else if (tg === 'A' && !fmt.link) {
         LINKS.push(n.getAttribute('href') || '');
         out += `<w:hyperlink r:id="rIdL${LINKS.length}" w:history="1">${runsOf(n, { ...fmt, link: true })}</w:hyperlink>`;
@@ -6460,7 +6720,13 @@ async function exportDocx() {
     im.setAttribute('data-m', String(k - 1));
   }
   attachFloats(root);
+  CMX = { ids: new Map(), first: new Map(), last: new Map() };
+  root.querySelectorAll('[data-c]').forEach(el => { const id = el.getAttribute('data-c'); if (!CMX.first.has(id)) CMX.first.set(id, el); CMX.last.set(id, el); });
+  const cmts = (state.cur.comments || []).filter(c => CMX.first.has(c.id) && (c.text || (c.replies || []).length));
+  let wn = 0; cmts.forEach(c => CMX.ids.set(c.id, [c, ...(c.replies || [])].map(() => wn++)));
   const body = bodyXml(root);
+  if (cmts.length) { const X = commentsXml(cmts); zip.file('word/comments.xml', X.comments); zip.file('word/commentsExtended.xml', X.ext); }
+  CMX = { ids: new Map(), first: new Map(), last: new Map() };
   const hasHdr = !!P.header, hasFtr = !!(P.footer || P.num !== 'none');
   const numRuns = P.num === 'xofy' ? wRun("Page ") + FLD('PAGE') + wRun(" sur ") + FLD('NUMPAGES') : FLD('PAGE');
   const ftrParas = (P.footer ? `<w:p><w:pPr><w:pStyle w:val="Footer"/>${P.num === 'none' ? '' : ''}</w:pPr>${wRun(P.footer)}</w:p>` : '')
@@ -6472,6 +6738,7 @@ async function exportDocx() {
     '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>',
     hasHdr ? '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' : '',
     hasFtr ? '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>' : '',
+    cmts.length ? '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/><Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/>' : '',
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>'].join('');
   zip.file('[Content_Types].xml', ct);
   zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>');
@@ -6480,6 +6747,7 @@ async function exportDocx() {
     + `<Relationship Id="rId1" Type="${R}styles" Target="styles.xml"/><Relationship Id="rIdNum" Type="${R}numbering" Target="numbering.xml"/>`
     + (hasHdr ? `<Relationship Id="rIdHdr" Type="${R}header" Target="header1.xml"/>` : '')
     + (hasFtr ? `<Relationship Id="rIdFtr" Type="${R}footer" Target="footer1.xml"/>` : '')
+    + (cmts.length ? `<Relationship Id="rIdCm" Type="${R}comments" Target="comments.xml"/><Relationship Id="rIdCmx" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/>` : '')
     + MEDIA.map(m => `<Relationship Id="${m.rid}" Type="${R}image" Target="media/${m.name}"/>`).join('')
     + LINKS.map((u, k) => `<Relationship Id="rIdL${k + 1}" Type="${R}hyperlink" Target="${xmlEsc(u)}" TargetMode="External"/>`).join('')
     + '</Relationships>');
@@ -6836,7 +7104,55 @@ function xlStyle(f) {
   if (f.mg) { al.vertical = 'center'; s.alignment = al; }
   return Object.keys(s).length ? s : null;
 }
-async function exportXlsx() {
+/* --- Macros VBA : conservées à l'identique (jamais exécutées par Grimoire) */
+async function readVba(buf, sheets) {
+  await loadScript(LIB.jszip);
+  const zip = await window.JSZip.loadAsync(buf);
+  const bin = zip.file('xl/vbaProject.bin'); if (!bin) return null;
+  const P = t => new DOMParser().parseFromString(t, 'application/xml');
+  const wbx = P(await zip.file('xl/workbook.xml').async('string'));
+  const byLocal = (el, n) => [...el.getElementsByTagName('*')].filter(c => c.localName === n);
+  const wpr = byLocal(wbx.documentElement, 'workbookPr')[0];
+  const out = { bin: bytesToB64(await bin.async('uint8array')), wb: (wpr && wpr.getAttribute('codeName')) || 'ThisWorkbook', codes: {} };
+  const sig = zip.file('xl/vbaProjectSignature.bin'); if (sig) out.signed = true;
+  const relsF = zip.file('xl/_rels/workbook.xml.rels'), rels = {};
+  if (relsF) byLocal(P(await relsF.async('string')).documentElement, 'Relationship').forEach(r => { rels[r.getAttribute('Id')] = r.getAttribute('Target'); });
+  for (const sh of byLocal(wbx.documentElement, 'sheet')) {
+    const rid = sh.getAttribute('r:id') || sh.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id');
+    const t = (rels[rid] || '').replace(/^\/?xl\//, '').replace(/^\//, ''); const f = zip.file('xl/' + t); if (!f) continue;
+    const m = /<(?:\w+:)?sheetPr\b[^>]*\bcodeName="([^"]+)"/.exec(await f.async('string'));
+    const mine = sheets.find(x => x.src === sh.getAttribute('name'));
+    if (m && mine) out.codes[mine.id] = m[1];
+  }
+  return out;
+}
+async function addVba(buf, cur) {
+  await loadScript(LIB.jszip);
+  const zip = await window.JSZip.loadAsync(buf), V = cur.vba;
+  zip.file('xl/vbaProject.bin', b64ToBytes(V.bin));
+  let ct = await zip.file('[Content_Types].xml').async('string');
+  ct = ct.replace('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml', 'application/vnd.ms-excel.sheet.macroEnabled.main+xml');
+  if (!/PartName="\/xl\/vbaProject\.bin"/.test(ct)) ct = ct.replace('</Types>', '<Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>');
+  zip.file('[Content_Types].xml', ct);
+  let rels = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+  if (!/vbaProject/.test(rels)) rels = rels.replace('</Relationships>', '<Relationship Id="rIdVba" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>');
+  zip.file('xl/_rels/workbook.xml.rels', rels);
+  const setCode = (xml, tag, code, after) => {
+    const re = new RegExp(`<${tag}\\b([^>]*?)(/?)>`);
+    if (re.test(xml)) return xml.replace(re, (m0, attrs, sl) => `<${tag}${attrs.replace(/\scodeName="[^"]*"/, '')} codeName="${xmlE(code)}"${sl}>`);
+    return xml.replace(after, m0 => m0 + `<${tag} codeName="${xmlE(code)}"/>`);
+  };
+  let wbx = await zip.file('xl/workbook.xml').async('string');
+  wbx = /<workbookPr\b/.test(wbx) ? setCode(wbx, 'workbookPr', V.wb || 'ThisWorkbook') : wbx.replace(/(<bookViews|<sheets)/, `<workbookPr codeName="${xmlE(V.wb || 'ThisWorkbook')}"/>$1`);
+  zip.file('xl/workbook.xml', wbx);
+  for (let i = 0; i < cur.sheets.length; i++) {
+    const code = (V.codes || {})[cur.sheets[i].id]; const f = zip.file(`xl/worksheets/sheet${i + 1}.xml`); if (!code || !f) continue;
+    zip.file(`xl/worksheets/sheet${i + 1}.xml`, setCode(await f.async('string'), 'sheetPr', code, /<worksheet\b[^>]*>/));
+  }
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+const exportXlsm = () => exportXlsx(true);
+async function exportXlsx(macro) {
   commitEdit(false);
   await loadScript(LIB.xlsx);
   const X = window.XLSX, cur = state.cur, wb = X.utils.book_new();
@@ -6879,7 +7195,8 @@ async function exportXlsx() {
   if (names.length) wb.Workbook = { Names: names };
   let buf = X.write(wb, { type: 'array', bookType: 'xlsx' });
   try { buf = await xlsxExtras(buf, cur); } catch (e) { console.warn('Compléments Excel ignorés', e); toast('Graphiques ou règles non exportés : le reste du classeur est bien là.', true); }
-  await saveFile(safeName(cur.title) + '.xlsx', new Blob([buf]));
+  if (macro === true && cur.vba) { try { buf = await addVba(buf, cur); } catch (e) { console.warn(e); toast('Macros non réécrites : le classeur est enregistré sans elles.', true); } }
+  await saveFile(safeName(cur.title) + (macro === true ? '.xlsm' : '.xlsx'), new Blob([buf]));
 }
 function exportCsv() {
   commitEdit(false);
@@ -6956,7 +7273,7 @@ function openExport() {
   p.hidden = false;
 }
 function closeExport() { $('#exportPop').hidden = true; }
-const runExport = k => ({ docx: exportDocx, md: exportMd, html: exportHtml, xlsx: exportXlsx, csv: exportCsv, print: printDoc, pdf: exportPdfFile, pdfdoc: pdfToDoc, docpdf: exportDocPdf }[k] || (() => {}))();
+const runExport = k => ({ docx: exportDocx, md: exportMd, html: exportHtml, xlsx: exportXlsx, xlsm: exportXlsm, csv: exportCsv, print: printDoc, pdf: exportPdfFile, pdfdoc: pdfToDoc, docpdf: exportDocPdf }[k] || (() => {}))();
 $('#exportBtn').addEventListener('click', e => { e.stopPropagation(); $('#exportPop').hidden ? openExport() : closeExport(); });
 $('#exportPop').addEventListener('click', async e => {
   e.stopPropagation();
@@ -7190,6 +7507,8 @@ function commands() {
     add('Outils', 'Mise en page, en-tête et pied de page', 'layout', openPagePop);
     add('Insérer', 'Tableau 3 × 3', 'table', () => insertTable(3, 3));
     add('Insérer', 'Tableau 4 × 5', 'table', () => insertTable(5, 4));
+    add('Insérer', 'Commentaire', 'comment', () => addComment(), 'Ctrl Alt M');
+    add('Affichage', 'Afficher ou masquer les commentaires', 'comment', () => { CM.panel = !CM.panel; renderComments(); });
     add('Insérer', 'Séparateur', 'hr', W.hr);
     add('Insérer', 'Image', 'image', W.image);
     add('Insérer', 'Date du jour', 'pen', () => exec('insertText', new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })));

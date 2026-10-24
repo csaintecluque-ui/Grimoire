@@ -148,6 +148,7 @@
           <button class="tb" data-w="pagebreak" title="Saut de page (Ctrl+Entrée)" data-ic="pagebreak"></button>
           <button class="tb" data-w="toc" title="Insérer un sommaire" data-ic="toc"></button>
           <span class="tb-sep"></span>
+          <button class="tb" data-w="comment" title="Nouveau commentaire sur la sélection (Ctrl+Alt+M)" data-ic="comment"></button>
           <button class="tb" data-w="find" title="Rechercher et remplacer (Ctrl+F)" data-ic="search"></button>
           <button class="tb" data-w="layout" title="Mise en page, en-tête et pied de page" data-ic="layout"></button>
           <button class="tb" data-w="outline" title="Afficher ou masquer le plan" data-ic="outline"></button>
@@ -174,7 +175,7 @@
       </div>
       <div class="w-body">
         <nav class="outline" id="outline" aria-label="Plan du document"><p class="eyebrow">Plan</p><ol id="outlineList"></ol></nav>
-        <div class="w-scroll" id="wScroll"><div class="page-wrap"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article><div id="pgMarks" aria-hidden="true"></div></div></div>
+        <div class="w-scroll" id="wScroll"><div class="page-wrap"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article><div id="pgMarks" aria-hidden="true"></div><aside class="cmt-rail" id="cmtRail" aria-label="Commentaires"></aside></div></div><style id="cmtCss"></style>
         <div class="img-bar tbl-bar" id="tblBar" hidden role="toolbar" aria-label="Tableau">
           <button data-tb="rowAbove">+ Ligne au-dessus</button><button data-tb="rowBelow">+ Ligne en dessous</button><button data-tb="colLeft">+ Colonne à gauche</button><button data-tb="colRight">+ Colonne à droite</button>
           <button data-tb="rowDel">− Ligne</button><button data-tb="colDel">− Colonne</button><button data-tb="merge">Fusionner →</button><button data-tb="split">Scinder</button>
@@ -426,7 +427,7 @@
   </div>
 </div>
 <input type="file" id="pdfIn" class="sr" accept=".pdf,application/pdf,image/*,.docx,.xlsx,.xls,.ods,.csv,.txt,.md" multiple tabindex="-1" aria-hidden="true">
-<input type="file" id="fileIn" class="sr" accept=".docx,.xlsx,.xls,.ods,.csv,.txt,.md,.pdf" tabindex="-1" aria-hidden="true">
+<input type="file" id="fileIn" class="sr" accept=".docx,.xlsx,.xlsm,.xls,.ods,.csv,.txt,.md,.pdf" tabindex="-1" aria-hidden="true">
 <input type="file" id="imgIn" class="sr" accept="image/*" tabindex="-1" aria-hidden="true">
 <input type="file" id="restoreIn" class="sr" accept=".json,application/json" tabindex="-1" aria-hidden="true">
 <div class="toast" id="toast" hidden role="status"></div>
