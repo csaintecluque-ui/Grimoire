@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -375,14 +375,19 @@ async function createDoc(type, base) {
   const doc = Object.assign(
     type === 'feuille' ? { type, title: 'Classeur sans titre', cells: {}, rows: 60, cols: 12, colW: {} }
       : type === 'pdf' ? { type, title: 'PDF', ann: [], form: {} }
-      : { type, title: 'Document sans titre', html: '<p><br></p>' },
+      : { type, title: 'Document sans titre', html: '<p><br></p>', autoTitle: true },
     base || {}, { id: uid(), createdAt: now, updatedAt: now });
   state.cur = doc; state.cur._saved = false;
   try { if (doc.type === 'feuille') openSheet(); else if (doc.type === 'pdf') openPdf(); else openWriter(); }
   catch (e) { toast('Ouverture impossible : ' + (e.message || e), true); return; }
   try { await Store.save(doc); setSaveState('ok'); }
   catch (e) { setSaveState('err'); toast('Document créé, mais pas encore enregistré' + (e && e.code ? ' (' + e.code + ')' : '') + '. Nouvel essai à la prochaine modification.', true); }
-  if (!base) setTimeout(() => { $('#titleIn').focus(); $('#titleIn').select(); }, 60);
+  // On écrit tout de suite dans la page (ou la cellule A1), comme dans Word ou Excel.
+  if (!base && doc.type !== 'pdf') setTimeout(() => {
+    if (doc.type === 'feuille') { $('#gridWrap').focus(); return; }
+    ed.focus(); const r = document.createRange(), first = ed.firstElementChild || ed;
+    r.selectNodeContents(first); r.collapse(true); const sl = getSelection(); sl.removeAllRanges(); sl.addRange(r);
+  }, 60);
 }
 const fromTemplate = k => createDoc(TPL[k]().type, TPL[k]());
 
@@ -391,7 +396,7 @@ $('#backBtn').addEventListener('click', goHome);
 $$('[data-new]').forEach(b => b.addEventListener('click', () => createDoc(b.dataset.new)));
 $$('[data-tpl]').forEach(b => b.addEventListener('click', () => fromTemplate(b.dataset.tpl)));
 $('#importCard').addEventListener('click', () => $('#fileIn').click());
-$('#titleIn').addEventListener('input', e => { if (!state.cur) return; state.cur.title = e.target.value; scheduleSave(); });
+$('#titleIn').addEventListener('input', e => { if (!state.cur) return; state.cur.title = e.target.value; delete state.cur.autoTitle; scheduleSave(); });
 $('#titleIn').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); state.view === 'writer' ? $('#ed').focus() : $('#gridWrap').focus(); } });
 
 /* =========================================================
@@ -949,8 +954,16 @@ ed.addEventListener('input', () => {
   if (!state.cur) return;
   if (!ed.firstElementChild && !ed.textContent) ed.innerHTML = '<p><br></p>';
   normalizeBlocks();
-  state.cur.html = edHtml(); scheduleSave(); refreshSoon();
+  state.cur.html = edHtml(); autoTitle(); scheduleSave(); refreshSoon();
 });
+// Tant qu'il n'a pas été renommé, un nouveau document prend pour titre sa première ligne.
+function autoTitle() {
+  if (!state.cur || !state.cur.autoTitle) return;
+  const line = [...ed.children].map(el => (el.textContent || '').replace(/\s+/g, ' ').trim()).find(Boolean) || '';
+  let t = line.length > 60 ? line.slice(0, 60).replace(/\s+\S*$/, '') + '…' : line;
+  t = t.replace(/[.:;,]+$/, '') || 'Document sans titre';
+  if (t !== state.cur.title) { state.cur.title = t; $('#titleIn').value = t; }
+}
 ed.addEventListener('paste', e => {
   const cd = e.clipboardData; if (!cd) return;
   e.preventDefault();
@@ -7245,6 +7258,10 @@ async function renderSettings() {
   $('#aiKey').value = AI.key; $('#aiModel').value = AI.model; $('#aiModel').placeholder = AI_DEF[AI.provider];
   $('#aiModels').innerHTML = AI_SUGG[AI.provider].map(m => `<option value="${m}">`).join('');
   $('#appVer').textContent = APP_VERSION;
+  const inst = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  $('#instState').textContent = inst ? 'Grimoire est installé sur cet appareil : il s\'ouvre comme une appli et fonctionne hors connexion.'
+    : installEvt ? 'Grimoire n\'est pas encore installé sur cet appareil.'
+    : 'Grimoire n\'est pas installé ici. Si le bouton Installer n\'apparaît pas, ouvrez Grimoire dans Chrome, Edge ou Brave (voir ci-dessous).';
   const n = state.docs.size;
   let info = `${n} document${n > 1 ? 's' : ''} sur cet appareil`;
   try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); info += ` · ${(e.usage / 1048576).toFixed(1).replace('.', ',')} Mo utilisés`; } } catch {}

@@ -714,3 +714,24 @@ body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-heigh
 .ac-tg{display:flex;gap:10px;align-items:center;font-weight:600;font-size:14.5px}
 .ac-tg input{width:20px;height:20px;accent-color:var(--accent)}
 #acMine{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:10px 12px;font:14px/1.5 var(--f-mono);resize:vertical;min-height:84px}
+
+/* Accueil PC grand écran : Créer à gauche, documents au centre, notes rapides à droite */
+.home-grid{display:flex;flex-direction:column;gap:36px}
+.notes-empty{display:none;margin:0;color:var(--faint);font-size:13px;line-height:1.5}
+@media (max-width:720px){.home-grid{gap:28px}}
+@media (min-width:1180px){
+  body.m-pc .home-in{max-width:1560px;padding-inline:8px}
+  body.m-pc .home-grid{display:grid;grid-template-columns:250px minmax(0,1fr) 330px;grid-template-areas:"create search notes" "create docs notes";grid-template-rows:auto 1fr;gap:22px 40px;align-items:start}
+  body.m-pc .home-grid>.search{grid-area:search}
+  body.m-pc .h-create{grid-area:create;position:sticky;top:20px}
+  body.m-pc .h-docs{grid-area:docs}
+  body.m-pc .h-notes{grid-area:notes;position:sticky;top:20px;max-height:calc(100vh - 110px);overflow:auto;padding:16px;margin:-16px;scrollbar-width:thin}
+  body.m-pc .h-notes .notes{grid-template-columns:minmax(0,1fr)}
+  body.m-pc .notes:empty+.notes-empty{display:block}
+  body.m-pc .h-create .create,body.m-pc .h-create .tpls{grid-template-columns:minmax(0,1fr);gap:8px}
+  body.m-pc .h-create .ccard{padding:10px 12px;gap:12px}
+  body.m-pc .h-create .ccard .thumb{width:36px;height:44px;flex:none}
+  body.m-pc .h-create .ccard span{font-size:12px}
+  body.m-pc .h-create .tcard{padding:9px 12px}
+  body.m-pc .h-create .tcard small{display:none}
+}

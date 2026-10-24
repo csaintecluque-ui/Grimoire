@@ -11,7 +11,8 @@ Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 - **Export** Word (.docx), Excel (.xlsx avec graphiques, mises en forme conditionnelles, listes déroulantes, notes, fusions et plages nommées), CSV, Markdown.
 - **Impression / PDF** : bouton « Imprimer » (ou Ctrl+P), avec en-tête, pied de page et numéros de page. Exporter → PDF (.pdf) crée directement un PDF du document ou du classeur (tableaux, mise en forme, graphiques, sommaire, en-tête et pied de page).
 - **Import** de fichiers .docx (couleurs, tailles, polices, surlignage, alignements, listes, tableaux, images, en-tête et pied de page conservés), .xlsx, .csv, .txt.
-- **Mode PC / Téléphone** : bouton en haut de l'écran.
+- **Mode PC / Téléphone** : bouton en haut de l'écran. Sur grand écran en mode PC, l'accueil passe en trois colonnes : Créer à gauche, documents au centre, notes rapides à droite.
+- **Recherche** (accueil) : titre et contenu des documents, classeurs, PDF et notes rapides enregistrés dans Grimoire (pas les fichiers de l'ordinateur).
 - **Hors connexion** : tout est enregistré sur l'appareil.
 - **Plume** (facultatif) : assistant d'écriture avec une clé Mistral ou OpenRouter, à saisir dans les Réglages.
 
@@ -24,7 +25,8 @@ Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 ## Installer l'appli
 
 - **Android (Chrome)** : ouvrir l'adresse, menu ⋮ → *Installer l'application* (ou le bandeau « Installer » dans Grimoire).
-- **PC (Chrome ou Edge)** : icône d'installation à droite de la barre d'adresse.
+- **PC (Chrome, Chromium, Edge ou Brave, y compris sous Linux)** : icône d'installation à droite de la barre d'adresse, ou Réglages → Application → Installer Grimoire. Firefox ne sait pas installer d'applis web sous Linux.
+- **Ouvrir les fichiers avec Grimoire** (une fois installé) : clic droit sur un .docx, .xlsx, .csv ou .pdf → *Ouvrir avec* → Grimoire ; *Propriétés → Ouvrir avec → Définir par défaut* pour le double-clic. Le fichier est copié dans Grimoire ; Exporter pour remettre à jour l'original.
 - **Notion** : dans une page, taper `/embed` et coller l'adresse.
 
 ## Mettre à jour

@@ -51,14 +51,15 @@
         </div>
         <div class="banner" id="updBanner" hidden><span>Grimoire a été mis à jour.</span><button class="pbtn" id="updBtn">Recharger</button></div>
         <div class="banner" id="installBanner" hidden><span>Installez Grimoire pour l'ouvrir comme une appli, même hors connexion.</span><button class="pbtn install-btn">Installer</button></div>
+        <div class="sync-warn" id="syncWarn" hidden><p>Sauvegarde en ligne désactivée : vos notes et documents ne sont gardés que sur cet appareil, et peuvent disparaître (fenêtre Notion, navigation privée, nettoyage du navigateur).</p><div class="sync-wa"><button type="button" class="pbtn" id="syncGo">Activer la sauvegarde</button><button type="button" class="lnk" id="syncLater">Plus tard</button></div></div>
+        <div class="home-grid">
         <label class="search" for="q">
           <span data-ic="search"></span>
-          <input id="q" type="search" placeholder="Rechercher dans le titre et le contenu de vos documents" autocomplete="off">
+          <input id="q" type="search" placeholder="Rechercher dans vos documents, classeurs, PDF et notes" autocomplete="off">
           <span class="k">Ctrl K</span>
         </label>
 
-        <div class="sec" id="notesSec">
-          <div class="sync-warn" id="syncWarn" hidden><p>Sauvegarde en ligne désactivée : vos notes et documents ne sont gardés que sur cet appareil, et peuvent disparaître (fenêtre Notion, navigation privée, nettoyage du navigateur).</p><div class="sync-wa"><button type="button" class="pbtn" id="syncGo">Activer la sauvegarde</button><button type="button" class="lnk" id="syncLater">Plus tard</button></div></div>
+        <aside class="sec h-notes" id="notesSec" aria-label="Notes rapides">
           <div class="sec-h"><p class="eyebrow">Notes rapides</p><button type="button" class="lnk" id="notesDone" hidden></button></div>
           <form class="qnote" id="qnForm" autocomplete="off">
             <textarea id="qnText" rows="1" placeholder="Noter quelque chose…" aria-label="Nouvelle note" enterkeyhint="done"></textarea>
@@ -68,9 +69,10 @@
           <p class="qn-rem" id="qnRemTxt" aria-live="polite"></p>
           <div id="qnWhen" hidden></div>
           <div class="notes" id="notes"></div>
-        </div>
+          <p class="notes-empty">Une idée, une course, un appel à passer : tapez-la ici, Entrée pour l'ajouter.</p>
+        </aside>
 
-        <div class="sec">
+        <div class="sec h-create">
           <p class="eyebrow">Créer</p>
           <div class="create">
             <button class="ccard" data-new="texte"><span class="thumb t-doc"></span><div><strong>Document</strong><span>Lettre, notes, récit, liste</span></div></button>
@@ -85,7 +87,7 @@
           </div>
         </div>
 
-        <div class="sec">
+        <div class="sec h-docs">
           <div class="sec-h">
             <p class="eyebrow" id="listTitle">Récents</p>
             <div class="chips" id="chips">
@@ -98,6 +100,7 @@
           <div class="docs" id="docs"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
           <p class="foot" id="storeFoot"></p>
           <p class="foot sync-foot" id="syncFoot" aria-live="polite"></p>
+        </div>
         </div>
       </div>
     </section>
@@ -375,7 +378,19 @@
         </div>
         <div class="set-card">
           <h2>Application</h2>
+          <p class="set-note" id="instState"></p>
           <div class="set-acts"><button class="pbtn install-btn" hidden>Installer Grimoire</button></div>
+          <details class="sync-help"><summary>Installer sur l'ordinateur (hors connexion)</summary><ol>
+            <li>Ouvrir <b>csaintecluque-ui.github.io/Grimoire</b> dans <b>Chrome, Chromium, Edge ou Brave</b>. Firefox ne sait pas installer d'applis web sous Linux.</li>
+            <li>Cliquer sur le bouton <b>Installer Grimoire</b> ci-dessus, ou sur l'icône d'installation au bout de la barre d'adresse (dans Chrome, elle est aussi dans le menu ⋮ → <i>Caster, enregistrer et partager</i>).</li>
+            <li>Grimoire apparaît dans le menu des applications (rubrique Bureautique ou Applications Chrome) et peut être épinglé au tableau de bord. Il s'ouvre et fonctionne sans connexion ; la sauvegarde en ligne reprend au retour du réseau.</li>
+          </ol></details>
+          <details class="sync-help"><summary>Ouvrir les .docx, .xlsx, .csv et .pdf avec Grimoire</summary><ol>
+            <li>Grimoire doit d'abord être installé (ci-dessus).</li>
+            <li>Dans le gestionnaire de fichiers (Nemo sous Linux Mint) : clic droit sur un fichier → <i>Ouvrir avec</i> → <b>Grimoire</b>. Au premier fichier, le navigateur demande l'autorisation : cocher <i>Ne plus demander</i> puis <i>Ouvrir</i>.</li>
+            <li>Pour que le double-clic l'ouvre toujours dans Grimoire : clic droit → <i>Propriétés</i> → onglet <i>Ouvrir avec</i> → choisir Grimoire → <b>Définir par défaut</b>. À faire une fois par type (.docx, .xlsx…). Sous Windows : clic droit → <i>Ouvrir avec</i> → <i>Choisir une autre application</i> → Grimoire → <i>Toujours</i>.</li>
+            <li>Le fichier ouvert est copié dans Grimoire : vos modifications y sont enregistrées. Pour remettre à jour le fichier d'origine, <b>Exporter</b> en .docx ou .xlsx par-dessus.</li>
+          </ol></details>
           <p class="set-note">Grimoire <span id="appVer"></span> · bibliothèques : HyperFormula (GPL v3), SheetJS et xlsx-js-style (Apache 2.0), JSZip (MIT), Mammoth (BSD).</p>
         </div>
       </div>
