@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.14.1';
+const APP_VERSION = '1.15.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -362,7 +362,7 @@ function show(view) {
   $('#saveBtn').hidden = $('#saveAsBtn').hidden = !inDoc;
   $('#fileSt').hidden = true;
   if (inDoc) { const id = state.cur.id; FH.get(id).then(() => { if (state.cur && state.cur.id === id) updFileSt(); }); }
-  $('#plumeBtn').hidden = !inDoc || view === 'pdfv';
+  $('#plumeBtn').hidden = !inDoc;
   closePlume(); closeExport();
   document.body.classList.remove('focus', 'show-outline');
   if (inDoc) { $('#titleIn').value = state.cur.title || ''; setSaveState('ok'); }
@@ -7650,6 +7650,11 @@ const Plume = {
     const c = $('#plumeCtx');
     $('#plumeNote').textContent = AI.key ? `Plume envoie le passage concerné à ${provName()} (${aiModel()}), uniquement quand vous cliquez. Relisez avant d'insérer.` : '';
     if (!AI.key) { c.innerHTML = 'Plume a besoin d\'une clé API Mistral ou OpenRouter. <button class="pbtn" id="plumeSet" style="margin-top:8px">Ouvrir les réglages</button>'; return; }
+    if (this.mode === 'pdf') {
+      const nf = new Set(PDFV.srcPages.flatMap(S => S.fields.map(f => f.fieldName))).size;
+      c.innerHTML = `PDF de <b>${PDFV.pages.length}</b> page${PDFV.pages.length > 1 ? 's' : ''}${nf ? ` · formulaire de <b>${nf}</b> champ${nf > 1 ? 's' : ''}` : ''}. Plume lit son texte quand vous le lui demandez.`;
+      return;
+    }
     if (this.mode === 'texte') {
       const t = selectedText();
       c.innerHTML = t ? `Sélection : <q>${esc(t.length > 220 ? t.slice(0, 220) + '…' : t)}</q>` : 'Aucune sélection : le texte proposé sera inséré à l\'emplacement du curseur.';
@@ -7663,13 +7668,18 @@ function selectedText() { if (!savedRange) return ''; return savedRange.toString
 function openPlume() {
   if (!Plume.available) return;
   Plume.mode = state.cur.type;
+  const hasFields = Plume.mode === 'pdf' && PDFV.srcPages.some(S => S.fields.length);
   const chips = Plume.mode === 'texte'
     ? [['reformuler', 'Reformuler'], ['concis', 'Plus concis'], ['formel', 'Ton plus formel'], ['corriger', 'Corriger'], ['developper', 'Développer'], ['resumer', 'Résumer le document']]
+    : Plume.mode === 'pdf'
+    ? [['resumer', 'Résumer le PDF'], ...(hasFields ? [['remplir', 'Remplir le formulaire']] : []), ['facture', 'Ajouter au suivi des factures'], ['lot', 'Plusieurs factures…']]
     : [['expliquer', 'Expliquer la formule'], ['verifier', 'Vérifier le tableau']];
   $('#plumeChips').innerHTML = chips.map(([k, l]) => `<button class="pchip" data-p="${k}">${l}</button>`).join('');
-  $('#plumeAsk').placeholder = Plume.mode === 'texte' ? 'Décrivez ce que vous voulez écrire. Exemple : un mot de remerciement chaleureux pour un voisin.' : 'Décrivez le calcul. Exemple : total de la colonne D quand la colonne C vaut « Courses ».';
-  $('#plumeGo').querySelector('span').textContent = Plume.mode === 'texte' ? 'Rédiger' : 'Écrire la formule';
-  $('#plumeOut').textContent = ''; $('#plumeOut').classList.toggle('mono', Plume.mode !== 'texte'); $('#plumeActs').hidden = true;
+  $('#plumeAsk').placeholder = Plume.mode === 'texte' ? 'Décrivez ce que vous voulez écrire. Exemple : un mot de remerciement chaleureux pour un voisin.'
+    : Plume.mode === 'pdf' ? (hasFields ? 'Une question sur ce PDF, ou des consignes pour le remplir. Exemple : badge pour la voiture AB-123-CD, électrique.' : 'Une question sur ce PDF. Exemple : quelle est la date limite de paiement ?')
+    : 'Décrivez le calcul. Exemple : total de la colonne D quand la colonne C vaut « Courses ».';
+  $('#plumeGo').querySelector('span').textContent = Plume.mode === 'texte' ? 'Rédiger' : Plume.mode === 'pdf' ? 'Demander' : 'Écrire la formule';
+  $('#plumeOut').textContent = ''; $('#plumeOut').classList.toggle('mono', Plume.mode === 'feuille'); $('#plumeActs').hidden = true;
   Plume.ctx();
   $('#plume').hidden = false; $('#plumeBtn').setAttribute('aria-pressed', 'true');
 }
@@ -7695,6 +7705,7 @@ function sheetTSV() {
   return lines.join('\n').slice(0, 6000);
 }
 async function runPlume(kind) {
+  if (Plume.mode === 'pdf') return runPlumePdf(kind);
   if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
   if (Plume.ctl) Plume.ctl.abort();
   const ask = $('#plumeAsk').value.trim();
@@ -7744,6 +7755,191 @@ async function runPlume(kind) {
   $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = false);
   Plume.ctl = null;
 }
+/* =========================================================
+   Plume et les PDF : résumer, répondre, remplir un formulaire, suivi des factures
+   ========================================================= */
+const INV_COLS = ['Date', 'Fournisseur', 'N° de facture', 'Objet', 'Catégorie', 'Montant HT', 'TVA', 'Montant TTC', 'Fichier'];
+const INV_CATS = ['Logement', 'Énergie', 'Eau', 'Télécom', 'Assurance', 'Santé', 'Transport', 'Voiture', 'Courses', 'Maison', 'Enfants', 'Loisirs', 'Impôts', 'Banque', 'Autre'];
+function aiJson(text) {
+  const t = String(text || '').replace(/```(?:json)?/g, '');
+  const m = t.match(/[\[{][\s\S]*[\]}]/); if (!m) throw new Error('Réponse illisible');
+  return JSON.parse(m[0]);
+}
+async function pdfTextOf(doc) {
+  const t = await pdfAllText(doc, 40);
+  return t.replace(/\n{3,}/g, '\n\n').trim();
+}
+async function curPdfText() {
+  const cur = state.cur;
+  if (cur.textDone && cur.text) return cur.text;
+  return PDFV.src ? pdfTextOf(PDFV.src) : '';
+}
+const scanMsg = 'Ce PDF ne contient pas de texte lisible (document scanné ou photo) : Plume ne peut pas le lire pour l\'instant.';
+// Libellé visible à côté de chaque champ (le nom technique est souvent « Texte1 »)
+async function fieldsWithLabels() {
+  const out = new Map();
+  for (const S of PDFV.srcPages) {
+    if (!S.fields.length) continue;
+    let items = [];
+    try { items = (await S.page.getTextContent()).items.filter(it => it.str && it.str.trim() && it.transform).map(it => ({ s: it.str.trim(), x: it.transform[4], y: it.transform[5], w: it.width || 0 })); } catch {}
+    S.fields.forEach(f => {
+      const [x1, y1, x2, y2] = f.rect, cy = (y1 + y2) / 2;
+      let lab = items.filter(it => Math.abs(it.y + 3 - cy) < Math.max(7, (y2 - y1) * 0.7) && it.x < x1 + 2).sort((a, b) => a.x - b.x).map(it => it.s).join(' ');
+      if (!lab) lab = items.filter(it => it.y > y2 - 2 && it.y < y2 + 22 && it.x < x2 && it.x + it.w > x1 - 30).sort((a, b) => a.x - b.x).map(it => it.s).join(' ');
+      if (f.checkBox && !lab) lab = items.filter(it => Math.abs(it.y + 3 - cy) < 8 && it.x > x2 - 2 && it.x < x2 + 260).sort((a, b) => a.x - b.x).map(it => it.s).join(' ');
+      const k = f.fieldName, o = out.get(k) || { name: k, type: f.fieldType === 'Tx' ? 'texte' : f.checkBox ? 'case à cocher' : f.radioButton ? 'choix unique' : 'liste', label: '', info: f.alternativeText || '' };
+      if (lab && !o.label) o.label = lab.slice(-90);
+      if (f.radioButton) { (o.options ||= []); if (!o.options.includes(f.buttonValue)) o.options.push(f.buttonValue); if (lab) (o.optLabels ||= {})[f.buttonValue] = lab.slice(-40); }
+      if (f.options && f.options.length) o.options = f.options.map(x => x.exportValue ?? x.displayValue);
+      const v = (state.cur.form || {})[k]; if (v != null && v !== '') o.actuel = v;
+      out.set(k, o);
+    });
+  }
+  return [...out.values()];
+}
+function applyFormValues(vals) {
+  const cur = state.cur, form = (cur.form ||= {}), byName = new Map();
+  PDFV.srcPages.forEach(S => S.fields.forEach(f => { if (!byName.has(f.fieldName)) byName.set(f.fieldName, []); byName.get(f.fieldName).push(f); }));
+  pdfHist(); let n = 0;
+  Object.entries(vals || {}).forEach(([k, v]) => {
+    const fs = byName.get(k); if (!fs || v == null || v === '') return;
+    const f = fs[0];
+    if (f.fieldType === 'Tx') form[k] = String(v);
+    else if (f.checkBox) form[k] = v === true || /^(oui|true|vrai|yes|1|x)$/i.test(String(v));
+    else if (f.radioButton) { const opt = fs.map(x => x.buttonValue).find(b => String(b).toLowerCase() === String(v).toLowerCase()); if (!opt) return; form[k] = opt; }
+    else form[k] = String(v);
+    n++;
+  });
+  PDFV.pages.forEach((_, i) => drawFields(i)); pdfChanged();
+  return n;
+}
+function invoiceBook() { return [...state.docs.values()].find(d => d.type === 'feuille' && d.invoiceBook); }
+function newInvoiceBook() {
+  const cells = {};
+  INV_COLS.forEach((h, c) => { cells[COLN(c) + '1'] = { v: h, f: { b: 1, bg: 'cuivre', ...(c >= 5 && c <= 7 ? { a: 'ar' } : {}) } }; });
+  cells.K1 = { v: 'Total TTC', f: { b: 1 } }; cells.L1 = { v: '=SOMME(H2:H2000)', f: { b: 1, n: 'eur' } };
+  const now = Date.now();
+  return { id: uid(), type: 'feuille', title: 'Suivi des factures', invoiceBook: true, cells, rows: 200, cols: 12, colW: { 0: 96, 1: 170, 2: 120, 3: 220, 4: 110, 5: 104, 6: 90, 7: 110, 8: 200, 10: 90, 11: 110 }, createdAt: now, updatedAt: now };
+}
+// Ajoute des lignes au classeur « Suivi des factures » (créé au besoin), sans l'ouvrir
+async function addInvoiceRows(rows) {
+  let book = invoiceBook(); book = book ? clone(book) : newInvoiceBook();
+  const cells = book.sheets ? book.sheets[book.active || 0].cells : book.cells;
+  let r = 1; while (Object.keys(cells).some(k => { const p = parseAddr(k); return p && p.r === r && p.c <= 8 && cells[k].v !== ''; })) r++;
+  const seen = new Set(Object.keys(cells).filter(k => /^C\d+$/.test(k)).map(k => norm(String(cells[k].v).replace(/^'/, '')) + '|' + norm(String((cells['B' + k.slice(1)] || {}).v || ''))));
+  let added = 0, dup = 0;
+  rows.forEach(x => {
+    const key = norm(String(x.numero || '')) + '|' + norm(String(x.fournisseur || ''));
+    if (x.numero && seen.has(key)) { dup++; return; }
+    seen.add(key);
+    const L = r + 1, put = (c, v, f) => { if (v == null || v === '') return; cells[c + L] = { v: String(v), f: f || {} }; };
+    const num = v => v == null || v === '' || isNaN(+v) ? '' : numToRaw(+v);
+    put('A', /^\d{2}\/\d{2}\/\d{4}$/.test(x.date || '') ? x.date : '', { n: 'date' });
+    // n° de facture gardé en texte (sinon « 10045822 » s'afficherait 10 045 822)
+    put('B', x.fournisseur); put('C', x.numero != null && x.numero !== '' ? "'" + String(x.numero).replace(/^'/, '') : ''); put('D', x.objet);
+    put('E', INV_CATS.includes(x.categorie) ? x.categorie : (x.categorie ? 'Autre' : ''));
+    put('F', num(x.ht), { n: 'eur' }); put('G', num(x.tva), { n: 'eur' }); put('H', num(x.ttc), { n: 'eur' }); put('I', x.fichier);
+    if (book.sheets) { const sh = book.sheets[book.active || 0]; if (sh.rows < L + 20) sh.rows = L + 40; } else if (book.rows < L + 20) book.rows = L + 40;
+    r++; added++;
+  });
+  book.updatedAt = Date.now();
+  await Store.save(book);
+  return { added, dup, book };
+}
+const INV_PROMPT = (text, file) => `Voici le texte d'une facture (fichier « ${file} »). Extrais ses informations et réponds UNIQUEMENT par un objet JSON, sans commentaire :
+{"date":"JJ/MM/AAAA (date de la facture)","fournisseur":"nom de l'entreprise qui facture","numero":"numéro de facture","objet":"objet en quelques mots","categorie":"une de : ${INV_CATS.join(', ')}","ht":nombre ou null,"tva":nombre ou null,"ttc":nombre ou null}
+Les montants sont des nombres avec un point décimal (12.50), sans symbole. Si une information manque, mets null. Si ce n'est pas une facture, réponds {"facture":false}.
+
+Texte :
+"""${text.slice(0, 12000)}"""`;
+async function extractInvoice(text, file, signal) {
+  const res = await aiChat(INV_PROMPT(text, file), { signal });
+  const j = aiJson(res.text);
+  if (j.facture === false) return null;
+  return { ...j, fichier: file };
+}
+// Plusieurs factures d'un coup, choisies sur l'ordinateur
+function pickInvoices() {
+  if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.pdf,application/pdf'; inp.multiple = true;
+  inp.addEventListener('change', async () => {
+    const files = [...inp.files]; if (!files.length) return;
+    const rows = [], skipped = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      toast(`Plume lit les factures… ${i + 1} / ${files.length}`);
+      try {
+        const d = await pdfjsOpen(new Uint8Array(await f.arrayBuffer()));
+        const text = await pdfTextOf(d); try { d.destroy(); } catch {}
+        if (text.length < 30) { skipped.push(f.name + ' (scanné)'); continue; }
+        const x = await extractInvoice(text, f.name); if (x) rows.push(x); else skipped.push(f.name + ' (pas une facture)');
+      } catch (e) { skipped.push(f.name); console.warn(e); }
+    }
+    if (!rows.length) { toast('Aucune facture lisible' + (skipped.length ? ' : ' + skipped.join(', ') : '.'), true); return; }
+    const r = await addInvoiceRows(rows);
+    toast(`${r.added} facture${r.added > 1 ? 's' : ''} ajoutée${r.added > 1 ? 's' : ''} au « Suivi des factures »` + (r.dup ? `, ${r.dup} déjà présente${r.dup > 1 ? 's' : ''}` : '') + (skipped.length ? `. Ignorées : ${skipped.join(', ')}` : '.'));
+    if (state.view === 'home') renderHome();
+  });
+  inp.click();
+}
+async function runPlumePdf(kind) {
+  if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
+  if (kind === 'lot') return pickInvoices();
+  if (Plume.ctl) Plume.ctl.abort();
+  const out = $('#plumeOut'), ask = $('#plumeAsk').value.trim(), title = state.cur.title || 'PDF';
+  $('#plumeActs').hidden = true; Plume.target = null; Plume.data = null;
+  if (!kind && !ask) { $('#plumeAsk').focus(); return; }
+  out.textContent = 'Plume lit le PDF…';
+  $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = true);
+  Plume.ctl = new AbortController();
+  const done = () => { $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = false); Plume.ctl = null; };
+  try {
+    const text = await curPdfText();
+    if (kind !== 'remplir' && text.replace(/\s/g, '').length < 30) { out.textContent = scanMsg; return done(); }
+    const signal = Plume.ctl.signal, live = ({ text: t }) => { out.textContent = t; };
+    if (kind === 'resumer') {
+      const res = await aiChat(`Résume ce PDF intitulé « ${title} » pour un particulier : d'abord une phrase qui dit ce que c'est, puis les points importants sous forme de liste (« - »), puis, s'il y en a, les dates limites, montants et choses à faire dans une section « À faire ». Réponds en français, sans introduction.\n\nTexte du PDF :\n"""${text.slice(0, 24000)}"""`, { signal, onText: live });
+      Plume.result = res.text.trim(); Plume.target = 'newdoc';
+    } else if (kind === 'facture') {
+      out.textContent = 'Plume relève les informations de la facture…';
+      const x = await extractInvoice(text, title + '.pdf', signal);
+      if (!x) { out.textContent = 'Ce PDF ne ressemble pas à une facture.'; return done(); }
+      Plume.data = x; Plume.target = 'invoice';
+      const eur = v => v == null || v === '' ? '—' : (+v).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' });
+      out.innerHTML = `<table class="pl-tab"><tr><th>Date</th><td>${esc(x.date || '—')}</td></tr><tr><th>Fournisseur</th><td>${esc(x.fournisseur || '—')}</td></tr><tr><th>N°</th><td>${esc(x.numero || '—')}</td></tr><tr><th>Objet</th><td>${esc(x.objet || '—')}</td></tr><tr><th>Catégorie</th><td>${esc(x.categorie || '—')}</td></tr><tr><th>HT</th><td>${eur(x.ht)}</td></tr><tr><th>TVA</th><td>${eur(x.tva)}</td></tr><tr><th>TTC</th><td><b>${eur(x.ttc)}</b></td></tr></table>`;
+      Plume.result = JSON.stringify(x);
+    } else if (kind === 'remplir') {
+      const fields = await fieldsWithLabels();
+      if (!fields.length) { out.textContent = 'Ce PDF n\'a pas de champs à remplir.'; return done(); }
+      const me = String(ls.get('grim.me', '') || '').trim();
+      if (!me && !ask) { out.innerHTML = 'Dites à Plume quoi mettre : écrivez-le dans la zone ci-dessus (exemple : « badge pour la voiture AB-123-CD, électrique »), ou enregistrez vos informations habituelles dans <b>Réglages → Plume → Mes informations</b>.'; return done(); }
+      out.textContent = 'Plume prépare le remplissage…';
+      const res = await aiChat(`Tu aides à remplir un formulaire PDF intitulé « ${title} ».
+Champs du formulaire (JSON ; « label » est le texte imprimé à côté du champ, « options » les valeurs possibles) :
+${JSON.stringify(fields).slice(0, 12000)}
+
+Informations de la personne :
+"""${me || '(aucune)'}"""
+${ask ? `Consignes pour ce formulaire : """${ask}"""\n` : ''}${text ? `Texte du formulaire, pour comprendre le contexte :\n"""${text.slice(0, 6000)}"""\n` : ''}
+Réponds UNIQUEMENT par un objet JSON { "nom technique du champ": valeur }. Ne remplis que les champs pour lesquels tu as l'information (ne devine pas) ; pour une case à cocher, true ou false ; pour un choix, exactement une des options. Dates au format JJ/MM/AAAA.`, { signal });
+      const vals = aiJson(res.text), labels = new Map(fields.map(f => [f.name, f.label || f.name]));
+      const keep = Object.fromEntries(Object.entries(vals).filter(([k, v]) => labels.has(k) && v !== null && v !== ''));
+      if (!Object.keys(keep).length) { out.textContent = 'Plume n\'a trouvé aucune information à mettre dans ces champs. Ajoutez-en dans la zone ci-dessus.'; return done(); }
+      Plume.data = keep; Plume.target = 'fill'; Plume.result = JSON.stringify(keep);
+      out.innerHTML = `<p class="pl-h">${Object.keys(keep).length} champ${Object.keys(keep).length > 1 ? 's' : ''} sur ${fields.length} :</p><table class="pl-tab">` + Object.entries(keep).map(([k, v]) => `<tr><th>${esc(labels.get(k))}</th><td>${esc(v === true ? '☑ oui' : v === false ? '☐ non' : String(v))}</td></tr>`).join('') + '</table>';
+    } else {
+      const res = await aiChat(`Réponds à la question à partir de ce PDF intitulé « ${title} ». Réponds en français, clairement et brièvement ; si la réponse n'y figure pas, dis-le.\nQuestion : ${ask}\n\nTexte du PDF :\n"""${text.slice(0, 24000)}"""`, { signal, onText: live });
+      Plume.result = res.text.trim(); Plume.target = 'newdoc';
+    }
+    showPlumeActs();
+  } catch (e) {
+    if (e && e.name === 'AbortError') out.textContent = '';
+    else if (e instanceof SyntaxError || (e && e.message === 'Réponse illisible')) out.textContent = 'La réponse de Plume était incomplète. Réessayez.';
+    else out.textContent = aiError(e);
+  }
+  done();
+}
+
 function textToHtml(t) {
   const blocks = t.split(/\n{2,}/).map(b => b.trim()).filter(Boolean);
   return blocks.map(b => {
@@ -7755,7 +7951,10 @@ function textToHtml(t) {
 }
 function showPlumeActs() {
   const a = $('#plumeActs'); let h = '';
-  if (Plume.target === 'replace') h += `<button class="pbtn" data-pa="replace">Remplacer la sélection</button><button class="pbtn ghost" data-pa="insert">Insérer après</button>`;
+  if (Plume.target === 'newdoc') h += `<button class="pbtn" data-pa="newdoc">En faire un document</button>`;
+  else if (Plume.target === 'fill') h += `<button class="pbtn" data-pa="fill">Remplir le formulaire</button>`;
+  else if (Plume.target === 'invoice') h += `<button class="pbtn" data-pa="invoice">Ajouter au suivi des factures</button>`;
+  else if (Plume.target === 'replace') h += `<button class="pbtn" data-pa="replace">Remplacer la sélection</button><button class="pbtn ghost" data-pa="insert">Insérer après</button>`;
   else if (Plume.target === 'insert') h += `<button class="pbtn" data-pa="insert">Insérer au curseur</button>`;
   else if (Plume.target === 'cell') h += `<button class="pbtn" data-pa="cell">Placer en ${addr(SH.sel.r, SH.sel.c)}</button>`;
   h += `<button class="pbtn ghost" data-pa="copy">Copier</button>`;
@@ -7772,6 +7971,14 @@ $('#plumeActs').addEventListener('click', async e => {
   const k = b.dataset.pa;
   if (k === 'copy') { try { await navigator.clipboard.writeText(t); toast('Copié'); } catch { toast('Copie refusée par le navigateur : sélectionnez le texte à la main.', true); } return; }
   if (k === 'cell') { setRaw(SH.sel.r, SH.sel.c, t); toast('Formule placée en ' + addr(SH.sel.r, SH.sel.c)); return; }
+  if (k === 'fill') { if (PDFV.mode !== 'read') setPdfMode('read'); const n = applyFormValues(Plume.data); toast(`${n} champ${n > 1 ? 's' : ''} rempli${n > 1 ? 's' : ''} : vérifiez-les, puis Enregistrer.`); return; }
+  if (k === 'invoice') {
+    const r = await addInvoiceRows([Plume.data]);
+    toast(r.added ? 'Facture ajoutée au classeur « Suivi des factures ».' : 'Cette facture est déjà dans le suivi.');
+    $('#plumeActs').innerHTML = `<button class="pbtn" data-pa="openbook">Ouvrir le suivi des factures</button>`; Plume.book = r.book.id; return;
+  }
+  if (k === 'openbook') { const id = Plume.book; closePlume(); await goHome(); openDoc(id); return; }
+  if (k === 'newdoc') { const title = state.cur.title || 'PDF'; closePlume(); await goHome(); await createDoc('texte', { title: 'Plume — ' + title, html: textToHtml(t) }); return; }
   const single = !/\n/.test(t);
   if (k === 'insert' && savedRange) savedRange.collapse(false);
   restoreRange();
@@ -7901,6 +8108,7 @@ function commands() {
   add('Créer', 'Suivi des dépenses (modèle)', 'grid', () => fromTemplate('depenses'));
   add('Créer', 'Lettre (modèle)', 'doc', () => fromTemplate('lettre'));
   add('Créer', 'Ouvrir un fichier Word, Excel, CSV ou PDF', 'upload', () => openFromComputer());
+  add('Plume', 'Ajouter des factures PDF au suivi des factures', 'feather', () => pickInvoices());
   if (v === 'writer' || v === 'sheet') add('Exporter', 'Imprimer ou créer un PDF', 'printer', printDoc, 'Ctrl P');
   add('Préférences', isPhone() ? 'Passer en mode PC' : 'Passer en mode téléphone', isPhone() ? 'monitor' : 'phone', () => setMode(isPhone() ? 'pc' : 'phone'));
   add('Préférences', currentDark() ? 'Passer au thème clair' : 'Passer au thème sombre', currentDark() ? 'sun' : 'moon', toggleTheme);
@@ -7992,7 +8200,7 @@ async function openSettings() {
 function segSet(id, v) { $$('#' + id + ' button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === v))); }
 async function renderSettings() {
   segSet('segMode', MODE); segSet('segTheme', ls.get('grim.theme', 'auto')); segSet('segProv', AI.provider);
-  $('#aiKey').value = AI.key; $('#aiModel').value = AI.model; $('#aiModel').placeholder = AI_DEF[AI.provider];
+  $('#aiKey').value = AI.key; $('#aiModel').value = AI.model; $('#aiMe').value = ls.get('grim.me', '') || ''; $('#aiModel').placeholder = AI_DEF[AI.provider];
   $('#aiModels').innerHTML = AI_SUGG[AI.provider].map(m => `<option value="${m}">`).join('');
   $('#appVer').textContent = APP_VERSION;
   const inst = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
@@ -8010,6 +8218,7 @@ $('#segMode').addEventListener('click', e => { const b = e.target.closest('[data
 $('#segTheme').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (b) { setTheme(b.dataset.v); segSet('segTheme', b.dataset.v); } });
 $('#segProv').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (!b) return; AI.provider = b.dataset.v; AI.model = ''; ls.set('grim.ai', AI); $('#aiRes').textContent = ''; renderSettings(); });
 $('#aiKey').addEventListener('input', e => { AI.key = e.target.value.trim(); ls.set('grim.ai', AI); });
+$('#aiMe').addEventListener('input', e => ls.set('grim.me', e.target.value));
 $('#aiModel').addEventListener('input', e => { AI.model = e.target.value.trim(); ls.set('grim.ai', AI); });
 $('#aiTest').addEventListener('click', async () => {
   const r = $('#aiRes'); r.className = 'set-res'; r.textContent = 'Test en cours…';
