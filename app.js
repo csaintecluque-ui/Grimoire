@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -7677,8 +7677,8 @@ function openPlume() {
   $('#plumeChips').innerHTML = chips.map(([k, l]) => `<button class="pchip" data-p="${k}">${l}</button>`).join('');
   $('#plumeAsk').placeholder = Plume.mode === 'texte' ? 'Décrivez ce que vous voulez écrire. Exemple : un mot de remerciement chaleureux pour un voisin.'
     : Plume.mode === 'pdf' ? (hasFields ? 'Une question sur ce PDF, ou des consignes pour le remplir. Exemple : badge pour la voiture AB-123-CD, électrique.' : 'Une question sur ce PDF. Exemple : quelle est la date limite de paiement ?')
-    : 'Décrivez le calcul. Exemple : total de la colonne D quand la colonne C vaut « Courses ».';
-  $('#plumeGo').querySelector('span').textContent = Plume.mode === 'texte' ? 'Rédiger' : Plume.mode === 'pdf' ? 'Demander' : 'Écrire la formule';
+    : 'Décrivez ce que Plume doit construire : tableau, formules, listes, graphique… Exemple : un suivi de mes dépenses du quotidien par catégorie, avec un camembert de ce qui coûte le plus. Ou une seule formule pour la cellule sélectionnée.';
+  $('#plumeGo').querySelector('span').textContent = Plume.mode === 'texte' ? 'Rédiger' : Plume.mode === 'pdf' ? 'Demander' : 'Construire';
   $('#plumeOut').textContent = ''; $('#plumeOut').classList.toggle('mono', Plume.mode === 'feuille'); $('#plumeActs').hidden = true;
   Plume.ctx();
   $('#plume').hidden = false; $('#plumeBtn').setAttribute('aria-pressed', 'true');
@@ -7706,6 +7706,23 @@ function sheetTSV() {
 }
 async function runPlume(kind) {
   if (Plume.mode === 'pdf') return runPlumePdf(kind);
+  if (Plume.mode === 'feuille' && !kind) {
+    const ask = $('#plumeAsk').value.trim(); if (!ask) { $('#plumeAsk').focus(); return; }
+    if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
+    if (Plume.ctl) Plume.ctl.abort();
+    commitEdit(false); $('#plumeActs').hidden = true;
+    $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = true);
+    Plume.ctl = new AbortController();
+    try { await runBuild(ask); }
+    catch (e) {
+      const out = $('#plumeOut');
+      if (e && e.name === 'AbortError') out.textContent = '';
+      else if (e instanceof SyntaxError || (e && e.message === 'Réponse illisible')) out.textContent = 'La réponse de Plume était incomplète. Réessayez, éventuellement avec une demande plus courte.';
+      else out.textContent = aiError(e);
+    }
+    $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = false); Plume.ctl = null;
+    return;
+  }
   if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
   if (Plume.ctl) Plume.ctl.abort();
   const ask = $('#plumeAsk').value.trim();
@@ -7940,6 +7957,110 @@ Réponds UNIQUEMENT par un objet JSON { "nom technique du champ": valeur }. Ne r
   done();
 }
 
+/* =========================================================
+   Plume construit dans le classeur : tableaux, formules, listes, règles, graphiques
+   ========================================================= */
+const BUILD_SPEC = `Réponds UNIQUEMENT par un objet JSON (aucun texte autour) de cette forme, toutes les clés étant facultatives sauf "resume" et "cellules" :
+{
+ "resume": "une phrase qui dit ce que tu as construit",
+ "titre": "titre court du classeur",
+ "cellules": [["A1", "Date", {"gras": true, "fond": "cuivre"}], ["D2", "=SOMME(D3:D40)", {"format": "eur"}]],
+ "colonnes": {"A": 110, "B": 180},
+ "fusions": ["A1:D1"],
+ "figer": {"lignes": 1, "colonnes": 0},
+ "listes": [{"plage": "B3:B200", "valeurs": ["Courses", "Transport"]}],
+ "regles": [{"plage": "D3:D200", "condition": "gt", "valeur": "100", "fond": "rouge"}],
+ "graphiques": [{"type": "pie", "donnees": "G3:H10", "titre": "Ce qui coûte le plus", "position": "J3"}]
+}
+Règles à respecter :
+- Chaque cellule : [adresse, contenu, mise en forme facultative]. Contenu = texte, nombre (virgule décimale : 12,5) ou formule commençant par « = ».
+- Formules à la française : noms français (SOMME, SI, SOMME.SI, SOMME.SI.ENS, NB.SI, MOYENNE, MAX, MIN, RECHERCHEX, AUJOURDHUI, MOIS, ANNEE, TEXTE, ARRONDI…), point-virgule entre les arguments, virgule décimale. Une formule ne doit jamais faire référence à sa propre cellule ni à une plage qui la contient.
+- Préfère des plages bornées (D3:D500) aux colonnes entières.
+- Dates au format JJ/MM/AAAA.
+- Mise en forme possible : "gras", "italique" (true), "fond" et "couleur" parmi jaune, vert, bleu, rouge, violet, orange, gris, cuivre ; "format" parmi eur, pct, dec2, date ; "align" parmi gauche, centre, droite ; "bordure" (true) ; "retour" (true, retour à la ligne).
+- Conditions des règles : gt, ge, lt, le, eq, ne, between (avec "valeur2"), contains, empty, dup, above, below, scale (dégradé, avec "bas" et "haut" en couleurs).
+- Types de graphiques : col (colonnes), bar (barres), line (courbes), stack (colonnes empilées), pie (secteurs / camembert). "donnees" = plage avec en première colonne les libellés et en première ligne les noms de séries. "position" = cellule où placer le coin du graphique, dans une zone libre.
+- Ne remplis pas de cellules inutiles. Si on te demande un modèle de suivi, ajoute 3 à 5 lignes d'exemple réalistes pour que les formules et les graphiques montrent quelque chose.`;
+const BCOL = new Set(['jaune', 'vert', 'bleu', 'rouge', 'violet', 'orange', 'gris', 'cuivre']);
+const colIndex = L => { let n = 0; for (const ch of String(L).toUpperCase()) { if (ch < 'A' || ch > 'Z') return -1; n = n * 26 + ch.charCodeAt(0) - 64; } return n - 1; };
+function buildFmt(m) {
+  const f = {}; if (!m || typeof m !== 'object') return f;
+  if (m.gras) f.b = 1; if (m.italique) f.i = 1; if (m.souligne) f.u = 1;
+  if (BCOL.has(m.fond)) f.bg = m.fond; if (BCOL.has(m.couleur)) f.fc = m.couleur;
+  if (['eur', 'pct', 'dec2', 'date'].includes(m.format)) f.n = m.format;
+  const A = { gauche: 'al', centre: 'ac', droite: 'ar' }; if (A[m.align]) f.a = A[m.align];
+  if (m.bordure) Object.assign(f, { bt: 1, bb: 1, bl: 1, br: 1 });
+  if (m.retour) f.w = 1;
+  return f;
+}
+// Applique un plan au classeur actif. Renvoie { n, errors: [[adresse, erreur]] }
+function applyBuild(plan) {
+  const o = JSON.parse(snap()); o.cells ||= {}; o.colW ||= {};
+  let n = 0, maxR = 0, maxC = 0; const placed = [];
+  const at = ref => { const p = parseAddr(String(ref || '').toUpperCase().replace(/\$/g, '')); if (p) { maxR = Math.max(maxR, p.r); maxC = Math.max(maxC, p.c); } return p; };
+  (Array.isArray(plan.cellules) ? plan.cellules : []).slice(0, 4000).forEach(x => {
+    const [ref, val, fm] = Array.isArray(x) ? x : [x && x.ref, x && x.v, x && x.f];
+    const p = at(ref); if (!p || p.r > 1999 || p.c > 59) return;
+    const k = addr(p.r, p.c), raw = normRaw(val == null ? '' : typeof val === 'number' ? numToRaw(val) : String(val));
+    const cell = o.cells[k] || { v: '', f: {} }; cell.f ||= {};
+    cell.v = raw; Object.assign(cell.f, buildFmt(fm));
+    if (!cell.f.n && raw && raw[0] !== '=' && parseNum(raw) == null && parseDate(raw) != null) cell.f.n = 'date';
+    o.cells[k] = cell; n++; if (raw[0] === '=') placed.push([p.r, p.c]);
+  });
+  Object.entries(plan.colonnes || {}).forEach(([L, w]) => { const c = colIndex(L); if (c >= 0 && c < 60 && +w > 20) o.colW[c] = Math.min(500, Math.round(+w)); });
+  (plan.fusions || []).forEach(ref => { const R = rangeObj(String(ref)); if (!R) return; at(addr(R.r2, R.c2)); const k = addr(R.r1, R.c1); (o.cells[k] ||= { v: '', f: {} }).f ||= {}; o.cells[k].f.mg = { r: R.r2 - R.r1 + 1, c: R.c2 - R.c1 + 1 }; });
+  if (plan.figer && (+plan.figer.lignes || +plan.figer.colonnes)) o.frz = { r: Math.min(10, +plan.figer.lignes || 0), c: Math.min(5, +plan.figer.colonnes || 0) };
+  (plan.listes || []).forEach(l => {
+    const R = rangeObj(String(l.plage || '')); const vals = (l.valeurs || []).map(String).filter(Boolean).slice(0, 60); if (!R || !vals.length) return;
+    for (let r = R.r1; r <= Math.min(R.r2, R.r1 + 999); r++) for (let c = R.c1; c <= R.c2; c++) { const k = addr(r, c); (o.cells[k] ||= { v: '', f: {} }).f ||= {}; o.cells[k].f.dd = vals; }
+  });
+  const OPS = new Set(['gt', 'ge', 'lt', 'le', 'eq', 'ne', 'between', 'contains', 'empty', 'dup', 'above', 'below']);
+  (plan.regles || []).forEach(g => {
+    const R = rangeObj(String(g.plage || '')); if (!R) return; o.cf ||= [];
+    if (g.condition === 'scale') o.cf.push({ id: uid(), ...R, t: 'scale', hi: BCOL.has(g.haut) ? g.haut : 'vert', ...(BCOL.has(g.bas) ? { lo: g.bas } : {}) });
+    else if (OPS.has(g.condition)) o.cf.push({ id: uid(), ...R, t: g.condition === 'empty' ? 'empty' : g.condition, a: g.valeur != null ? String(g.valeur) : '', ...(g.valeur2 != null ? { b: String(g.valeur2) } : {}), st: buildFmt({ fond: g.fond || (g.couleur ? '' : 'rouge'), couleur: g.couleur, gras: g.gras }) });
+  });
+  (plan.graphiques || []).slice(0, 6).forEach(g => {
+    const R = rangeObj(String(g.donnees || '')); if (!R) return;
+    const pos = at(g.position) || { r: R.r1, c: Math.min(59, R.c2 + 2) };
+    const type = CHART_TYPES.some(([k]) => k === g.type) ? g.type : 'col';
+    (o.charts ||= []).push({ id: uid(), ...R, type, title: String(g.titre || ''), byRow: !!g.enLignes, at: { r: pos.r, c: pos.c }, dx: 8, dy: 0, w: type === 'pie' ? 420 : 480, h: 300 });
+    maxR = Math.max(maxR, pos.r + 14); maxC = Math.max(maxC, pos.c + 6);
+  });
+  o.rows = Math.max(o.rows || 60, Math.min(2000, maxR + 21)); o.cols = Math.max(o.cols || 12, Math.min(60, maxC + 3));
+  pushHist(); restore(JSON.stringify(o)); renderCharts();
+  if (plan.titre && /sans titre/i.test(state.cur.title || '')) { state.cur.title = String(plan.titre).slice(0, 80); $('#titleIn').value = state.cur.title; scheduleSave(); }
+  const errors = [];
+  if (SH.hf) placed.forEach(([r, c]) => { try { const v = SH.hf.getCellValue({ sheet: SH.sid, row: r, col: c }); if (v && typeof v === 'object' && v.value && /^#/.test(String(v.value))) errors.push([addr(r, c), String(v.value) + (v.message ? ' (' + v.message + ')' : '')]); } catch {} });
+  return { n, errors };
+}
+async function runBuild(ask) {
+  const out = $('#plumeOut'), title = state.cur.title || 'Sans titre', a = addr(SH.sel.r, SH.sel.c);
+  const tsv = sheetTSV(), empty = !Object.values(state.cur.cells).some(x => x.v !== '');
+  const base = `Tu construis directement dans un tableur (Grimoire, formules à la française) pour un particulier. Classeur « ${title} », feuille active, cellule sélectionnée ${a}.
+${empty ? 'La feuille est vide : commence en A1.' : `Contenu actuel (TSV, première ligne = lettres de colonnes, première colonne = numéros de ligne) :\n${tsv}\nPlace ce qui est nouveau à partir de la cellule sélectionnée ou dans une zone libre, sans écraser l'existant sauf si la demande le dit. Une formule seule va dans la cellule sélectionnée.`}
+
+Demande : ${ask}
+
+${BUILD_SPEC}`;
+  out.classList.remove('mono'); out.textContent = 'Plume construit…';
+  const signal = Plume.ctl.signal;
+  let plan = aiJson((await aiChat(base, { signal })).text);
+  let res = applyBuild(plan);
+  if (res.errors.length) {
+    // une seconde passe pour corriger les formules en erreur
+    out.textContent = 'Plume corrige ' + res.errors.length + ' formule' + (res.errors.length > 1 ? 's' : '') + '…';
+    undo(); SH.fut = [];
+    const fix = await aiChat(base + `\n\nTa proposition précédente :\n${JSON.stringify(plan).slice(0, 12000)}\n\nCes formules donnent une erreur : ${res.errors.map(e => e.join(' → ')).join(' ; ')}.\n(#CYCLE! = la formule se calcule elle-même, #NOM? = fonction inconnue, #REF! = référence invalide, #VALEUR! = mauvais type.) Renvoie le JSON complet corrigé.`, { signal });
+    plan = aiJson(fix.text); res = applyBuild(plan);
+  }
+  const ch = (plan.graphiques || []).length;
+  out.innerHTML = `<p>${esc(plan.resume || 'C\'est construit.')}</p><p class="pl-h">${res.n} cellule${res.n > 1 ? 's' : ''}${ch ? ` · ${ch} graphique${ch > 1 ? 's' : ''}` : ''}${(plan.listes || []).length ? ' · listes déroulantes' : ''}${(plan.regles || []).length ? ' · règles de couleur' : ''}</p>`
+    + (res.errors.length ? `<p class="pl-err">Encore ${res.errors.length} formule${res.errors.length > 1 ? 's' : ''} en erreur : ${res.errors.map(e => esc(e[0] + ' ' + e[1].split(' (')[0])).join(', ')}.</p>` : '');
+  $('#plumeActs').innerHTML = `<button class="pbtn ghost" data-pa="unbuild">Annuler (Ctrl+Z)</button>`; $('#plumeActs').hidden = false;
+  toast('Plume a construit dans le classeur. Ctrl+Z pour revenir en arrière.');
+}
+
 function textToHtml(t) {
   const blocks = t.split(/\n{2,}/).map(b => b.trim()).filter(Boolean);
   return blocks.map(b => {
@@ -7967,6 +8088,7 @@ $('#plumeAsk').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ct
 $('#plumeActs').addEventListener('mousedown', e => e.preventDefault());
 $('#plumeActs').addEventListener('click', async e => {
   const b = e.target.closest('[data-pa]'); if (!b) return;
+  if (b.dataset.pa === 'unbuild') { undo(); toast('Construction annulée.'); $('#plumeActs').hidden = true; $('#plumeOut').textContent = ''; return; }
   const t = Plume.result; if (!t) return;
   const k = b.dataset.pa;
   if (k === 'copy') { try { await navigator.clipboard.writeText(t); toast('Copié'); } catch { toast('Copie refusée par le navigateur : sélectionnez le texte à la main.', true); } return; }

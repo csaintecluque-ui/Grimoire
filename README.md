@@ -21,6 +21,7 @@ Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 - **Recherche** (accueil) : titre et contenu des documents, classeurs, PDF et notes rapides enregistrés dans Grimoire (pas les fichiers de l'ordinateur).
 - **Hors connexion** : tout est enregistré sur l'appareil.
 - **Plume** (facultatif) : assistant d'écriture avec une clé Mistral ou OpenRouter, à saisir dans les Réglages.
+  Dans un classeur : Plume construit directement ce qu'on lui décrit (tableaux, titres, formules à la française, listes déroulantes, règles de couleur, volets figés, graphiques), vérifie ses formules et corrige celles en erreur ; Ctrl+Z annule toute la construction.
   Sur un PDF : résumer (avec dates limites et choses à faire), répondre à une question, remplir un formulaire à partir de « Mes informations » (Réglages) et de consignes, relever une facture dans le classeur « Suivi des factures » (date, fournisseur, n°, catégorie, HT, TVA, TTC), ou plusieurs factures d'un coup (palette Ctrl+K). Les PDF scannés sans texte ne sont pas lus.
 
 ## Mise en ligne (GitHub Pages)
