@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.1';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -6191,6 +6191,12 @@ async function saveDoc(asNew) {
     try { if (await h.queryPermission({ mode: 'readwrite' }) !== 'granted' && await h.requestPermission({ mode: 'readwrite' }) !== 'granted') h = null; }
     catch { h = null; }
   }
+  // Premier enregistrement par-dessus un fichier ouvert depuis l'ordinateur : prévenir de ce qui pourrait s'y perdre.
+  const imp = ls.get('grim.fimp', {});
+  if (h && imp[cur.id]) {
+    if (!confirm(`Grimoire va remplacer « ${h.name} » par sa version.\n\nCe que Grimoire ne gère pas dans ce fichier (commentaires, macros, graphiques d'un fichier Excel, mises en forme avancées) y sera perdu.\n\nOK : remplacer le fichier.\nAnnuler : choisir un autre nom (Enregistrer sous).`)) return saveDoc(true);
+    delete imp[cur.id]; ls.set('grim.fimp', imp);
+  }
   const fresh = !h;
   if (!h) {
     if (!window.showSaveFilePicker || isPhone()) {
@@ -6230,7 +6236,7 @@ async function importHandles(hs) {
     const prev = state.cur && state.cur.id;
     await importFile(x.f);
     const c = state.cur;
-    if (c && c.id !== prev && kindFor(c.type, x.h.name)) await linkHandle(c.id, x.h);
+    if (c && c.id !== prev && kindFor(c.type, x.h.name)) { await linkHandle(c.id, x.h); const imp = ls.get('grim.fimp', {}); imp[c.id] = 1; ls.set('grim.fimp', imp); }
   }
 }
 
