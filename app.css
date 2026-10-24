@@ -735,3 +735,13 @@ body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-heigh
   body.m-pc .h-create .tcard{padding:9px 12px}
   body.m-pc .h-create .tcard small{display:none}
 }
+
+/* Fichier de l'ordinateur lié au document (Enregistrer) */
+.file-st{font-size:12px;color:var(--chrome-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;display:flex;align-items:center;gap:6px}
+.file-st::before{content:"";flex:none;width:11px;height:11px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M5 4h11l3 3v13H5z'/%3E%3Cpath d='M8 4v5h7V4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M5 4h11l3 3v13H5z'/%3E%3Cpath d='M8 4v5h7V4'/%3E%3C/svg%3E") center/contain no-repeat}
+.file-st[data-dirty="1"]{color:var(--copper)}
+.file-st[data-dirty="1"]::after{content:"· à enregistrer"}
+@media (max-width:1100px){.file-st{display:none}}
+.title-in{min-width:140px}
+@media (max-width:1560px){.app.in-doc #palBtn .lbl-t,.app.in-doc #palBtn .k,.app.in-doc #printBtn .lbl-t,.app.in-doc #saveAsBtn .lbl-t,.app.in-doc #modeBtn .lbl-t{display:none}}
+@media (max-width:1250px){.app.in-doc #plumeBtn .lbl-t,.app.in-doc #exportBtn .lbl-t,.app.in-doc .wordmark{display:none}}

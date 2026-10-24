@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -118,6 +118,8 @@ const IC = {
   pagePlus: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 9v6M9 12h6"/>',
   move: '<path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4"/>',
   selAll: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12l3 3 5-6"/>',
+  save: '<path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/>',
+  saveAs: '<path d="M11 20H5V4h11l3 3v3"/><path d="M8 4v5h7V4"/><path d="M14 20v-2.2l5.4-5.4 2.2 2.2-5.4 5.4z"/>',
   printer: '<path d="M7 9V3h10v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 14h10v7H7z"/>'
 };
 const ic = n => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${IC[n] || ''}</svg>`;
@@ -250,7 +252,7 @@ function setSaveState(s) {
 }
 function scheduleSave() {
   if (!state.cur) return;
-  setSaveState('dirty');
+  setSaveState('dirty'); if (typeof markFileDirty === 'function') markFileDirty();
   clearTimeout(saveTimer); saveTimer = setTimeout(flushSave, 900);
 }
 async function flushSave() {
@@ -354,6 +356,9 @@ function show(view) {
   $('#barSpacer').hidden = inDoc;
   $('#exportBtn').hidden = !inDoc;
   $('#printBtn').hidden = !inDoc;
+  $('#saveBtn').hidden = $('#saveAsBtn').hidden = !inDoc;
+  $('#fileSt').hidden = true;
+  if (inDoc) { const id = state.cur.id; FH.get(id).then(() => { if (state.cur && state.cur.id === id) updFileSt(); }); }
   $('#plumeBtn').hidden = !inDoc || view === 'pdfv';
   closePlume(); closeExport();
   document.body.classList.remove('focus', 'show-outline');
@@ -395,7 +400,7 @@ $('#brand').addEventListener('click', goHome);
 $('#backBtn').addEventListener('click', goHome);
 $$('[data-new]').forEach(b => b.addEventListener('click', () => createDoc(b.dataset.new)));
 $$('[data-tpl]').forEach(b => b.addEventListener('click', () => fromTemplate(b.dataset.tpl)));
-$('#importCard').addEventListener('click', () => $('#fileIn').click());
+$('#importCard').addEventListener('click', () => openFromComputer());
 $('#titleIn').addEventListener('input', e => { if (!state.cur) return; state.cur.title = e.target.value; delete state.cur.autoTitle; scheduleSave(); });
 $('#titleIn').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); state.view === 'writer' ? $('#ed').focus() : $('#gridWrap').focus(); } });
 
@@ -6124,7 +6129,9 @@ function guessSep(t) { const l = t.split('\n')[0] || ''; return (l.match(/;/g) |
    Export
    ========================================================= */
 const MIME = { pdf: 'application/pdf', zip: 'application/zip', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', csv: 'text/csv', md: 'text/markdown', html: 'text/html', json: 'application/json' };
+let CAPTURE = null;
 async function saveFile(filename, data) {
+  if (CAPTURE) { CAPTURE({ filename, data }); return; }
   const ext = filename.split('.').pop().toLowerCase();
   const blob = new Blob([data], { type: MIME[ext] || 'application/octet-stream' });
   if (window.showSaveFilePicker && !isPhone()) {
@@ -6140,6 +6147,93 @@ async function saveFile(filename, data) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
   toast('Fichier enregistré dans vos téléchargements : ' + filename);
 }
+/* --- Enregistrer / Enregistrer sous : un document Grimoire lié à un vrai fichier de l'ordinateur */
+const FH = {
+  db: null, links: new Map(),
+  open() { return this.db ||= new Promise((res, rej) => { const r = indexedDB.open('grimoire-fichiers', 1); r.onupgradeneeded = () => r.result.createObjectStore('h'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
+  async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('h', mode); const q = fn(t.objectStore('h')); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); },
+  async get(id) { if (this.links.has(id)) return this.links.get(id); let h = null; try { h = await this.tx('readonly', st => st.get(id)) || null; } catch {} this.links.set(id, h); return h; },
+  async set(id, h) { this.links.set(id, h); try { await this.tx('readwrite', st => st.put(h, id)); } catch {} },
+  async del(id) { this.links.delete(id); this.dirty(id, false); try { await this.tx('readwrite', st => st.delete(id)); } catch {} },
+  dirty(id, v) { const m = ls.get('grim.fdirty', {}); if (v === undefined) return !!m[id]; if (v) m[id] = 1; else delete m[id]; ls.set('grim.fdirty', m); }
+};
+const SAVE_FMT = {
+  texte: [{ ext: 'docx', k: 'docx', d: 'Document Word' }],
+  feuille: [{ ext: 'xlsx', k: 'xlsx', d: 'Classeur Excel' }, { ext: 'csv', k: 'csv', d: 'CSV (point-virgule)' }],
+  pdf: [{ ext: 'pdf', k: 'pdf', d: 'PDF' }]
+};
+const fileExt = n => (String(n).split('.').pop() || '').toLowerCase();
+const kindFor = (type, name) => { const e = fileExt(name), f = (SAVE_FMT[type] || []).find(x => x.ext === e); return f ? f.k : type === 'texte' && (e === 'md' || e === 'html') ? e : null; };
+async function produce(k) {
+  let out = null; CAPTURE = o => { out = o; };
+  try { await runExport(k); } finally { CAPTURE = null; }
+  if (!out) throw new Error('Fichier non créé');
+  return new Blob([out.data], { type: MIME[fileExt(out.filename)] || 'application/octet-stream' });
+}
+function updFileSt() {
+  const el = $('#fileSt'), cur = state.cur, h = cur && FH.links.get(cur.id);
+  el.hidden = !h; if (!h) return;
+  const d = FH.dirty(cur.id);
+  el.dataset.dirty = d ? '1' : '';
+  el.textContent = h.name;
+  el.title = d ? `Modifications pas encore enregistrées dans ${h.name} (Ctrl+S)` : `Enregistré dans ${h.name}`;
+}
+function markFileDirty() { const c = state.cur; if (c && FH.links.get(c.id) && !FH.dirty(c.id)) { FH.dirty(c.id, true); updFileSt(); } }
+async function linkHandle(id, h) { if (h && id) { await FH.set(id, h); FH.dirty(id, false); if (state.cur && state.cur.id === id) updFileSt(); } }
+async function saveDoc(asNew) {
+  const cur = state.cur; if (!cur) return;
+  if (state.view === 'sheet') commitEdit(false);
+  await flushSave();
+  const fmts = SAVE_FMT[cur.type] || [];
+  let h = asNew ? null : await FH.get(cur.id);
+  if (h && !kindFor(cur.type, h.name)) { toast(`Grimoire ne sait pas réécrire un fichier .${fileExt(h.name)} : choisissez où l'enregistrer.`); h = null; }
+  if (h && h.queryPermission) {
+    try { if (await h.queryPermission({ mode: 'readwrite' }) !== 'granted' && await h.requestPermission({ mode: 'readwrite' }) !== 'granted') h = null; }
+    catch { h = null; }
+  }
+  const fresh = !h;
+  if (!h) {
+    if (!window.showSaveFilePicker || isPhone()) {
+      // Pas d'accès direct aux fichiers (Firefox, téléphone) : le fichier part dans les téléchargements.
+      try { await runExport(fmts[0].k); } catch { toast('Enregistrement impossible.', true); }
+      return;
+    }
+    try { h = await window.showSaveFilePicker({ suggestedName: safeName(cur.title) + '.' + fmts[0].ext, types: fmts.map(f => ({ description: f.d, accept: { [MIME[f.ext]]: ['.' + f.ext] } })) }); }
+    catch (e) { if (e && e.name !== 'AbortError') toast('Enregistrement impossible : ' + (e.message || e), true); return; }
+  }
+  const k = kindFor(cur.type, h.name) || fmts[0].k;
+  if (fresh) {
+    // comme Word : le document prend le nom du fichier choisi
+    const t = h.name.replace(/\.[^.]+$/, '');
+    if (t && t !== cur.title) { cur.title = t; delete cur.autoTitle; $('#titleIn').value = t; await Store.save(cur).catch(() => {}); }
+  }
+  try {
+    const blob = await produce(k);
+    const w = await h.createWritable(); await w.write(blob); await w.close();
+  } catch (e) { console.warn(e); toast('Le fichier ' + h.name + ' n\'a pas pu être écrit' + (e && e.name === 'NoModificationAllowedError' ? ' : il est peut-être ouvert ailleurs.' : '.'), true); return; }
+  await linkHandle(cur.id, h);
+  toast('Enregistré dans ' + h.name);
+}
+async function openFromComputer() {
+  if (!window.showOpenFilePicker || isPhone()) { $('#fileIn').click(); return; }
+  let hs;
+  try { hs = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'Word, Excel, CSV, PDF, texte', accept: { 'application/octet-stream': ['.docx', '.xlsx', '.xls', '.ods', '.csv', '.txt', '.md', '.pdf'] } }] }); }
+  catch (e) { if (e && e.name !== 'AbortError') $('#fileIn').click(); return; }
+  await importHandles(hs);
+}
+async function importHandles(hs) {
+  const items = []; for (const h of hs) { try { items.push({ h, f: await h.getFile() }); } catch {} }
+  const pdfs = items.filter(x => fileExt(x.f.name) === 'pdf');
+  if (pdfs.length > 1) await importPdfFiles(pdfs.map(x => x.f));
+  for (const x of items) {
+    if (pdfs.length > 1 && fileExt(x.f.name) === 'pdf') continue;
+    const prev = state.cur && state.cur.id;
+    await importFile(x.f);
+    const c = state.cur;
+    if (c && c.id !== prev && kindFor(c.type, x.h.name)) await linkHandle(c.id, x.h);
+  }
+}
+
 const safeName = t => (String(t || 'Sans titre').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() || 'Sans titre').slice(0, 120);
 
 const xmlEsc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
@@ -6837,6 +6931,8 @@ function printDoc() {
   catch { toast('Impression indisponible ici : ouvrez Grimoire dans son propre onglet.', true); }
 }
 $('#printBtn').addEventListener('click', printDoc);
+$('#saveBtn').addEventListener('click', () => saveDoc(false));
+$('#saveAsBtn').addEventListener('click', () => saveDoc(true));
 
 /* --- menu Exporter */
 let delArmed = false;
@@ -6844,11 +6940,11 @@ function openExport() {
   const p = $('#exportPop'); const t = state.cur.type;
   delArmed = false;
   p.innerHTML = t === 'pdf'
-    ? `<button data-x="pdf">${ic('pdf')}PDF modifié (.pdf)<small>Ctrl E</small></button><button data-x="pdfdoc">${ic('doc')}Convertir en document Grimoire</button><button data-x="print">${ic('printer')}Imprimer<small>Ctrl P</small></button>`
+    ? `<button data-x="pdf">${ic('pdf')}Copie du PDF modifié (.pdf)</button><button data-x="pdfdoc">${ic('doc')}Convertir en document Grimoire</button><button data-x="print">${ic('printer')}Imprimer<small>Ctrl P</small></button>`
       + `<hr><button data-x="dup">${ic('copy')}Dupliquer</button><button data-x="del" class="danger">${ic('trash')}<span>Supprimer le document</span></button>`
     : (t === 'texte'
-    ? `<button data-x="docx">${ic('doc')}Word (.docx)<small>Ctrl E</small></button><button data-x="md">${ic('type')}Markdown (.md)</button><button data-x="html">${ic('download')}Page web (.html)</button><button data-x="docpdf">${ic('pdf')}PDF (.pdf)</button>`
-    : `<button data-x="xlsx">${ic('grid')}Excel (.xlsx)<small>Ctrl E</small></button><button data-x="csv">${ic('download')}CSV pour Excel (.csv)</button><button data-x="docpdf">${ic('pdf')}PDF (.pdf)</button>`)
+    ? `<button data-x="docpdf">${ic('pdf')}PDF (.pdf)</button><button data-x="md">${ic('type')}Markdown (.md)</button><button data-x="html">${ic('download')}Page web (.html)</button><button data-x="docx">${ic('doc')}Copie Word (.docx)</button>`
+    : `<button data-x="docpdf">${ic('pdf')}PDF (.pdf)</button><button data-x="csv">${ic('download')}CSV pour Excel (.csv)</button><button data-x="xlsx">${ic('grid')}Copie Excel (.xlsx)</button>`)
     + `<button data-x="print">${ic('printer')}Imprimer<small>Ctrl P</small></button>`
     + `<hr><button data-x="dup">${ic('copy')}Dupliquer</button><button data-x="del" class="danger">${ic('trash')}<span>Supprimer le document</span></button>`;
   p.hidden = false;
@@ -6862,7 +6958,7 @@ $('#exportPop').addEventListener('click', async e => {
   const k = b.dataset.x;
   if (k === 'del') {
     if (!delArmed) { delArmed = true; b.querySelector('span').textContent = 'Confirmer la suppression'; return; }
-    const id = state.cur.id; closeExport(); clearTimeout(saveTimer); saveTimer = null; state.cur = null;
+    const id = state.cur.id; closeExport(); clearTimeout(saveTimer); saveTimer = null; state.cur = null; FH.del(id);
     try { await Store.remove(id); toast('Document supprimé.'); } catch { toast('Suppression impossible pour le moment.', true); }
     show('home'); renderHome(); return;
   }
@@ -7094,9 +7190,9 @@ function commands() {
     add('Affichage', 'Mode concentration', 'focus', W.focus);
     add('Affichage', 'Afficher ou masquer le plan', 'outline', W.outline);
     if (Plume.available) { add('Plume', 'Reformuler la sélection', 'feather', () => { openPlume(); runPlume('reformuler'); }); add('Plume', 'Corriger la sélection', 'feather', () => { openPlume(); runPlume('corriger'); }); add('Plume', 'Résumer le document', 'feather', () => { openPlume(); runPlume('resumer'); }); add('Plume', 'Rédiger avec Plume…', 'feather', () => { openPlume(); setTimeout(() => $('#plumeAsk').focus(), 30); }); }
-    add('Exporter', 'Exporter en Word (.docx)', 'download', () => runExport('docx').catch(() => toast('Export impossible.', true)), 'Ctrl E');
     add('Exporter', 'Exporter en PDF (.pdf)', 'pdf', () => runExport('docpdf'));
     add('Exporter', 'Exporter en Markdown (.md)', 'download', () => runExport('md'));
+    add('Exporter', 'Exporter une copie Word (.docx)', 'download', () => runExport('docx').catch(() => toast('Export impossible.', true)));
   }
   if (v === 'sheet') {
     add('Cellules', 'Somme automatique', 'sigma', autoSum);
@@ -7149,11 +7245,13 @@ function commands() {
     add('Structure', 'Afficher les lignes masquées', 'eye', () => setHidden('r', false));
     add('Structure', 'Afficher les colonnes masquées', 'eye', () => setHidden('c', false));
     if (Plume.available) { add('Plume', 'Écrire une formule avec Plume…', 'feather', () => { openPlume(); setTimeout(() => $('#plumeAsk').focus(), 30); }); add('Plume', 'Vérifier le classeur', 'feather', () => { openPlume(); runPlume('verifier'); }); }
-    add('Exporter', 'Exporter en Excel (.xlsx)', 'download', () => runExport('xlsx').catch(() => toast('Export impossible.', true)), 'Ctrl E');
     add('Exporter', 'Exporter en PDF (.pdf)', 'pdf', () => runExport('docpdf'));
+    add('Exporter', 'Exporter une copie Excel (.xlsx)', 'download', () => runExport('xlsx').catch(() => toast('Export impossible.', true)));
     add('Exporter', 'Exporter en CSV', 'download', () => runExport('csv'));
   }
   if (v !== 'home') {
+    add('Fichier', 'Enregistrer', 'save', () => saveDoc(false), 'Ctrl S');
+    add('Fichier', 'Enregistrer sous…', 'saveAs', () => saveDoc(true), 'Ctrl Maj S');
     add('Document', 'Renommer', 'pen', () => { $('#titleIn').focus(); $('#titleIn').select(); });
     add('Document', 'Retour à l\'accueil', 'home', goHome);
   }
@@ -7163,7 +7261,7 @@ function commands() {
   add('Créer', 'Budget du mois (modèle)', 'grid', () => fromTemplate('budget'));
   add('Créer', 'Suivi des dépenses (modèle)', 'grid', () => fromTemplate('depenses'));
   add('Créer', 'Lettre (modèle)', 'doc', () => fromTemplate('lettre'));
-  add('Créer', 'Importer un fichier Word, Excel ou CSV', 'upload', () => $('#fileIn').click());
+  add('Créer', 'Ouvrir un fichier Word, Excel, CSV ou PDF', 'upload', () => openFromComputer());
   if (v === 'writer' || v === 'sheet') add('Exporter', 'Imprimer ou créer un PDF', 'printer', printDoc, 'Ctrl P');
   add('Préférences', isPhone() ? 'Passer en mode PC' : 'Passer en mode téléphone', isPhone() ? 'monitor' : 'phone', () => setMode(isPhone() ? 'pc' : 'phone'));
   add('Préférences', currentDark() ? 'Passer au thème clair' : 'Passer au thème sombre', currentDark() ? 'sun' : 'moon', toggleTheme);
@@ -7221,11 +7319,11 @@ document.addEventListener('keydown', e => {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); $('#palette').hidden ? openPalette() : closePalette(); return; }
   if (mod && (e.key === 'p' || e.key === 'P') && state.view === 'pdfv') { e.preventDefault(); printPdf(); return; }
-  if (mod && (e.key === 's' || e.key === 'S') && state.cur) { e.preventDefault(); commitEdit(false); flushSave().then(() => toast('Enregistré')); return; }
+  if (mod && (e.key === 's' || e.key === 'S') && state.cur) { e.preventDefault(); saveDoc(e.shiftKey); return; }
   if (mod && state.view === 'writer' && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFind(false); return; }
   if (mod && state.view === 'writer' && (e.key === 'h' || e.key === 'H')) { e.preventDefault(); openFind(true); return; }
   if (mod && state.view === 'sheet' && (e.key === 'f' || e.key === 'F' || e.key === 'h' || e.key === 'H')) { e.preventDefault(); openSFind(/h/i.test(e.key)); return; }
-  if (mod && (e.key === 'e' || e.key === 'E') && state.cur) { e.preventDefault(); commitEdit(false); runExport(state.cur.type === 'feuille' ? 'xlsx' : state.cur.type === 'pdf' ? 'pdf' : 'docx').catch(() => toast('Export impossible.', true)); return; }
+  if (mod && (e.key === 'e' || e.key === 'E') && state.cur) { e.preventDefault(); e.stopPropagation(); commitEdit(false); $('#exportPop').hidden ? openExport() : closeExport(); return; }
   if (e.key === 'Escape') {
     if (selImg) hideImgBar();
     else if (!$('#findBar').hidden && state.view === 'writer') closeFind();
@@ -7331,12 +7429,7 @@ if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
 }
 $('#updBtn').addEventListener('click', () => location.reload());
 if ('launchQueue' in window) {
-    window.launchQueue.setConsumer(async p => {
-    const fs = []; for (const h of (p.files || [])) { try { fs.push(await h.getFile()); } catch {} }
-    const pdfs = fs.filter(f => /\.pdf$/i.test(f.name));
-    if (pdfs.length > 1) await importPdfFiles(pdfs);
-    for (const f of fs) if (!(pdfs.length > 1 && /\.pdf$/i.test(f.name))) await importFile(f);
-  });
+    window.launchQueue.setConsumer(async p => { if (p.files && p.files.length) await importHandles(p.files); });
 }
 
 window.addEventListener('error', e => { toast('Un problème est survenu : ' + (e.message || 'erreur inconnue'), true); });

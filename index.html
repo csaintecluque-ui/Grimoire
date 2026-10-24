@@ -28,13 +28,16 @@
     <div class="crumb" id="crumb" hidden>
       <button class="back" id="backBtn" aria-label="Retour à l'accueil" data-ic="left"></button>
       <input class="title-in" id="titleIn" aria-label="Titre du document" autocomplete="off" spellcheck="false">
-      <span class="save-st" id="saveSt" data-s="ok">Enregistré</span>
+      <span class="save-st" id="saveSt" data-s="ok" title="Toujours enregistré automatiquement dans Grimoire">Enregistré</span>
+      <span class="file-st" id="fileSt" hidden></span>
     </div>
     <span class="spacer" id="barSpacer"></span>
     <div class="bar-actions">
       <button class="bbtn plume-btn" id="plumeBtn" aria-pressed="false" title="Plume, l'assistant d'écriture" hidden data-ic="feather"><span class="lbl-t">Plume</span></button>
+      <button class="bbtn" id="saveBtn" title="Enregistrer sur l'ordinateur (Ctrl+S)" hidden data-ic="save"><span class="lbl-t">Enregistrer</span></button>
+      <button class="bbtn" id="saveAsBtn" title="Enregistrer sous… : choisir le dossier, le nom et le format (Ctrl+Maj+S)" hidden data-ic="saveAs"><span class="lbl-t">Enregistrer sous</span></button>
       <button class="bbtn" id="printBtn" title="Imprimer ou enregistrer en PDF (Ctrl+P)" hidden data-ic="printer"><span class="lbl-t">Imprimer</span></button>
-      <button class="bbtn" id="exportBtn" title="Exporter et options du document" hidden data-ic="download"><span class="lbl-t">Exporter</span></button>
+      <button class="bbtn" id="exportBtn" title="Exporter en PDF, Markdown… et options du document (Ctrl+E)" hidden data-ic="download"><span class="lbl-t">Exporter</span></button>
       <button class="bbtn framed" id="palBtn" title="Palette de commandes (Ctrl+K)" data-ic="command"><span class="lbl-t">Commandes</span><span class="k">Ctrl K</span></button>
       <button class="bbtn" id="modeBtn" title="Passer en mode téléphone"></button>
       <button class="bbtn" id="setBtn" title="Réglages" aria-label="Réglages" data-ic="sliders"></button>
