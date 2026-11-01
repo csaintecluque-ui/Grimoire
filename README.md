@@ -38,6 +38,15 @@ Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 - **Ouvrir les fichiers avec Grimoire** (une fois installé) : clic droit sur un .docx, .xlsx, .csv ou .pdf → *Ouvrir avec* → Grimoire ; *Propriétés → Ouvrir avec → Définir par défaut* pour le double-clic. Le document reste lié au fichier : Enregistrer (Ctrl+S) met à jour l'original.
 - **Notion** : dans une page, taper `/embed` et coller l'adresse.
 
+### Icônes des fichiers sous Windows
+
+Chrome et Edge ne donnent pas d'icône aux fichiers ouverts par une appli web : une fois Grimoire choisi par défaut, les .docx et .xlsx apparaissent en pages blanches. Le script `windows/grimoire-icones.ps1` y remédie (icônes DOC, XLS, CSV, PDF au sceau, voir `windows/icones-apercu.png`) :
+
+1. Télécharger `windows/grimoire-icones.ps1` sur le PC (Grimoire déjà installé), clic droit → *Exécuter avec PowerShell* (accepter l'avertissement de sécurité).
+2. Puis une fois par type : clic droit sur un .docx → *Ouvrir avec* → *Choisir une autre application* → « Grimoire · Document » → *Toujours*. Idem pour un .xlsx → « Grimoire · Classeur ».
+
+Sans droit administrateur, réversible : `powershell -ExecutionPolicy Bypass -File grimoire-icones.ps1 -Retirer`. À relancer si l'appli est réinstallée.
+
 ## Mettre à jour
 
 Après toute modification, augmenter `VERSION` dans `sw.js` : les appareils installés proposent alors « Recharger ».
