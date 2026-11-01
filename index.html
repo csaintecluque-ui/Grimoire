@@ -402,6 +402,16 @@
             <li>Pour que le double-clic l'ouvre toujours dans Grimoire : clic droit → <i>Propriétés</i> → onglet <i>Ouvrir avec</i> → choisir Grimoire → <b>Définir par défaut</b>. À faire une fois par type (.docx, .xlsx…). Sous Windows : clic droit → <i>Ouvrir avec</i> → <i>Choisir une autre application</i> → Grimoire → <i>Toujours</i>.</li>
             <li>Le fichier ouvert est copié dans Grimoire : vos modifications y sont enregistrées. Pour remettre à jour le fichier d'origine, <b>Exporter</b> en .docx ou .xlsx par-dessus.</li>
           </ol></details>
+          <details class="sync-help"><summary>Icônes des fichiers ouverts avec Grimoire</summary>
+            <p class="set-note">Une fois Grimoire choisi par défaut, les fichiers prennent une icône au sceau selon leur type : DOC, XLS, CSV, PDF. Sous Windows, sans ce petit script, ils apparaissent en pages blanches. À lancer une fois sur chaque ordinateur ; sans droit administrateur, et réversible.</p>
+            <div class="set-acts"><a class="pbtn" href="windows/grimoire-icones.ps1" download data-ic="download"><span>Script Windows</span></a><a class="pbtn ghost" href="linux/grimoire-icones.sh" download data-ic="download"><span>Script Linux</span></a></div>
+            <ol>
+              <li><b>Windows</b> : clic droit sur <i>grimoire-icones.ps1</i> → <i>Exécuter avec PowerShell</i> (accepter l'avertissement). Puis, une fois par type : clic droit sur un .docx → <i>Ouvrir avec</i> → <i>Choisir une autre application</i> → <b>Grimoire · Document</b> → <i>Toujours</i> ; un .xlsx → <b>Grimoire · Classeur</b>.</li>
+              <li><b>Linux</b> : choisir d'abord Grimoire par défaut pour les .docx, .xlsx…, puis dans un terminal : <code>bash ~/Téléchargements/grimoire-icones.sh</code>. Fermer et rouvrir le gestionnaire de fichiers (<code>nemo -q</code>).</li>
+              <li>Pour retirer : <code>-Retirer</code> (Windows) ou <code>--retirer</code> (Linux) à la fin de la commande.</li>
+              <li>Mac, téléphone, tablette : le navigateur ne permet pas de changer ces icônes.</li>
+            </ol>
+          </details>
           <p class="set-note">Grimoire <span id="appVer"></span> · bibliothèques : HyperFormula (GPL v3), SheetJS et xlsx-js-style (Apache 2.0), JSZip (MIT), Mammoth (BSD).</p>
         </div>
       </div>
