@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.17.1';
+const APP_VERSION = '1.17.2';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -5081,7 +5081,19 @@ const hexRgbPdf = (PDFLib, hex) => { const [r, g, b] = hexRgb(hex); return PDFLi
 async function pdfExportBytes(opts = {}) {
   const PDFLib = await ensurePdfLib();
   const cur = state.cur;
-  const pdf = await PDFLib.PDFDocument.load(PDFV.bytes, { ignoreEncryption: true });
+  let pdf = null;
+  try { pdf = await PDFLib.PDFDocument.load(PDFV.bytes, { ignoreEncryption: true }); } catch (e) { console.warn('pdf-lib ne sait pas ouvrir ce PDF', e); }
+  // PDF protégé (chiffré, souvent sans mot de passe à l'ouverture) : pdf-lib ne sait pas le réécrire.
+  // On remplit alors ses champs avec PDF.js, qui sait l'enregistrer en gardant sa protection.
+  if (!pdf || pdf.isEncrypted) {
+    const o = cur.order || [], same = o.length === PDFV.srcPages.length && o.every((x, k) => x.s === k && !x.r);
+    if (same && !(cur.ann || []).length && !opts.flattenForm) {
+      const v = cur.form || {}, out = await pdfjsFormSave(v);
+      if (Object.keys(v).length) await pdfVerifyForm(out, v);
+      return out;
+    }
+    const e = new Error('PDF protégé'); e.userMsg = 'Ce PDF est protégé : Grimoire peut remplir ses champs, mais pas y ajouter d\'annotations ni réorganiser ses pages. Rien n\'a été modifié.'; throw e;
+  }
   // pages dans l'ordre affiché, avec leurs rotations
   const order = cur.order || [], identity = order.length === pdf.getPageCount() && order.every((o, k) => o.s === k && !o.r);
   if (!identity) {
@@ -5096,19 +5108,31 @@ async function pdfExportBytes(opts = {}) {
   // formulaire
   const vals = cur.form || {};
   if (Object.keys(vals).length) {
-    try {
-      const form = pdf.getForm();
-      Object.entries(vals).forEach(([name, v]) => {
-        try {
-          const f = form.getField(name);
-          if (f instanceof PDFLib.PDFTextField) f.setText(String(v ?? ''));
-          else if (f instanceof PDFLib.PDFCheckBox) v ? f.check() : f.uncheck();
-          else if (f instanceof PDFLib.PDFRadioGroup) { if (v) f.select(String(v)); }
-          else if (f instanceof PDFLib.PDFDropdown || f instanceof PDFLib.PDFOptionList) { if (v) f.select(String(v)); else f.clear && f.clear(); }
-        } catch (e) { console.warn('Champ ignoré', name, e); }
-      });
-      if (opts.flattenForm) form.flatten();
-    } catch (e) { console.warn('Formulaire ignoré', e); }
+    const widgets = pdfWidgetsByName();
+    let form = null;
+    try { form = pdf.getForm(); } catch (e) { console.warn('Formulaire illisible par pdf-lib', e); }
+    // Certains PDF « modifiables » ont des champs bien présents sur les pages mais pas déclarés dans
+    // le formulaire du document : on les y rattache, sinon pdf-lib ne les trouve pas.
+    if (form) { try { pdfAttachOrphanFields(pdf, PDFLib, form, widgets); } catch (e) { console.warn('Rattachement des champs', e); } }
+    // Formulaire XFA (Adobe LiveCycle) : Acrobat afficherait ses anciennes données, vides, à la place des nôtres.
+    if (form) { try { if (form.hasXFA && form.hasXFA()) form.deleteXFA(); } catch {} }
+    let raw = false;
+    Object.entries(vals).forEach(([name, v]) => {
+      let done = false;
+      if (form) try {
+        const f = form.getField(name);
+        if (f instanceof PDFLib.PDFTextField) f.setText(String(v ?? ''));
+        else if (f instanceof PDFLib.PDFCheckBox) v ? f.check() : f.uncheck();
+        else if (f instanceof PDFLib.PDFRadioGroup) { if (v) f.select(String(v)); }
+        else if (f instanceof PDFLib.PDFDropdown || f instanceof PDFLib.PDFOptionList) { if (v) f.select(String(v)); else f.clear && f.clear(); }
+        else throw new Error('type de champ non géré');
+        done = true;
+      } catch (e) { console.warn('Champ écrit autrement', name, e); }
+      // Plan B : écrire la valeur directement dans le champ (le lecteur PDF en refera l'affichage).
+      if (!done) try { if (pdfSetFieldRaw(pdf, PDFLib, widgets.get(name) || [], v)) raw = true; } catch (e) { console.warn('Champ non écrit', name, e); }
+    });
+    if (raw) { try { const af = pdfAcroDict(pdf, PDFLib); af.set(PDFLib.PDFName.of('NeedAppearances'), PDFLib.PDFBool.True); } catch {} }
+    if (form && opts.flattenForm) try { form.flatten(); } catch (e) { console.warn('Aplatissement impossible', e); }
   }
   // annotations
   const ann = cur.ann || [];
@@ -5143,11 +5167,130 @@ async function pdfExportBytes(opts = {}) {
       } catch (e) { console.warn('Annotation ignorée', e); }
     }
   }
-  return pdf.save({ useObjectStreams: true });
+  let out;
+  try { out = await pdf.save({ useObjectStreams: true }); }
+  catch (e) {
+    if (!/encode|WinAnsi/i.test(String(e && e.message))) throw e;
+    // caractère que la police standard ne sait pas dessiner (emoji, espace fine…) : le lecteur PDF fera l'affichage
+    const widgets = pdfWidgetsByName();
+    Object.entries(vals).forEach(([name, v]) => { try { pdfSetFieldRaw(pdf, PDFLib, widgets.get(name) || [], v); } catch {} });
+    try { pdfAcroDict(pdf, PDFLib).set(PDFLib.PDFName.of('NeedAppearances'), PDFLib.PDFBool.True); } catch {}
+    out = await pdf.save({ useObjectStreams: true, updateFieldAppearances: false });
+  }
+  if (Object.keys(vals).length && !opts.flattenForm) await pdfVerifyForm(out, vals);
+  return out;
+}
+/* --- formulaires : écriture sûre */
+function pdfWidgetsByName() {
+  const m = new Map();
+  PDFV.srcPages.forEach(S => (S.fields || []).forEach(f => { const k = fieldKey(f); if (!m.has(k)) m.set(k, []); m.get(k).push(f); }));
+  return m;
+}
+function pdfRefOf(PDFLib, id) { const m = /^(\d+)R(\d*)$/.exec(String(id || '')); return m ? PDFLib.PDFRef.of(+m[1], +(m[2] || 0)) : null; }
+function pdfAcroDict(pdf, PDFLib) {
+  const ctx = pdf.context, N = PDFLib.PDFName.of;
+  let af = pdf.catalog.lookup(N('AcroForm'));
+  if (!(af instanceof PDFLib.PDFDict)) { af = ctx.obj({ Fields: [] }); pdf.catalog.set(N('AcroForm'), ctx.register(af)); }
+  return af;
+}
+// nœud qui porte le nom et la valeur du champ (le widget lui-même, ou son parent)
+function pdfFieldNode(pdf, PDFLib, d) {
+  const N = PDFLib.PDFName.of;
+  let n = d;
+  for (let i = 0; i < 20 && n && !n.get(N('T')); i++) n = n.lookup(N('Parent'));
+  return n && n.get(N('T')) ? n : d;
+}
+function pdfAttachOrphanFields(pdf, PDFLib, form, widgets) {
+  const N = PDFLib.PDFName.of, ctx = pdf.context;
+  const af = form.acroForm.dict;
+  let arr = af.lookup(N('Fields'));
+  if (!(arr instanceof PDFLib.PDFArray)) { arr = ctx.obj([]); af.set(N('Fields'), arr); }
+  const have = new Set(arr.asArray().map(r => String(r)));
+  widgets.forEach(list => list.forEach(f => {
+    let ref = pdfRefOf(PDFLib, f.id); if (!ref) return;
+    let d = ctx.lookup(ref);
+    for (let i = 0; i < 20 && d instanceof PDFLib.PDFDict; i++) {
+      const p = d.get(N('Parent'));
+      if (!(p instanceof PDFLib.PDFRef)) break;
+      ref = p; d = ctx.lookup(p);
+    }
+    if (d instanceof PDFLib.PDFDict && d.get(N('T')) && !have.has(String(ref))) { arr.push(ref); have.add(String(ref)); }
+  }));
+}
+function pdfSetFieldRaw(pdf, PDFLib, list, v) {
+  const N = PDFLib.PDFName.of, ctx = pdf.context;
+  let ok = false;
+  list.forEach(f => {
+    const ref = pdfRefOf(PDFLib, f.id); if (!ref) return;
+    const w = ctx.lookup(ref); if (!(w instanceof PDFLib.PDFDict)) return;
+    const node = pdfFieldNode(pdf, PDFLib, w);
+    if (f.fieldType === 'Btn') {
+      if (f.radioButton) {
+        if (!v) return;
+        node.set(N('V'), N(String(v)));
+        w.set(N('AS'), N(f.buttonValue === v ? String(v) : 'Off'));
+      } else {
+        const on = f.exportValue || f.buttonValue || 'Yes';
+        node.set(N('V'), N(v ? on : 'Off'));
+        w.set(N('AS'), N(v ? on : 'Off'));
+      }
+    } else {
+      node.set(N('V'), PDFLib.PDFHexString.fromText(String(v ?? '')));
+      w.delete(N('AP'));
+    }
+    ok = true;
+  });
+  return ok;
+}
+// Remplissage par PDF.js (PDF protégés) : enregistrement incrémental, la protection d'origine est conservée.
+async function pdfjsFormSave(vals) {
+  const doc = await pdfjsOpen(PDFV.bytes);
+  try {
+    const st = doc.annotationStorage, has = k => Object.prototype.hasOwnProperty.call(vals, k);
+    for (let i = 0; i < doc.numPages; i++) {
+      const an = await (await doc.getPage(i + 1)).getAnnotations();
+      an.filter(a => a.subtype === 'Widget' && a.fieldName && has(a.fieldName)).forEach(a => {
+        const v = vals[a.fieldName];
+        if (a.fieldType === 'Btn') { if (a.radioButton) { if (v) st.setValue(a.id, { value: a.buttonValue === v }); } else st.setValue(a.id, { value: !!v }); }
+        else if (a.fieldType === 'Ch') st.setValue(a.id, { value: v ? [String(v)] : [] });
+        else st.setValue(a.id, { value: String(v ?? '') });
+      });
+    }
+    return await doc.saveDocument();
+  } finally { try { doc.destroy(); } catch {} }
+}
+// Relit le PDF produit : chaque champ saisi doit y être. Sinon on n'écrase pas le fichier.
+async function pdfVerifyForm(bytes, vals) {
+  let doc;
+  try { doc = await pdfjsOpen(bytes); } catch (e) { console.warn('Vérification impossible', e); return; }
+  const seen = new Map();
+  try {
+    for (let i = 0; i < doc.numPages; i++) {
+      const an = await (await doc.getPage(i + 1)).getAnnotations();
+      an.filter(a => a.subtype === 'Widget' && a.fieldName).forEach(a => { if (!seen.has(a.fieldName)) seen.set(a.fieldName, []); seen.get(a.fieldName).push(a); });
+    }
+  } finally { try { doc.destroy(); } catch {} }
+  const nl = s => String(s ?? '').replace(/\r\n?/g, '\n');
+  const bad = Object.entries(vals).filter(([k, v]) => {
+    const list = seen.get(k);
+    if (!list) return true;
+    const a = list[0];
+    if (a.fieldType === 'Btn') {
+      if (a.radioButton) return v ? !list.some(x => x.fieldValue === v) : false;
+      return !!v !== !!(a.fieldValue && a.fieldValue !== 'Off');
+    }
+    const fv = Array.isArray(a.fieldValue) ? (a.fieldValue[0] ?? '') : a.fieldValue;
+    return nl(fv) !== nl(v);
+  }).map(([k]) => k);
+  if (bad.length) {
+    const e = new Error('Champs non écrits : ' + bad.join(', '));
+    e.userMsg = `Grimoire n'a pas réussi à écrire ${bad.length > 1 ? bad.length + ' champs' : 'un champ'} dans ce PDF (${bad.slice(0, 3).join(', ')}${bad.length > 3 ? '…' : ''}) : le fichier n'a pas été modifié. Vos saisies restent dans Grimoire.`;
+    throw e;
+  }
 }
 async function exportPdfFile() {
   try { const bytes = await pdfExportBytes(); await saveFile(safeName(state.cur.title) + '.pdf', bytes); }
-  catch (e) { console.warn(e); toast('Export impossible : ce PDF est peut-être protégé.', true); }
+  catch (e) { console.warn(e); if (CAPTURE) throw e; toast(e && e.userMsg || 'Export impossible : ce PDF est peut-être protégé.', true); }
 }
 async function printPdf() {
   try {
@@ -5158,7 +5301,7 @@ async function printPdf() {
     fr = document.createElement('iframe'); fr.id = 'pdfPrintFrame'; fr.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;bottom:0;right:0';
     fr.src = url; document.body.appendChild(fr);
     fr.onload = () => { try { fr.contentWindow.focus(); fr.contentWindow.print(); } catch { window.open(url, '_blank'); } };
-  } catch { toast('Impression impossible.', true); }
+  } catch (e) { toast(e && e.userMsg || 'Impression impossible.', true); }
 }
 // Diviser / extraire : parts = listes d'indices de pages
 async function splitPdf(parts, dest, label) {
@@ -6778,7 +6921,7 @@ async function saveDoc(asNew) {
   try {
     const blob = await produce(k);
     const w = await h.createWritable(); await w.write(blob); await w.close();
-  } catch (e) { console.warn(e); toast('Le fichier ' + h.name + ' n\'a pas pu être écrit' + (e && e.name === 'NoModificationAllowedError' ? ' : il est peut-être ouvert ailleurs.' : '.'), true); return; }
+  } catch (e) { console.warn(e); toast(e && e.userMsg || 'Le fichier ' + h.name + ' n\'a pas pu être écrit' + (e && e.name === 'NoModificationAllowedError' ? ' : il est peut-être ouvert ailleurs.' : '.'), true); return; }
   await linkHandle(cur.id, h);
   toast('Enregistré dans ' + h.name);
 }
