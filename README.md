@@ -38,14 +38,13 @@ Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 - **Ouvrir les fichiers avec Grimoire** (une fois installé) : clic droit sur un .docx, .xlsx, .csv ou .pdf → *Ouvrir avec* → Grimoire ; *Propriétés → Ouvrir avec → Définir par défaut* pour le double-clic. Le document reste lié au fichier : Enregistrer (Ctrl+S) met à jour l'original.
 - **Notion** : dans une page, taper `/embed` et coller l'adresse.
 
-### Icônes des fichiers sous Windows
+### Icônes des fichiers (Windows et Linux)
 
-Chrome et Edge ne donnent pas d'icône aux fichiers ouverts par une appli web : une fois Grimoire choisi par défaut, les .docx et .xlsx apparaissent en pages blanches. Le script `windows/grimoire-icones.ps1` y remédie (icônes DOC, XLS, CSV, PDF au sceau, voir `windows/icones-apercu.png`) :
+Chrome et Edge ne donnent pas d'icône propre aux fichiers ouverts par une appli web : sous Windows, une fois Grimoire choisi par défaut, les .docx et .xlsx apparaissent en pages blanches. Deux scripts donnent à ces fichiers une icône au sceau selon leur type (DOC, XLS, CSV, PDF, voir `windows/icones-apercu.png`). Ils se téléchargent aussi depuis Grimoire : *Réglages → Application → Icônes des fichiers ouverts avec Grimoire*. Sans droit administrateur, réversibles, à relancer si l'appli est réinstallée.
 
-1. Télécharger `windows/grimoire-icones.ps1` sur le PC (Grimoire déjà installé), clic droit → *Exécuter avec PowerShell* (accepter l'avertissement de sécurité).
-2. Puis une fois par type : clic droit sur un .docx → *Ouvrir avec* → *Choisir une autre application* → « Grimoire · Document » → *Toujours*. Idem pour un .xlsx → « Grimoire · Classeur ».
-
-Sans droit administrateur, réversible : `powershell -ExecutionPolicy Bypass -File grimoire-icones.ps1 -Retirer`. À relancer si l'appli est réinstallée.
+- **Windows** : `windows/grimoire-icones.ps1`, clic droit → *Exécuter avec PowerShell* (accepter l'avertissement). Puis une fois par type : clic droit sur un .docx → *Ouvrir avec* → *Choisir une autre application* → « Grimoire · Document » → *Toujours* ; un .xlsx → « Grimoire · Classeur ». Pour retirer : `powershell -ExecutionPolicy Bypass -File grimoire-icones.ps1 -Retirer`.
+- **Linux** (Nemo, Nautilus, Dolphin, Thunar…) : choisir d'abord Grimoire par défaut pour les types voulus, puis `bash grimoire-icones.sh` ; seuls les types ouverts par Grimoire changent d'icône (`--tout` pour les cinq). Rouvrir le gestionnaire de fichiers (`nemo -q`). Pour retirer : `--retirer`. Le script passe par la base MIME et le thème d'icônes de l'utilisateur (`~/.local/share/mime`, `~/.local/share/icons/hicolor`).
+- **Mac, téléphone, tablette** : le navigateur ne permet pas de changer ces icônes.
 
 ## Mettre à jour
 

@@ -331,6 +331,8 @@ body.m-phone .fill-h{width:20px;height:20px;border-radius:50%}
 .ask textarea{border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:10px 12px;min-height:84px;resize:vertical;line-height:1.45}
 .ask textarea:focus{outline:none;border-color:var(--selline)}
 .pbtn{align-self:flex-start;border:0;background:var(--fg);color:var(--paper);border-radius:9px;padding:8px 14px;font-weight:600;display:inline-flex;gap:7px;align-items:center}
+a.pbtn,.set-acts a.pbtn{text-decoration:none;font:inherit;font-weight:600;color:var(--paper)}
+a.pbtn.ghost,.set-acts a.pbtn.ghost{color:var(--fg)}
 .pbtn.ghost{background:none;color:var(--fg);border:1px solid var(--line)}
 .pbtn:disabled{opacity:.45;cursor:default}
 .pout{font-family:var(--f-doc);font-size:15px;line-height:1.6;white-space:pre-wrap;border-left:3px solid var(--copper);padding:2px 0 2px 12px;min-height:24px}
