@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.18.2';
+const APP_VERSION = '1.19.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -3301,7 +3301,7 @@ function openTabMenu(el, i) {
   m.innerHTML = `<button data-tm="rename">${ic('pen')}Renommer</button><button data-tm="dup">${ic('copy')}Dupliquer</button>`
     + (i > 0 ? `<button data-tm="left">${ic('left')}Déplacer à gauche</button>` : '')
     + (i < n - 1 ? `<button data-tm="right">${ic('right')}Déplacer à droite</button>` : '')
-    + (state.cur.sheets[i].pivot ? `<button data-tm="pivot">${ic('pivot')}Actualiser le tableau croisé</button>` : '')
+    + (state.cur.sheets[i].pivot ? `<button data-tm="pivedit">${ic('pivot')}Modifier le tableau croisé…</button><button data-tm="pivot">${ic('pivot')}Actualiser le tableau croisé</button>` : '')
     + (n > 1 ? `<hr><button data-tm="del" class="danger">${ic('trash')}<span>Supprimer la feuille</span></button>` : '');
   placePop(m, el);
 }
@@ -3320,6 +3320,7 @@ $('#tabMenu').addEventListener('click', e => {
   else if (k === 'left') moveSheet(i, -1);
   else if (k === 'right') moveSheet(i, 1);
   else if (k === 'pivot') { closeMini(); refreshPivot(i); }
+  else if (k === 'pivedit') { closeMini(); openPivot(i); }
   else if (k === 'del') { if (!SH.tabDel) { SH.tabDel = true; b.querySelector('span').textContent = 'Confirmer la suppression'; } else deleteSheet(i); }
 });
 
@@ -4081,91 +4082,298 @@ const CT_ICON = {
   pie: '<circle cx="12" cy="12" r="8"/><path d="M12 4v8l6 5"/>'
 };
 
-/* --- tableau croisé dynamique (formules SOMME.SI.ENS sur une nouvelle feuille) */
-const AGG = { sum: ['Somme', 'SOMME.SI.ENS'], count: ['Nombre', 'NB.SI.ENS'], avg: ['Moyenne', 'MOYENNE.SI.ENS'], max: ['Maximum', 'MAX.SI.ENS'], min: ['Minimum', 'MIN.SI.ENS'] };
-function openPivot() {
-  commitEdit(false);
-  const cur = state.cur, S0 = rng();
-  let R = S0.r2 > S0.r1 ? S0 : currentRegion(S0.r1, S0.c1);
-  if (R.r2 - R.r1 < 1) return toast('Placez-vous dans un tableau avec une ligne de titres et des données.', true);
-  // ligne de titres : première ligne entièrement remplie de textes
-  for (let r = R.r1; r < R.r2; r++) {
-    let ok = true; for (let c = R.c1; c <= R.c2; c++) { const v = (SH.vals[r] || [])[c]; if (typeof v !== 'string' || v === '') { ok = false; break; } }
-    if (ok) { R = { ...R, r1: r }; break; }
-  }
-  const hdr = []; for (let c = R.c1; c <= R.c2; c++) hdr.push(display(R.r1, c).txt || COLN(c));
-  const numCol = hdr.findIndex((_, j) => { for (let r = R.r1 + 1; r <= R.r2; r++) if (typeof (SH.vals[r] || [])[R.c1 + j] === 'number' && ((cellOf(r, R.c1 + j) || {}).f || {}).n !== 'date') return true; return false; });
-  const opt = (sel, none) => (none ? `<option value="-1">(aucune)</option>` : '') + hdr.map((h, j) => `<option value="${j}"${j === sel ? ' selected' : ''}>${esc(h)}</option>`).join('');
-  SH.dlg = 'pivot';
-  openDlg(dlgHead('Tableau croisé dynamique') + `<p class="dlg-note">Source : ${esc(cur.sheets[cur.active].name)}!${rngRef(R)}, titres en ligne ${R.r1 + 1}. Le tableau est créé sur une nouvelle feuille, avec des formules qui se mettent à jour.</p>
-    <label class="dlg-f"><span>Données</span><input id="pvRange" value="${esc(rngRef(R))}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-    <label class="dlg-f"><span>Lignes</span><select id="pvRows">${opt(0)}</select></label>
-    <label class="dlg-f"><span>Colonnes</span><select id="pvCols">${opt(-1, true)}</select></label>
-    <div class="dlg-row"><label class="dlg-f"><span>Valeurs</span><select id="pvVal">${opt(numCol < 0 ? hdr.length - 1 : numCol)}</select></label>
-    <label class="dlg-f"><span>Calcul</span><select id="pvAgg">${Object.entries(AGG).map(([k, a]) => `<option value="${k}">${a[0]}</option>`).join('')}</select></label></div>
-    <div class="fp-acts"><button class="pbtn" id="pvOk">Créer le tableau</button></div>`);
-  $('#pvRange').addEventListener('change', () => { const o = rangeObj($('#pvRange').value); if (o) { closeDlg(); SH.anc = { r: o.r2, c: o.c2 }; select(o.r1, o.c1, true); openPivot(); } });
-  $('#pvOk').addEventListener('click', () => {
-    const def = { src: cur.sheets[cur.active].id, ...R, rows: +$('#pvRows').value, cols: +$('#pvCols').value, val: +$('#pvVal').value, agg: $('#pvAgg').value };
-    if (def.cols === def.rows) def.cols = -1;
-    closeDlg(); createPivot(def);
-  });
+/* --- tableau croisé dynamique : des formules (SOMME.SI.ENS…) sur une nouvelle feuille, qui se recalculent ;
+   « Actualiser » reprend les nouvelles lignes ou catégories. Plusieurs valeurs, dates par mois / trimestre / année,
+   filtre, tri, % du total, graphique. */
+const AGG = { sum: ['Somme', 'SOMME.SI.ENS'], count: ['Nombre', 'NB.SI.ENS'], avg: ['Moyenne', ''], max: ['Maximum', 'MAX.SI.ENS'], min: ['Minimum', 'MIN.SI.ENS'] };
+const PV_GROUPS = [['month', 'Par mois'], ['quarter', 'Par trimestre'], ['year', 'Par année'], ['', 'Date par date']];
+const MOIS_C = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+const fromSerial = n => { const d = new Date(EPOCH + Math.round(n) * 86400000); return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1 }; };
+const pvLow = k => typeof k === 'string' ? k.toLowerCase() : k;
+const pvCmp = (a, b) => typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b), 'fr', { numeric: true });
+// Définition complète (les anciennes n'avaient qu'une valeur : val / agg)
+function pvNorm(def) {
+  const d = { rowGroup: '', colGroup: '', cols: -1, filter: null, sort: 'label', pct: false, chart: '', ...clone(def) };
+  if (!Array.isArray(d.vals) || !d.vals.length) d.vals = [{ j: d.val != null ? d.val : 0, agg: d.agg || 'sum' }];
+  delete d.val; delete d.agg;
+  if (d.cols === d.rows && d.colGroup === d.rowGroup) d.cols = -1;
+  if (d.filter && (d.filter.j == null || d.filter.j < 0 || !(d.filter.values || []).length)) d.filter = null;
+  return d;
 }
-function pivotCells(def) {
+// La source : titres, valeurs, nature de chaque colonne (texte, nombre, date)
+function pvSource(def) {
   const cur = state.cur, si = cur.sheets.findIndex(s => s.id === def.src);
-  if (si < 0) return null;
-  const src = cur.sheets[si], vals = SH.hf && SH.ids ? SH.hf.getSheetValues(SH.ids[si]) : [];
-  const keyOf = (r, c) => { const v = (vals[r] || [])[c]; return v == null || v === '' || typeof v === 'object' ? null : v; };
-  const uniq = c => { const m = new Map(); for (let r = def.r1 + 1; r <= def.r2; r++) { const v = keyOf(r, c); if (v == null) continue; const k = typeof v === 'string' ? v.toLowerCase() : v; if (!m.has(k)) m.set(k, v); } return [...m.values()].sort((a, b) => typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b), 'fr', { numeric: true })); };
-  const rowsK = uniq(def.c1 + def.rows), colsK = def.cols >= 0 ? uniq(def.c1 + def.cols) : [];
-  const S = refName(src.name) + '!';
-  const col = j => `${S}$${COLN(def.c1 + j)}$${def.r1 + 2}:$${COLN(def.c1 + j)}$${def.r2 + 1}`;
-  const V = col(def.val), RR = col(def.rows), CC = def.cols >= 0 ? col(def.cols) : null;
-  const [aggName, fn] = AGG[def.agg];
-  const hdr = c => { const v = keyOf(def.r1, def.c1 + c); return v == null ? COLN(def.c1 + c) : String(v); };
-  const crit = (rowRef, colRef) => (rowRef ? `;${RR};${rowRef}` : '') + (colRef ? `;${CC};${colRef}` : '');
-  const f = (rowRef, colRef) => {
-    if (!rowRef && !colRef) return def.agg === 'sum' ? `=SOMME(${V})` : def.agg === 'count' ? `=NB.SI.ENS(${RR};"<>")` : def.agg === 'avg' ? `=SIERREUR(MOYENNE(${V});"")` : def.agg === 'max' ? `=MAX(${V})` : `=MIN(${V})`;
-    if (def.agg === 'count') return `=NB.SI.ENS(${(crit(rowRef, colRef)).slice(1)})`;
-    const core = `${fn}(${V}${crit(rowRef, colRef)})`;
-    return def.agg === 'avg' ? `=SIERREUR(${core};"")` : `=${core}`;
-  };
-  const srcFmt = ((src.cells[addr(def.r1 + 1, def.c1 + def.val)] || {}).f || {}).n;
-  const nf = def.agg === 'count' ? '' : srcFmt === 'date' ? '' : srcFmt || '';
-  const cells = {};
-  const put = (r, c, v, fm) => { const t = typeof v === 'number' ? numToRaw(v) : String(v); cells[addr(r, c)] = { v: typeof v === 'string' && v[0] !== '=' && (parseNum(v) != null || parseDate(v) != null || /^(VRAI|FAUX)$/i.test(v)) ? "'" + v : t, f: fm || {} }; };
-  const H = { b: 1, bg: 'cuivre', bb: 1 }, T = { b: 1, bt: 1 };
-  put(0, 0, `${aggName} de ${hdr(def.val)}`, { ...H });
-  if (def.cols >= 0) { colsK.forEach((k, j) => put(0, j + 1, k, { ...H, a: 'ar' })); put(0, colsK.length + 1, 'Total', { ...H, a: 'ar' }); }
-  else put(0, 1, aggName, { ...H, a: 'ar' });
-  rowsK.forEach((k, i) => {
-    const r = i + 1;
-    put(r, 0, k, typeof k === 'number' ? { a: 'al' } : {});
-    if (def.cols >= 0) {
-      colsK.forEach((_, j) => put(r, j + 1, f(`$A${r + 1}`, `${COLN(j + 1)}$1`), nf ? { n: nf } : {}));
-      put(r, colsK.length + 1, f(`$A${r + 1}`, null), { b: 1, ...(nf ? { n: nf } : {}) });
-    } else put(r, 1, f(`$A${r + 1}`, null), nf ? { n: nf } : {});
+  if (si < 0 || !SH.hf || !SH.ids) return null;
+  const src = cur.sheets[si], vals = SH.hf.getSheetValues(SH.ids[si]) || [];
+  const at = (r, c) => { const v = (vals[r] || [])[c]; return v == null || v === '' || typeof v === 'object' ? null : v; };
+  const n = def.c2 - def.c1 + 1;
+  const hdr = Array.from({ length: n }, (_, j) => { const v = at(def.r1, def.c1 + j); return v == null ? 'Colonne ' + COLN(def.c1 + j) : String(v); });
+  const fmtOf = j => { for (let r = def.r1 + 1; r <= def.r2; r++) if (at(r, def.c1 + j) != null) return ((src.cells[addr(r, def.c1 + j)] || {}).f || {}).n || ''; return ''; };
+  const kinds = hdr.map((_, j) => {
+    let num = 0, txt = 0;
+    for (let r = def.r1 + 1; r <= def.r2; r++) { const v = at(r, def.c1 + j); if (v == null) continue; if (typeof v === 'number') num++; else txt++; }
+    return num && num >= txt ? (fmtOf(j) === 'date' ? 'date' : 'num') : 'txt';
   });
-  const tr = rowsK.length + 1;
+  return { si, src, at, hdr, kinds, fmtOf, name: src.name, rowsN: def.r2 - def.r1 };
+}
+// Regroupement des dates : clé de mois (202603), de trimestre (20261) ou d'année (2026)
+function pvKey(v, g) {
+  if (!g || typeof v !== 'number') return v;
+  const { y, m } = fromSerial(v);
+  return g === 'year' ? y : g === 'quarter' ? y * 10 + Math.ceil(m / 3) : y * 100 + m;
+}
+function pvLabel(k, g) {
+  if (g === 'year') return String(k);
+  if (g === 'quarter') return `T${k % 10} ${Math.floor(k / 10)}`;
+  if (g === 'month') return `${MOIS_C[k % 100 - 1]} ${Math.floor(k / 100)}`;
+  return k;
+}
+function pvBounds(k, g) {
+  if (g === 'year') return [toSerial(k, 1, 1), toSerial(k + 1, 1, 1)];
+  if (g === 'quarter') { const y = Math.floor(k / 10), q = k % 10; return [toSerial(y, (q - 1) * 3 + 1, 1), toSerial(y, q * 3 + 1, 1)]; }
+  const y = Math.floor(k / 100), m = k % 100; return [toSerial(y, m, 1), toSerial(y, m + 1, 1)];
+}
+const pvLit = v => typeof v === 'number' ? numToRaw(v) : '"' + String(v).replace(/"/g, '""').replace(/[~*?]/g, '~$&') + '"';
+// Formule d'une case : alts = alternatives (filtre à plusieurs valeurs), chacune une liste de [plage ; critère]
+function pvFormula(agg, V, alts) {
+  if (!alts.length) alts = [[]];
+  const crit = p => p.map(([r, c]) => `;${r};${c}`).join('');
+  const S = p => p.length ? `SOMME.SI.ENS(${V}${crit(p)})` : `SOMME(${V})`;
+  const N = p => `NB.SI.ENS(${V};"<>"${crit(p)})`;
+  if (agg === 'sum') return '=' + alts.map(S).join('+');
+  if (agg === 'count') return '=' + alts.map(N).join('+');
+  if (agg === 'avg') return `=SIERREUR((${alts.map(S).join('+')})/(${alts.map(N).join('+')});"")`;
+  const F = agg === 'max' ? 'MAX' : 'MIN', one = p => p.length ? `${F}.SI.ENS(${V}${crit(p)})` : `${F}(${V})`;
+  return alts.length === 1 ? '=' + one(alts[0]) : `=${F}(${alts.map(one).join(';')})`;
+}
+const pvValName = (v, hdr) => v.agg === 'count' ? `Nombre de ${hdr[v.j]}` : `${AGG[v.agg][0]} de ${hdr[v.j]}`;
+const pvGroupName = g => ({ month: 'par mois', quarter: 'par trimestre', year: 'par année' }[g] || '');
+// Phrase qui décrit un tableau croisé (Plume, résumé)
+function pvDescribe(def0, S) {
+  const d = pvNorm(def0), h = S.hdr, isD = j => S.kinds[j] === 'date';
+  let s = d.vals.map(v => pvValName(v, h)).join(' et ') + ` par ${h[d.rows]}` + (isD(d.rows) && d.rowGroup ? ' (' + pvGroupName(d.rowGroup) + ')' : '');
+  if (d.cols >= 0) s += ` et par ${h[d.cols]}` + (isD(d.cols) && d.colGroup ? ' (' + pvGroupName(d.colGroup) + ')' : '');
+  if (d.filter) s += `, seulement ${h[d.filter.j]} = ${d.filter.values.map(k => pvLabel(k, isD(d.filter.j) ? d.filter.g || '' : '')).join(' ou ')}`;
+  const ct = CHART_TYPES.find(([k]) => k === d.chart);
+  if (ct) s += `, avec un graphique en ${ct[1].toLowerCase()}`;
+  return s;
+}
+function pivotCells(def0) {
+  const def = pvNorm(def0), S = pvSource(def); if (!S) return null;
+  const { at, hdr, kinds } = S;
+  const SR = refName(S.name) + '!';
+  const col = j => `${SR}$${COLN(def.c1 + j)}$${def.r1 + 2}:$${COLN(def.c1 + j)}$${def.r2 + 1}`;
+  const grp = (j, g) => kinds[j] === 'date' ? (g || '') : '';
+  const rg = grp(def.rows, def.rowGroup), cg = def.cols >= 0 ? grp(def.cols, def.colGroup) : '';
+  // filtre : lignes retenues
+  const F = def.filter, fg = F ? grp(F.j, F.g) : '', fset = F ? new Set(F.values.map(pvLow)) : null;
+  const rowsOk = [];
+  for (let r = def.r1 + 1; r <= def.r2; r++) {
+    if (fset) { const v = at(r, def.c1 + F.j); if (v == null || !fset.has(pvLow(pvKey(v, fg)))) continue; }
+    rowsOk.push(r);
+  }
+  const keysOf = (j, g) => { const m = new Map(); rowsOk.forEach(r => { const v = at(r, def.c1 + j); if (v == null) return; const k = pvKey(v, g); if (!m.has(pvLow(k))) m.set(pvLow(k), k); }); return [...m.values()].sort(pvCmp); };
+  const rowsK = keysOf(def.rows, rg), colsK = def.cols >= 0 ? keysOf(def.cols, cg) : [];
+  if (def.sort === 'desc' || def.sort === 'asc') {
+    const v0 = def.vals[0], acc = new Map();
+    rowsOk.forEach(r => {
+      const rv = at(r, def.c1 + def.rows); if (rv == null) return;
+      const kk = pvLow(pvKey(rv, rg)), x = at(r, def.c1 + v0.j), a = acc.get(kk) || { s: 0, n: 0, mx: -Infinity, mn: Infinity };
+      if (x != null) { a.n++; if (typeof x === 'number') { a.s += x; a.mx = Math.max(a.mx, x); a.mn = Math.min(a.mn, x); } }
+      acc.set(kk, a);
+    });
+    const val = k => { const a = acc.get(pvLow(k)) || { s: 0, n: 0, mx: 0, mn: 0 }; return v0.agg === 'count' ? a.n : v0.agg === 'avg' ? (a.n ? a.s / a.n : 0) : v0.agg === 'max' ? a.mx : v0.agg === 'min' ? a.mn : a.s; };
+    rowsK.sort((a, b) => def.sort === 'desc' ? val(b) - val(a) : val(a) - val(b));
+  }
+  const pairs = (j, g, k) => { if (g) { const [lo, hi] = pvBounds(k, g); return [[col(j), `">=${lo}"`], [col(j), `"<${hi}"`]]; } return [[col(j), pvLit(k)]]; };
+  const fAlts = F ? F.values.map(k => pairs(F.j, fg, k)) : [[]];
+  const NONE = Symbol('aucune');
+  const fx = (v, rk, ck) => pvFormula(v.agg, col(v.j), fAlts.map(fp => [...fp, ...(rk !== NONE ? pairs(def.rows, rg, rk) : []), ...(ck !== NONE ? pairs(def.cols, cg, ck) : [])]));
+  const nfOf = v => { if (v.agg === 'count') return ''; const n = S.fmtOf(v.j); return n === 'date' || n === 'txt' ? '' : n; };
+  const cells = {};
+  const put = (r, c, v, fm) => {
+    const t = typeof v === 'number' ? numToRaw(v) : String(v);
+    cells[addr(r, c)] = { v: typeof v === 'string' && v[0] !== '=' && (parseNum(v) != null || parseDate(v) != null || /^(VRAI|FAUX)$/i.test(v)) ? "'" + v : t, f: fm || {} };
+  };
+  const labelPut = (r, c, k, g, j, fm) => {
+    if (g) put(r, c, pvLabel(k, g), fm);
+    else if (kinds[j] === 'date' && typeof k === 'number') put(r, c, k, { ...fm, n: 'date' });
+    else put(r, c, k, typeof k === 'number' ? { a: 'al', ...fm } : fm);
+  };
+  const H = { b: 1, bg: 'cuivre', bb: 1 }, T = { b: 1, bt: 1 };
+  const rowTitle = hdr[def.rows] + (rg ? ' (' + pvGroupName(rg) + ')' : '');
+  const multi = def.vals.length > 1, hasCols = def.cols >= 0;
+  const hr = hasCols && multi ? 2 : 1; // lignes de titres
+  const tr = hr + rowsK.length;        // ligne du total
+  let chart = null, lastC = 0;
+  if (!hasCols) {
+    put(0, 0, rowTitle, { ...H });
+    let c = 1;
+    const vcols = [];
+    def.vals.forEach(v => {
+      const nf = nfOf(v);
+      put(0, c, pvValName(v, hdr), { ...H, a: 'ar' });
+      rowsK.forEach((k, i) => put(hr + i, c, fx(v, k, NONE), nf ? { n: nf } : {}));
+      put(tr, c, fx(v, NONE, NONE), { ...T, ...(nf ? { n: nf } : {}) });
+      vcols.push(c); c++;
+      if (def.pct && (v.agg === 'sum' || v.agg === 'count')) {
+        const L = COLN(c - 1);
+        put(0, c, '% du total', { ...H, a: 'ar' });
+        rowsK.forEach((k, i) => put(hr + i, c, `=SIERREUR(${L}${hr + i + 1}/${L}$${tr + 1};0)`, { n: 'pct' }));
+        put(tr, c, `=SIERREUR(${L}${tr + 1}/${L}$${tr + 1};0)`, { ...T, n: 'pct' });
+        c++;
+      }
+    });
+    lastC = c - 1;
+    if (def.chart && rowsK.length) chart = { r1: 0, c1: 0, r2: tr - 1, c2: vcols[0] };
+  } else {
+    let c = 1;
+    put(0, 0, multi ? rowTitle : `${pvValName(def.vals[0], hdr)}`, { ...H });
+    if (multi) put(1, 0, '', { ...H });
+    def.vals.forEach((v, vi) => {
+      const nf = nfOf(v), start = c;
+      if (multi) { put(0, c, pvValName(v, hdr), { ...H, a: 'ac' }); }
+      colsK.forEach(k => {
+        labelPut(hr - 1, c, k, cg, def.cols, { ...H, a: 'ar' });
+        rowsK.forEach((rk, i) => put(hr + i, c, fx(v, rk, k), nf ? { n: nf } : {}));
+        put(tr, c, fx(v, NONE, k), { ...T, ...(nf ? { n: nf } : {}) });
+        c++;
+      });
+      put(hr - 1, c, 'Total', { ...H, a: 'ar' });
+      rowsK.forEach((rk, i) => put(hr + i, c, fx(v, rk, NONE), { b: 1, ...(nf ? { n: nf } : {}) }));
+      put(tr, c, fx(v, NONE, NONE), { ...T, ...(nf ? { n: nf } : {}) });
+      if (multi && c > start) { const k0 = addr(0, start); cells[k0].f.mg = { r: 1, c: c - start + 1 }; }
+      if (vi === 0 && def.chart && rowsK.length && colsK.length) chart = { r1: hr - 1, c1: 0, r2: tr - 1, c2: start + colsK.length - 1 };
+      c++;
+    });
+    lastC = c - 1;
+  }
+  rowsK.forEach((k, i) => labelPut(hr + i, 0, k, rg, def.rows, {}));
   put(tr, 0, 'Total', { ...T });
-  if (def.cols >= 0) { colsK.forEach((_, j) => put(tr, j + 1, f(null, `${COLN(j + 1)}$1`), { ...T, ...(nf ? { n: nf } : {}) })); put(tr, colsK.length + 1, f(null, null), { ...T, ...(nf ? { n: nf } : {}) }); }
-  else put(tr, 1, f(null, null), { ...T, ...(nf ? { n: nf } : {}) });
-  return { cells, rows: Math.max(60, tr + 20), cols: Math.max(12, (def.cols >= 0 ? colsK.length + 2 : 2) + 2), name: `TCD ${hdr(def.val)}`, colW: { 0: 180 } };
+  if (chart) {
+    const type = !hasCols || def.chart !== 'pie' ? def.chart : 'col';
+    chart = { r1: chart.r1, c1: chart.c1, r2: chart.r2, c2: chart.c2, type, title: pvValName(def.vals[0], hdr) + ' par ' + hdr[def.rows], at: { r: 0, c: lastC + 2 } };
+  }
+  const colW = { 0: 180 }; for (let c = 1; c <= lastC; c++) colW[c] = 120;
+  return { def, cells, chart, rows: Math.max(60, tr + 20), cols: Math.max(12, lastC + (chart ? 10 : 3)), name: `TCD ${hdr[def.rows]}`, colW };
+}
+function pvChartObj(P, old) {
+  if (!P.chart) return null;
+  const base = old || { id: uid(), dx: 12, dy: 0, byRow: false };
+  return { ...base, ...P.chart, pv: true, w: P.chart.type === 'pie' ? 420 : 520, h: 320 };
 }
 function createPivot(def) {
-  const P = pivotCells(def); if (!P) return;
+  const P = pivotCells(def); if (!P) return null;
   const cur = state.cur;
-  const sh = { id: uid(), name: uniqueName(P.name.replace(/[\[\]:*?\/\\']/g, '').slice(0, 31)), cells: P.cells, rows: P.rows, cols: P.cols, colW: P.colW, pivot: def, hid: { r: [], c: [] }, cf: [], charts: [] };
+  const ch = pvChartObj(P);
+  const sh = { id: uid(), name: uniqueName(P.name.replace(/[\[\]:*?\/\\']/g, '').slice(0, 31)), cells: P.cells, rows: P.rows, cols: P.cols, colW: P.colW, pivot: P.def, hid: { r: [], c: [] }, cf: [], charts: ch ? [ch] : [] };
+  pushHist();
   cur.sheets.splice(cur.active + 1, 0, sh); cur.active += 1;
   cur.sheets.forEach(markDates);
-  loadHF(); refreshSheetView(); scheduleSave();
-  toast('Tableau croisé créé. Pour l\'actualiser : menu de l\'onglet → Actualiser.');
+  loadHF(); refreshSheetView(); renderCharts(); scheduleSave();
+  toast('Tableau croisé créé. Pour le modifier ou l\'actualiser : clic sur l\'onglet de la feuille.');
+  return sh;
 }
-function refreshPivot(i) {
+// Les lignes ajoutées juste sous les données font partie de la source
+function pvGrow(def) {
+  const cur = state.cur, si = cur.sheets.findIndex(s => s.id === def.src);
+  if (si < 0 || !SH.hf || !SH.ids) return def;
+  const vals = SH.hf.getSheetValues(SH.ids[si]) || [];
+  const has = r => { for (let c = def.c1; c <= def.c2; c++) { const v = (vals[r] || [])[c]; if (v != null && v !== '') return true; } return false; };
+  let r2 = def.r2; while (r2 + 1 < vals.length && has(r2 + 1)) r2++;
+  return r2 === def.r2 ? def : { ...def, r2 };
+}
+// Recalcule une feuille de tableau croisé (nouvelles lignes, ou nouvelle définition)
+function rebuildPivot(i, def) {
   const cur = state.cur, sh = cur.sheets[i]; if (!sh || !sh.pivot) return;
-  const P = pivotCells(sh.pivot); if (!P) return toast('La feuille source a été supprimée.', true);
-  sh.cells = P.cells; sh.rows = Math.max(sh.rows, P.rows); sh.cols = Math.max(sh.cols, P.cols);
-  loadHF(); if (i === cur.active) refreshSheetView(); scheduleSave(); toast('Tableau croisé actualisé');
+  const P = pivotCells(pvGrow(def || sh.pivot)); if (!P) return toast('La feuille source a été supprimée.', true);
+  sh.pivot = P.def; sh.cells = P.cells; sh.rows = Math.max(sh.rows, P.rows); sh.cols = Math.max(sh.cols, P.cols);
+  if (def) sh.colW = P.colW;
+  const old = (sh.charts || []).find(c => c.pv), ch = pvChartObj(P, old);
+  sh.charts = (sh.charts || []).filter(c => !c.pv).concat(ch ? [ch] : []);
+  loadHF(); if (i === cur.active) { refreshSheetView(); renderCharts(); } scheduleSave();
+  toast(def ? 'Tableau croisé modifié' : 'Tableau croisé actualisé');
+}
+function refreshPivot(i) { rebuildPivot(i); }
+// Fenêtre : créer (depuis les données sélectionnées) ou modifier (onglet d'un tableau croisé)
+function openPivot(editIdx) {
+  commitEdit(false);
+  const cur = state.cur;
+  let base;
+  if (editIdx != null) base = pvNorm(pvGrow(cur.sheets[editIdx].pivot));
+  else {
+    const S0 = rng();
+    let R = S0.r2 > S0.r1 ? S0 : currentRegion(S0.r1, S0.c1);
+    if (R.r2 - R.r1 < 1) return toast('Placez-vous dans un tableau avec une ligne de titres et des données.', true);
+    for (let r = R.r1; r < R.r2; r++) {
+      let ok = true; for (let c = R.c1; c <= R.c2; c++) { const v = (SH.vals[r] || [])[c]; if (typeof v !== 'string' || v === '') { ok = false; break; } }
+      if (ok) { R = { ...R, r1: r }; break; }
+    }
+    base = pvNorm({ src: cur.sheets[cur.active].id, ...R, rows: 0, vals: [] });
+    base.vals = [];
+  }
+  const S = pvSource(base); if (!S) return toast('Données introuvables.', true);
+  const { hdr, kinds } = S;
+  if (!base.vals.length) {
+    const nj = kinds.findIndex(k => k === 'num');
+    const tj = kinds.findIndex(k => k === 'txt');
+    base.rows = tj >= 0 ? tj : 0;
+    base.vals = [{ j: nj >= 0 ? nj : base.rows, agg: nj >= 0 ? 'sum' : 'count' }];
+    if (kinds[base.rows] === 'date') base.rowGroup = 'month';
+    base.sort = nj >= 0 && kinds[base.rows] !== 'date' ? 'desc' : 'label';
+  }
+  const opt = (sel, none) => (none ? `<option value="-1">${none}</option>` : '') + hdr.map((h, j) => `<option value="${j}"${j === sel ? ' selected' : ''}>${esc(h)}${kinds[j] === 'date' ? ' (dates)' : ''}</option>`).join('');
+  const gopt = sel => PV_GROUPS.map(([k, l]) => `<option value="${k}"${k === (sel || '') ? ' selected' : ''}>${l}</option>`).join('');
+  const aopt = sel => Object.entries(AGG).map(([k, a]) => `<option value="${k}"${k === sel ? ' selected' : ''}>${a[0]}</option>`).join('');
+  const valRow = v => `<div class="dlg-row pv-v"><select class="pv-vj" aria-label="Colonne">${opt(v.j)}</select><select class="pv-va" aria-label="Calcul">${aopt(v.agg)}</select><button type="button" class="xbtn pv-vx" aria-label="Retirer cette valeur">${ic('close')}</button></div>`;
+  const srcName = cur.sheets[S.si].name;
+  SH.dlg = 'pivot';
+  openDlg(dlgHead(editIdx != null ? 'Modifier le tableau croisé' : 'Tableau croisé dynamique') + `<p class="dlg-note">Source : ${esc(srcName)}!${rngRef(base)}, ${S.rowsN} ligne${S.rowsN > 1 ? 's' : ''}. ${editIdx != null ? '' : 'Le tableau est créé sur une nouvelle feuille, avec des formules qui se mettent à jour.'}</p>
+    ${editIdx != null ? '' : `<label class="dlg-f"><span>Données</span><input id="pvRange" value="${esc(rngRef(base))}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>`}
+    <div class="dlg-row"><label class="dlg-f"><span>Lignes</span><select id="pvRows">${opt(base.rows)}</select></label><label class="dlg-f pv-g" id="pvRowsGw"><span>Dates</span><select id="pvRowsG">${gopt(base.rowGroup)}</select></label></div>
+    <div class="dlg-row"><label class="dlg-f"><span>Colonnes</span><select id="pvCols">${opt(base.cols, '(aucune)')}</select></label><label class="dlg-f pv-g" id="pvColsGw"><span>Dates</span><select id="pvColsG">${gopt(base.colGroup || 'month')}</select></label></div>
+    <div class="dlg-f"><span>Valeurs</span><div id="pvVals">${base.vals.map(valRow).join('')}</div><button type="button" class="lnk pv-add" id="pvAddVal">+ Ajouter une valeur</button></div>
+    <div class="dlg-row"><label class="dlg-f"><span>Filtre</span><select id="pvF">${opt(base.filter ? base.filter.j : -1, '(aucun)')}</select></label><label class="dlg-f pv-g" id="pvFGw"><span>Dates</span><select id="pvFG">${gopt(base.filter ? base.filter.g || '' : 'year')}</select></label></div>
+    <div class="pv-fv" id="pvFVals" hidden></div>
+    <div class="dlg-row"><label class="dlg-f"><span>Trier</span><select id="pvSort"><option value="label">Par libellé (ou date)</option><option value="desc">Du plus grand au plus petit</option><option value="asc">Du plus petit au plus grand</option></select></label>
+    <label class="dlg-f"><span>Graphique</span><select id="pvChart"><option value="">Aucun</option>${CHART_TYPES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label></div>
+    <label class="pv-chk"><input type="checkbox" id="pvPct"${base.pct ? ' checked' : ''}> Ajouter le % du total (sans rubrique en colonnes)</label>
+    <div class="fp-acts"><button class="pbtn" id="pvOk">${editIdx != null ? 'Modifier le tableau' : 'Créer le tableau'}</button></div>`, 'wide');
+  $('#pvSort').value = base.sort || 'label'; $('#pvChart').value = base.chart || '';
+  const isD = j => kinds[+j] === 'date';
+  const showG = () => { $('#pvRowsGw').hidden = !isD($('#pvRows').value); $('#pvColsGw').hidden = !isD($('#pvCols').value); $('#pvFGw').hidden = !isD($('#pvF').value); };
+  let fsel = new Set((base.filter ? base.filter.values : []).map(pvLow));
+  const renderF = () => {
+    const box = $('#pvFVals'), j = +$('#pvF').value; box.hidden = j < 0; if (j < 0) return;
+    const g = isD(j) ? $('#pvFG').value : '';
+    const m = new Map(); for (let r = base.r1 + 1; r <= base.r2; r++) { const v = S.at(r, base.c1 + j); if (v == null) continue; const k = pvKey(v, g); if (!m.has(pvLow(k))) m.set(pvLow(k), k); }
+    const keys = [...m.values()].sort(pvCmp).slice(0, 80);
+    box.innerHTML = `<p class="dlg-note">Garder seulement :</p>` + keys.map((k, i) => `<label><input type="checkbox" data-i="${i}"${fsel.has(pvLow(k)) ? ' checked' : ''}> ${esc(g ? pvLabel(k, g) : isD(j) && typeof k === 'number' ? display0(k) : String(k))}</label>`).join('');
+    box._keys = keys;
+  };
+  const display0 = n => { const d = new Date(EPOCH + n * 86400000); return d.toLocaleDateString('fr-FR', { timeZone: 'UTC' }); };
+  showG(); renderF();
+  ['#pvRows', '#pvCols'].forEach(s => $(s).addEventListener('change', showG));
+  $('#pvF').addEventListener('change', () => { fsel = new Set(); showG(); renderF(); });
+  $('#pvFG').addEventListener('change', () => { fsel = new Set(); renderF(); });
+  $('#pvAddVal').addEventListener('click', () => { const nj = kinds.findIndex(k => k === 'num'); $('#pvVals').insertAdjacentHTML('beforeend', valRow({ j: nj >= 0 ? nj : 0, agg: nj >= 0 ? 'sum' : 'count' })); });
+  $('#pvVals').addEventListener('click', e => { const x = e.target.closest('.pv-vx'); if (x && $$('#pvVals .pv-v').length > 1) x.closest('.pv-v').remove(); });
+  const rangeIn = $('#pvRange');
+  if (rangeIn) rangeIn.addEventListener('change', () => { const o = rangeObj(rangeIn.value); if (o) { closeDlg(); SH.anc = { r: o.r2, c: o.c2 }; select(o.r1, o.c1, true); openPivot(); } });
+  $('#pvOk').addEventListener('click', () => {
+    const fj = +$('#pvF').value, box = $('#pvFVals');
+    const fvals = fj >= 0 ? [...box.querySelectorAll('input:checked')].map(i => box._keys[+i.dataset.i]) : [];
+    const def = {
+      src: base.src, r1: base.r1, c1: base.c1, r2: base.r2, c2: base.c2,
+      rows: +$('#pvRows').value, rowGroup: isD($('#pvRows').value) ? $('#pvRowsG').value : '',
+      cols: +$('#pvCols').value, colGroup: isD($('#pvCols').value) ? $('#pvColsG').value : '',
+      vals: $$('#pvVals .pv-v').map(el => ({ j: +el.querySelector('.pv-vj').value, agg: el.querySelector('.pv-va').value })),
+      filter: fj >= 0 && fvals.length ? { j: fj, g: isD(fj) ? $('#pvFG').value : '', values: fvals } : null,
+      sort: $('#pvSort').value, pct: $('#pvPct').checked, chart: $('#pvChart').value
+    };
+    closeDlg();
+    if (editIdx != null) rebuildPivot(editIdx, def); else createPivot(def);
+  });
 }
 
 /* --- somme auto et structure */
@@ -7862,12 +8070,13 @@ let AI = Object.assign({ provider: 'mistral', key: '', model: '' }, ls.get('grim
 const aiModel = () => AI.model || AI_DEF[AI.provider];
 const provName = () => AI.provider === 'mistral' ? 'Mistral' : 'OpenRouter';
 async function aiChat(prompt, { signal, onText } = {}) {
+  const messages = Array.isArray(prompt) ? prompt : [{ role: 'user', content: prompt }];
   if (!AI.key) throw { code: 'no_key' };
   const url = AI.provider === 'mistral' ? 'https://api.mistral.ai/v1/chat/completions' : 'https://openrouter.ai/api/v1/chat/completions';
   const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AI.key };
   if (AI.provider === 'openrouter') { headers['HTTP-Referer'] = location.origin; headers['X-Title'] = 'Grimoire'; }
   let res;
-  try { res = await fetch(url, { method: 'POST', headers, signal, body: JSON.stringify({ model: aiModel(), messages: [{ role: 'user', content: prompt }], temperature: 0.4, stream: true }) }); }
+  try { res = await fetch(url, { method: 'POST', headers, signal, body: JSON.stringify({ model: aiModel(), messages, temperature: 0.4, stream: true }) }); }
   catch (e) { if (e && e.name === 'AbortError') throw e; throw { code: 'network' }; }
   if (!res.ok) { let m = ''; try { const j = await res.json(); m = (j.error && (j.error.message || j.error)) || j.message || ''; } catch {} throw { code: 'http', status: res.status, message: String(m).slice(0, 200) }; }
   const reader = res.body.getReader(), dec = new TextDecoder();
@@ -7924,17 +8133,19 @@ function openPlume() {
     ? [['reformuler', 'Reformuler'], ['concis', 'Plus concis'], ['formel', 'Ton plus formel'], ['corriger', 'Corriger'], ['developper', 'Développer'], ['resumer', 'Résumer le document']]
     : Plume.mode === 'pdf'
     ? [['resumer', 'Résumer le PDF'], ...(hasFields ? [['remplir', 'Remplir le formulaire']] : []), ['facture', 'Ajouter au suivi des factures'], ['lot', 'Plusieurs factures…']]
-    : [['expliquer', 'Expliquer la formule'], ['verifier', 'Vérifier le tableau']];
-  $('#plumeChips').innerHTML = chips.map(([k, l]) => `<button class="pchip" data-p="${k}">${l}</button>`).join('');
+    : [['tcd', 'Tableau croisé (guidé)'], ['analyser', 'Analyser ces données'], ['expliquer', 'Expliquer la formule'], ['verifier', 'Vérifier le tableau']];
+  chips.push(['aide', 'Que sais-tu faire ?']);
+  $('#plumeChips').innerHTML = chips.map(([k, l]) => `<button class="pchip${k === 'aide' ? ' pchip-aide' : ''}" data-p="${k}">${l}</button>`).join('');
   $('#plumeAsk').placeholder = Plume.mode === 'texte' ? 'Décrivez ce que vous voulez écrire. Exemple : un mot de remerciement chaleureux pour un voisin.'
     : Plume.mode === 'pdf' ? (hasFields ? 'Une question sur ce PDF, ou des consignes pour le remplir. Exemple : badge pour la voiture AB-123-CD, électrique.' : 'Une question sur ce PDF. Exemple : quelle est la date limite de paiement ?')
-    : 'Décrivez ce que Plume doit construire : tableau, formules, listes, graphique… Exemple : un suivi de mes dépenses du quotidien par catégorie, avec un camembert de ce qui coûte le plus. Ou une seule formule pour la cellule sélectionnée.';
-  $('#plumeGo').querySelector('span').textContent = Plume.mode === 'texte' ? 'Rédiger' : Plume.mode === 'pdf' ? 'Demander' : 'Construire';
+    : 'Décrivez ce que Plume doit construire ou calculer. Exemples : un suivi de mes dépenses par catégorie avec un camembert ; le total des montants par catégorie et par mois (tableau croisé) ; une formule pour la cellule sélectionnée.';
+  Plume.placeholder = $('#plumeAsk').placeholder;
+  plThreadReset();
   $('#plumeOut').textContent = ''; $('#plumeOut').classList.toggle('mono', Plume.mode === 'feuille'); $('#plumeActs').hidden = true;
   Plume.ctx();
   $('#plume').hidden = false; $('#plumeBtn').setAttribute('aria-pressed', 'true');
 }
-function closePlume() { if (Plume.ctl) Plume.ctl.abort(); $('#plume').hidden = true; $('#plumeBtn').setAttribute('aria-pressed', 'false'); }
+function closePlume() { if (PL.pending) PL.pending.cancel(); if (Plume.ctl) Plume.ctl.abort(); $('#plume').hidden = true; $('#plumeBtn').setAttribute('aria-pressed', 'false'); }
 $('#plumeBtn').addEventListener('mousedown', e => e.preventDefault());
 $('#plumeBtn').addEventListener('click', () => { commitEdit(false); $('#plume').hidden ? openPlume() : closePlume(); });
 $('#plumeX').addEventListener('click', closePlume);
@@ -7956,6 +8167,11 @@ function sheetTSV() {
   return lines.join('\n').slice(0, 6000);
 }
 async function runPlume(kind) {
+  if (!kind && PL.pending) { const t = $('#plumeAsk').value.trim(); if (!t) { $('#plumeAsk').focus(); return; } $('#plumeAsk').value = ''; PL.pending.text(t); return; }
+  if (PL.pending) PL.pending.cancel();
+  if (kind === 'aide') return plumeHelp();
+  if (Plume.mode === 'feuille' && (kind === 'tcd' || kind === 'analyser' || (!kind && PIVOT_RE.test($('#plumeAsk').value)))) return runPlumePivot(kind);
+  plThreadReset();
   if (Plume.mode === 'pdf') return runPlumePdf(kind);
   if (Plume.mode === 'feuille' && !kind) {
     const ask = $('#plumeAsk').value.trim(); if (!ask) { $('#plumeAsk').focus(); return; }
@@ -8011,7 +8227,8 @@ async function runPlume(kind) {
   $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = true);
   Plume.ctl = new AbortController();
   try {
-    const res = await aiChat(prompt, { signal: Plume.ctl.signal, onText: ({ text }) => { out.textContent = text; } });
+    const conv = Plume.mode === 'texte' && !kind;
+    const res = await (conv ? plumeConverse : aiChat)(prompt, { signal: Plume.ctl.signal, onText: ({ text }) => { out.textContent = text; } });
     let text = (res.text || '').trim();
     if (Plume.target === 'cell') { const m = text.match(/=[^\n`]+/); text = m ? m[0].trim() : text; }
     Plume.result = text; out.textContent = text;
@@ -8182,21 +8399,21 @@ async function runPlumePdf(kind) {
       const me = String(ls.get('grim.me', '') || '').trim();
       if (!me && !ask) { out.innerHTML = 'Dites à Plume quoi mettre : écrivez-le dans la zone ci-dessus (exemple : « badge pour la voiture AB-123-CD, électrique »), ou enregistrez vos informations habituelles dans <b>Réglages → Plume → Mes informations</b>.'; return done(); }
       out.textContent = 'Plume prépare le remplissage…';
-      const res = await aiChat(`Tu aides à remplir un formulaire PDF intitulé « ${title} ».
+      const res = await plumeConverse(`Tu aides à remplir un formulaire PDF intitulé « ${title} ».
 Champs du formulaire (JSON ; « label » est le texte imprimé à côté du champ, « options » les valeurs possibles) :
 ${JSON.stringify(fields).slice(0, 12000)}
 
 Informations de la personne :
 """${me || '(aucune)'}"""
 ${ask ? `Consignes pour ce formulaire : """${ask}"""\n` : ''}${text ? `Texte du formulaire, pour comprendre le contexte :\n"""${text.slice(0, 6000)}"""\n` : ''}
-Réponds UNIQUEMENT par un objet JSON { "nom technique du champ": valeur }. Ne remplis que les champs pour lesquels tu as l'information (ne devine pas) ; pour une case à cocher, true ou false ; pour un choix, exactement une des options. Dates au format JJ/MM/AAAA.`, { signal });
+Réponds UNIQUEMENT par un objet JSON { "nom technique du champ": valeur }. Ne remplis que les champs pour lesquels tu as l'information (ne devine pas ; s'il manque une information importante, pose la question) ; pour une case à cocher, true ou false ; pour un choix, exactement une des options. Dates au format JJ/MM/AAAA.`, { signal });
       const vals = aiJson(res.text), labels = new Map(fields.map(f => [f.name, f.label || f.name]));
       const keep = Object.fromEntries(Object.entries(vals).filter(([k, v]) => labels.has(k) && v !== null && v !== ''));
       if (!Object.keys(keep).length) { out.textContent = 'Plume n\'a trouvé aucune information à mettre dans ces champs. Ajoutez-en dans la zone ci-dessus.'; return done(); }
       Plume.data = keep; Plume.target = 'fill'; Plume.result = JSON.stringify(keep);
       out.innerHTML = `<p class="pl-h">${Object.keys(keep).length} champ${Object.keys(keep).length > 1 ? 's' : ''} sur ${fields.length} :</p><table class="pl-tab">` + Object.entries(keep).map(([k, v]) => `<tr><th>${esc(labels.get(k))}</th><td>${esc(v === true ? '☑ oui' : v === false ? '☐ non' : String(v))}</td></tr>`).join('') + '</table>';
     } else {
-      const res = await aiChat(`Réponds à la question à partir de ce PDF intitulé « ${title} ». Réponds en français, clairement et brièvement ; si la réponse n'y figure pas, dis-le.\nQuestion : ${ask}\n\nTexte du PDF :\n"""${text.slice(0, 24000)}"""`, { signal, onText: live });
+      const res = await plumeConverse(`Réponds à la question à partir de ce PDF intitulé « ${title} ». Réponds en français, clairement et brièvement ; si la réponse n'y figure pas, dis-le.\nQuestion : ${ask}\n\nTexte du PDF :\n"""${text.slice(0, 24000)}"""`, { signal, onText: live });
       Plume.result = res.text.trim(); Plume.target = 'newdoc';
     }
     showPlumeActs();
@@ -8206,6 +8423,280 @@ Réponds UNIQUEMENT par un objet JSON { "nom technique du champ": valeur }. Ne r
     else out.textContent = aiError(e);
   }
   done();
+}
+
+/* =========================================================
+   Plume guidé : quand une demande est incomplète, Plume pose une question (une à la fois),
+   avec des réponses à cliquer, puis reprend. Commun aux documents, classeurs et PDF.
+   ========================================================= */
+const PL = { pending: null, seq: 0 };
+const ASK_RULE = `
+
+Si la demande est trop vague ou qu'il te manque une information indispensable pour bien faire (et seulement dans ce cas), ne devine pas : réponds UNIQUEMENT par cet objet JSON, sans rien d'autre : {"question": "ta question, courte et simple", "choix": ["2 à 6 réponses possibles, courtes"], "multiple": false}. Une seule question à la fois. Sinon, réponds normalement.`;
+function asQuestion(t) {
+  const s = String(t || '').replace(/```(?:json)?/g, '').trim();
+  if (!/^\{[\s\S]*"question"\s*:/.test(s)) return null;
+  try {
+    const j = JSON.parse(s.match(/\{[\s\S]*\}/)[0]);
+    return j && typeof j.question === 'string' && Object.keys(j).every(k => ['question', 'choix', 'multiple'].includes(k)) ? j : null;
+  } catch { return null; }
+}
+function plThreadReset() { if (PL.pending) PL.pending.cancel(); $('#plumeThread').innerHTML = ''; plGoLabel(); }
+function plSay(content, who = 'bot', html = false) {
+  const d = document.createElement('div'); d.className = 'pmsg ' + who;
+  if (html) d.innerHTML = content; else d.textContent = content;
+  $('#plumeThread').appendChild(d);
+  // défiler seulement l'intérieur du panneau (scrollIntoView ferait bouger tout l'écran)
+  const pb = d.closest('.plume-b'); if (pb) requestAnimationFrame(() => { pb.scrollTop = pb.scrollHeight; });
+  return d;
+}
+function plGoLabel() {
+  const go = $('#plumeGo'); if (!go) return;
+  const lbl = PL.pending ? 'Répondre' : Plume.mode === 'texte' ? 'Rédiger' : Plume.mode === 'pdf' ? 'Demander' : 'Construire';
+  go.querySelector('span').textContent = lbl;
+  $('#plumeAsk').placeholder = PL.pending ? 'Votre réponse (ou cliquez un choix ci-dessus)…' : (Plume.placeholder || '');
+}
+// Pose une question ; résout { value, label } (choix cliqué ou réponse tapée)
+function plAsk({ q, choix = [], multiple = false, libre = true }) {
+  if (PL.pending) PL.pending.cancel();
+  // la demande reste visible dans la conversation ; la zone de saisie sert à répondre
+  const asked = $('#plumeAsk').value.trim();
+  if (asked && !$('#plumeThread .pmsg.me')) { $('#plumeThread').insertAdjacentHTML('afterbegin', `<div class="pmsg me">${esc(asked)}</div>`); }
+  $('#plumeAsk').value = '';
+  const id = ++PL.seq;
+  const opts = choix.map(c => typeof c === 'object' && c !== null ? c : { label: String(c), value: c });
+  const box = plSay(`<p>${esc(q)}</p>` + (opts.length ? `<div class="pq-c">${opts.map((o, i) => `<button type="button" class="pq-o" data-q="${id}" data-i="${i}" aria-pressed="false">${esc(o.label)}</button>`).join('')}</div>` : '')
+    + (multiple ? `<button type="button" class="pbtn pq-ok" data-q="${id}">Valider</button>` : '')
+    + (libre || !opts.length ? `<small>${opts.length ? 'Ou répondez avec vos mots, dans la zone ci-dessous.' : 'Répondez dans la zone ci-dessous.'}</small>` : ''), 'bot pq', true);
+  return new Promise((resolve, reject) => {
+    const end = () => { box.querySelectorAll('button').forEach(b => { b.disabled = true; b.dataset.done = '1'; }); PL.pending = null; plGoLabel(); $('#plumeGo').disabled = true; };
+    const answer = (value, label) => { end(); plSay(label, 'me'); resolve({ value, label }); };
+    PL.pending = {
+      id,
+      pick: i => {
+        if (multiple) { const b = box.querySelector(`[data-i="${i}"]`); b.setAttribute('aria-pressed', String(b.getAttribute('aria-pressed') !== 'true')); return; }
+        answer(opts[i].value, opts[i].label);
+      },
+      validate: () => { const sel = [...box.querySelectorAll('.pq-o[aria-pressed="true"]')].map(b => opts[+b.dataset.i]); if (!sel.length) return; answer(sel.map(o => o.value), sel.map(o => o.label).join(', ')); },
+      text: t => {
+        if (opts.length) { const n = norm(t), hit = opts.find(o => norm(o.label) === n) || opts.find(o => norm(o.label).includes(n) || n.includes(norm(o.label))); if (hit && !multiple) return answer(hit.value, hit.label); }
+        if (!libre && opts.length) { plSay('Je n\'ai pas compris : choisissez une des réponses proposées.'); return; }
+        answer(t, t);
+      },
+      cancel: () => { end(); $('#plumeGo').disabled = false; reject(new DOMException('Question abandonnée', 'AbortError')); }
+    };
+    plGoLabel(); $('#plumeGo').disabled = false; $('#plumeAsk').disabled = false;
+    if (!isPhone()) setTimeout(() => { const f = box.querySelector('.pq-o'); if (f) f.focus({ preventScroll: true }); }, 30);
+  });
+}
+$('#plumeThread').addEventListener('mousedown', e => { if (e.target.closest('.pq-o, .pq-ok, [data-pl]')) e.preventDefault(); });
+$('#plumeThread').addEventListener('click', e => {
+  const o = e.target.closest('.pq-o'), ok = e.target.closest('.pq-ok'), act = e.target.closest('[data-pl]');
+  if ((o || ok) && (o || ok).dataset.done) return;
+  if (o && PL.pending && +o.dataset.q === PL.pending.id) return PL.pending.pick(+o.dataset.i);
+  if (ok && PL.pending && +ok.dataset.q === PL.pending.id) return PL.pending.validate();
+  if (act) plAction(act);
+});
+// Conversation avec l'IA : elle peut poser jusqu'à `max` questions avant de répondre
+async function plumeConverse(prompt, { signal, onText, max = 3 } = {}) {
+  const msgs = [{ role: 'user', content: prompt + ASK_RULE }];
+  for (let i = 0; ; i++) {
+    const res = await aiChat(msgs, { signal, onText: onText && (o => { if (!/^\s*(```(json)?\s*)?\{/.test(o.text)) onText(o); }) });
+    const q = asQuestion(res.text);
+    if (!q) return res;
+    if (i >= max) { msgs.push({ role: 'assistant', content: res.text }, { role: 'user', content: 'Ne pose plus de question : fais au mieux avec ce que tu sais, et dis en une phrase ce que tu as supposé.' }); continue; }
+    $('#plumeOut').textContent = '';
+    const a = await plAsk({ q: q.question, choix: Array.isArray(q.choix) ? q.choix.slice(0, 8).map(String) : [], multiple: !!q.multiple });
+    msgs.push({ role: 'assistant', content: res.text }, { role: 'user', content: 'Ma réponse : ' + a.label });
+    $('#plumeOut').textContent = 'Plume reprend…';
+  }
+}
+
+/* --- Que sait faire Plume ? (aide locale, sans appel à l'IA) */
+const PL_HELP = {
+  texte: [
+    ['Écrire pour vous', 'Décrivez ce que vous voulez ; si c\'est vague, Plume vous pose une ou deux questions avant d\'écrire.', [['ex', 'Un mot de remerciement pour la maîtresse de ma fille'], ['ex', 'Une lettre de résiliation de mon abonnement internet'], ['ex', 'Un petit discours pour un baptême']]],
+    ['Retravailler un passage', 'Sélectionnez un passage du document, puis :', [['k', 'reformuler', 'Reformuler'], ['k', 'concis', 'Plus concis'], ['k', 'formel', 'Ton plus formel'], ['k', 'corriger', 'Corriger'], ['k', 'developper', 'Développer']]],
+    ['Tout le document', '', [['k', 'resumer', 'Résumer le document']]]
+  ],
+  feuille: [
+    ['Construire un tableau', 'Plume crée le tableau, les formules, les listes et les graphiques dans la feuille (Ctrl+Z pour annuler).', [['ex', 'Un suivi de mes dépenses par catégorie, avec un camembert'], ['ex', 'Le tableau de remboursement d\'un prêt de 15 000 € sur 5 ans à 3 %'], ['ex', 'Une liste de courses avec des cases à cocher']]],
+    ['Tableau croisé dynamique', 'Plume vous guide pas à pas (colonnes, calcul, regroupement des dates, graphique). Les calculs sont faits par les formules de Grimoire.', [['k', 'tcd', 'Tableau croisé (guidé)'], ['ex', 'Le total des montants par catégorie et par mois'], ['k', 'analyser', 'Analyser ces données']]],
+    ['Formules', 'Sélectionnez une cellule, puis décrivez le calcul ; ou faites expliquer une formule existante.', [['k', 'expliquer', 'Expliquer la formule'], ['k', 'verifier', 'Vérifier le tableau']]]
+  ],
+  pdf: [
+    ['Lire', '', [['k', 'resumer', 'Résumer le PDF'], ['ex', 'Quelle est la date limite de paiement ?']]],
+    ['Remplir', 'Avec vos informations (Réglages → Plume) et vos consignes ; Plume vous demande ce qui lui manque.', [['k', 'remplir', 'Remplir le formulaire']]],
+    ['Factures', '', [['k', 'facture', 'Ajouter au suivi des factures'], ['k', 'lot', 'Plusieurs factures…']]]
+  ]
+};
+function plumeHelp() {
+  plThreadReset();
+  const parts = PL_HELP[Plume.mode === 'feuille' ? 'feuille' : Plume.mode === 'pdf' ? 'pdf' : 'texte'];
+  plSay('<p><b>Ce que Plume sait faire ici</b></p>' + parts.map(([t, d, acts]) => `<div class="ph-s"><b>${esc(t)}</b>${d ? `<span>${esc(d)}</span>` : ''}<div class="pq-c">${acts.map(a => a[0] === 'ex' ? `<button type="button" class="pq-o ph-ex" data-pl="ex" data-t="${esc(a[1])}">« ${esc(a[1])} »</button>` : `<button type="button" class="pq-o" data-pl="k" data-k="${a[1]}">${esc(a[2])}</button>`).join('')}</div></div>`).join('')
+    + (AI.key ? '' : '<p class="ph-n">Plume a besoin d\'une clé API (Réglages) ; le tableau croisé guidé fonctionne sans.</p>'), 'bot', true);
+}
+function plAction(b) {
+  const k = b.dataset.pl;
+  if (k === 'ex') { $('#plumeAsk').value = b.dataset.t; runPlume(null); }
+  else if (k === 'k') runPlume(b.dataset.k);
+  else if (k === 'pvedit') { const i = state.cur.sheets.findIndex(s => s.id === b.dataset.sid); if (i >= 0) { if (i !== state.cur.active) switchSheet(i); openPivot(i); } }
+  else if (k === 'pvcomment') plumePivotComment(b.dataset.sid);
+  else if (k === 'pvmake') { const p = PL.props && PL.props[+b.dataset.i]; if (p) runPivotWizard(p.pre, p.base, p.S); }
+}
+
+/* --- Plume et les tableaux croisés */
+const PIVOT_RE = /crois[ée]|\btcd\b|pivot|synth[eè]se|r[ée]capitul|totaux? (de|des|du)?.*\bpar\b|somme (de|des)?.*\bpar\b|r[ée]partition|ventil|\bpar (cat[ée]gorie|mois|ann[ée]e|trimestre|fournisseur|semaine)\b/i;
+const KIND_FR = { txt: 'texte', num: 'nombre', date: 'date' };
+// Le tableau de données de la feuille : autour de la cellule active, sinon le premier de la feuille
+function pvGuessRegion() {
+  const cur = state.cur, S0 = rng();
+  let R = S0.r2 > S0.r1 ? S0 : hasVal(S0.r1, S0.c1) ? currentRegion(S0.r1, S0.c1) : null;
+  if (!R || R.r2 - R.r1 < 1) {
+    let best = null;
+    Object.keys(cur.cells).forEach(k => { const p = parseAddr(k); if (p && String(cur.cells[k].v) !== '' && (!best || p.r < best.r || (p.r === best.r && p.c < best.c))) best = p; });
+    if (best) R = currentRegion(best.r, best.c);
+  }
+  if (!R || R.r2 - R.r1 < 1) return null;
+  for (let r = R.r1; r < R.r2; r++) {
+    let ok = true; for (let c = R.c1; c <= R.c2; c++) { const v = (SH.vals[r] || [])[c]; if (typeof v !== 'string' || v === '') { ok = false; break; } }
+    if (ok) return { ...R, r1: r };
+  }
+  return R;
+}
+function pvContext() {
+  if (state.cur.sheets[state.cur.active].pivot) return { err: 'Cette feuille est déjà un tableau croisé : revenez sur la feuille des données.' };
+  const R = pvGuessRegion(); if (!R) return { err: 'Je ne trouve pas de tableau de données sur cette feuille. Il faut une ligne de titres et au moins une ligne de données.' };
+  const base = { src: state.cur.sheets[state.cur.active].id, ...R };
+  const S = pvSource(base); if (!S) return { err: 'Données illisibles.' };
+  return { base, S };
+}
+function pvSampleTSV(base, S, n = 5) {
+  const lines = [S.hdr.join('\t')];
+  for (let r = base.r1 + 1; r <= Math.min(base.r2, base.r1 + n); r++) lines.push(S.hdr.map((_, j) => display(r, base.c1 + j).txt).join('\t'));
+  return lines.join('\n');
+}
+const pvColsList = S => S.hdr.map((h, j) => `- ${h} (${KIND_FR[S.kinds[j]]})`).join('\n');
+const PV_SCHEMA = `{"lignes": "nom exact d'une colonne, ou null", "regrouper_lignes": "mois, trimestre, annee, jour, ou null", "colonnes": "nom exact d'une colonne, \\"aucune\\", ou null", "regrouper_colonnes": "mois, trimestre, annee, jour, ou null", "valeurs": [{"colonne": "nom exact", "calcul": "somme, nombre, moyenne, max ou min"}] ou null, "filtre": {"colonne": "nom exact", "valeurs": ["…"]} ou null, "graphique": "col, bar, pie, line, aucun, ou null", "tri": "desc, asc, libelle, ou null"}`;
+// Traduit une proposition de l'IA (noms de colonnes) en définition de tableau croisé, en ne gardant que ce qui existe
+function pvFromAI(x, base, S) {
+  const find = name => { if (name == null) return -1; const n = norm(name); let j = S.hdr.findIndex(h => norm(h) === n); if (j < 0) j = S.hdr.findIndex(h => norm(h).includes(n) || n.includes(norm(h))); return j; };
+  const G = { mois: 'month', trimestre: 'quarter', annee: 'year', 'année': 'year', jour: '' };
+  const A = { somme: 'sum', nombre: 'count', moyenne: 'avg', max: 'max', maximum: 'max', min: 'min', minimum: 'min' };
+  const pre = {};
+  const r = find(x.lignes); if (r >= 0) pre.rows = r;
+  if (x.regrouper_lignes != null && G[norm(x.regrouper_lignes)] !== undefined) pre.rowGroup = G[norm(x.regrouper_lignes)];
+  if (x.colonnes != null) { if (/^aucun/i.test(String(x.colonnes))) pre.cols = -1; else { const c = find(x.colonnes); if (c >= 0) pre.cols = c; } }
+  if (x.regrouper_colonnes != null && G[norm(x.regrouper_colonnes)] !== undefined) pre.colGroup = G[norm(x.regrouper_colonnes)];
+  if (Array.isArray(x.valeurs) && x.valeurs.length) {
+    const vals = x.valeurs.map(v => ({ j: find(v.colonne), agg: A[norm(v.calcul)] || 'sum' })).filter(v => v.j >= 0).map(v => S.kinds[v.j] === 'num' ? v : { ...v, agg: 'count' });
+    if (vals.length) pre.vals = vals.slice(0, 4);
+  }
+  if (x.filtre && x.filtre.colonne) {
+    const fj = find(x.filtre.colonne), want = (x.filtre.valeurs || []).map(String);
+    if (fj >= 0 && want.length) {
+      const years = S.kinds[fj] === 'date' && want.every(w => /^\d{4}$/.test(w.trim()));
+      const g = years ? 'year' : '';
+      const m = new Map(); for (let rr = base.r1 + 1; rr <= base.r2; rr++) { const v = S.at(rr, base.c1 + fj); if (v != null) { const k = pvKey(v, g); m.set(norm(String(g ? k : k)), k); } }
+      const values = want.map(w => m.get(norm(w.trim()))).filter(v => v !== undefined);
+      if (values.length) pre.filter = { j: fj, g, values };
+      else pre.filterMiss = `« ${want.join(', ')} » introuvable dans la colonne « ${S.hdr[fj]} » : pas de filtre.`;
+    }
+  }
+  if (x.graphique != null) pre.chart = /^aucun/i.test(String(x.graphique)) ? '' : CHART_TYPES.some(([k]) => k === x.graphique) ? x.graphique : undefined;
+  if (x.tri != null) pre.sort = x.tri === 'desc' || x.tri === 'asc' ? x.tri : 'label';
+  return pre;
+}
+// L'assistant pas à pas : ne demande que ce qui manque, avec les vraies colonnes comme choix
+async function runPivotWizard(pre, base, S) {
+  const F = S.hdr.map((h, j) => ({ label: h + (S.kinds[j] === 'date' ? ' (dates)' : ''), value: j }));
+  const d = { ...base, rows: pre.rows, rowGroup: pre.rowGroup, cols: pre.cols, colGroup: pre.colGroup, vals: pre.vals, filter: pre.filter || null, chart: pre.chart, sort: pre.sort };
+  if (pre.filterMiss) plSay(pre.filterMiss);
+  const groupQ = async j => (await plAsk({ q: `« ${S.hdr[j]} » contient des dates. Les regrouper comment ?`, choix: PV_GROUPS.map(([k, l]) => ({ label: l, value: k })), libre: false })).value;
+  if (d.rows == null) d.rows = (await plAsk({ q: 'Le tableau croisé aura une ligne pour chaque… ?', choix: F, libre: false })).value;
+  if (S.kinds[d.rows] === 'date' && d.rowGroup == null) d.rowGroup = await groupQ(d.rows);
+  if (!d.vals) {
+    const nums = F.filter(f => S.kinds[f.value] === 'num');
+    const a = await plAsk({ q: 'Que faut-il calculer ?', choix: [...nums.map(f => ({ label: 'Avec « ' + f.label + ' »', value: f.value })), { label: 'Compter les lignes', value: -1 }], libre: false });
+    if (a.value === -1) d.vals = [{ j: d.rows, agg: 'count' }];
+    else {
+      const g = await plAsk({ q: `Pour « ${S.hdr[a.value]} », quel calcul ?`, choix: [['sum', 'La somme (total)'], ['avg', 'La moyenne'], ['max', 'Le plus grand'], ['min', 'Le plus petit'], ['count', 'Le nombre de lignes']].map(([value, label]) => ({ label, value })), libre: false });
+      d.vals = [{ j: a.value, agg: g.value }];
+    }
+  }
+  if (d.cols === undefined || d.cols === null) {
+    const a = await plAsk({ q: 'Croiser aussi avec une rubrique en colonnes ? (par exemple les mois)', choix: [{ label: 'Non, c\'est bon', value: -1 }, ...F.filter(f => f.value !== d.rows && !d.vals.some(v => v.j === f.value && v.agg !== 'count'))], libre: false });
+    d.cols = a.value;
+  }
+  if (d.cols >= 0 && S.kinds[d.cols] === 'date' && d.colGroup == null) d.colGroup = await groupQ(d.cols);
+  if (d.chart === undefined) {
+    const types = d.cols >= 0 ? [['col', 'Colonnes'], ['stack', 'Colonnes empilées'], ['line', 'Courbes'], ['bar', 'Barres']] : [['col', 'Colonnes'], ['bar', 'Barres'], ['pie', 'Camembert'], ['line', 'Courbes']];
+    d.chart = (await plAsk({ q: 'Ajouter un graphique ?', choix: [...types.map(([value, label]) => ({ label, value })), { label: 'Pas de graphique', value: '' }], libre: false })).value;
+  }
+  if (d.sort == null) d.sort = S.kinds[d.rows] === 'date' ? 'label' : 'desc';
+  const sh = createPivot(d);
+  if (!sh) { plSay('Je n\'ai pas pu créer le tableau croisé.'); return; }
+  plSay(`<p>C'est fait : ${esc(pvDescribe(d, S))}, sur la nouvelle feuille « ${esc(sh.name)} ».</p><div class="pq-c">${AI.key ? `<button type="button" class="pq-o" data-pl="pvcomment" data-sid="${sh.id}">Commenter le résultat</button>` : ''}<button type="button" class="pq-o" data-pl="pvedit" data-sid="${sh.id}">Modifier</button></div><small>Les chiffres viennent des formules de Grimoire, pas de l'IA. Pour reprendre de nouvelles lignes : clic sur l'onglet → Actualiser.</small>`, 'bot', true);
+}
+// Demande en français → définition (l'IA ne reçoit que les titres et 5 lignes d'exemple)
+async function plumePivotFromText(ask, signal) {
+  const C = pvContext(); if (C.err) { plSay(C.err); return; }
+  const { base, S } = C;
+  let pre = {};
+  if (AI.key) {
+    $('#plumeOut').textContent = 'Plume lit les colonnes…';
+    const res = await aiChat(`Un tableur contient un tableau de ${S.rowsN} lignes, avec ces colonnes :\n${pvColsList(S)}\nExemple (5 premières lignes) :\n${pvSampleTSV(base, S)}\n\nDemande : « ${ask} »\n\nTraduis cette demande en tableau croisé dynamique. Réponds UNIQUEMENT par un objet JSON de cette forme :\n${PV_SCHEMA}\nN'utilise que des noms de colonnes de la liste. Mets null pour tout ce que la demande ne précise pas : on le demandera à la personne.`, { signal });
+    $('#plumeOut').textContent = '';
+    try { pre = pvFromAI(aiJson(res.text), base, S); } catch { pre = {}; }
+  }
+  plSay(`Je prends le tableau ${rngRef(base)} de la feuille « ${S.name} » (${S.rowsN} lignes).`);
+  await runPivotWizard(pre, base, S);
+}
+// Propositions d'analyses
+async function plumePivotSuggest(signal) {
+  const C = pvContext(); if (C.err) { plSay(C.err); return; }
+  const { base, S } = C;
+  plSay(`Je regarde le tableau ${rngRef(base)} (${S.rowsN} lignes). Plume ne reçoit que les titres et 5 lignes d'exemple ; les calculs seront faits par Grimoire.`);
+  $('#plumeOut').textContent = 'Plume cherche des analyses utiles…';
+  const res = await aiChat(`Un particulier a ce tableau de ${S.rowsN} lignes dans son tableur, avec ces colonnes :\n${pvColsList(S)}\nExemple (5 premières lignes) :\n${pvSampleTSV(base, S)}\n\nPropose les 3 tableaux croisés dynamiques les plus utiles pour comprendre ces données (par exemple où va l'argent, l'évolution dans le temps, qui ou quoi revient le plus). Réponds UNIQUEMENT par un objet JSON :\n{"propositions": [{"titre": "titre court", "pourquoi": "une phrase", "definition": ${PV_SCHEMA}}]}\nN'utilise que des noms de colonnes de la liste ; pour les dates, regroupe par mois ou par année.`, { signal });
+  $('#plumeOut').textContent = '';
+  const props = (aiJson(res.text).propositions || []).slice(0, 4).map(p => ({ titre: String(p.titre || 'Analyse'), pourquoi: String(p.pourquoi || ''), pre: pvFromAI(p.definition || p, base, S), base, S })).filter(p => p.pre.rows != null);
+  if (!props.length) { plSay('Je n\'ai rien trouvé d\'utile à proposer. Essayez « Tableau croisé (guidé) ».'); return; }
+  PL.props = props;
+  plSay('<p>Trois façons de regarder ces données :</p>' + props.map((p, i) => `<div class="ph-s"><b>${esc(p.titre)}</b><span>${esc(p.pourquoi)}</span><div class="pq-c"><button type="button" class="pq-o" data-pl="pvmake" data-i="${i}">Créer ce tableau</button></div></div>`).join(''), 'bot', true);
+}
+// Commentaire du résultat : seules les cases du tableau croisé (déjà calculées) sont envoyées
+async function plumePivotComment(sid) {
+  if (!AI.key) return;
+  const cur = state.cur, i = cur.sheets.findIndex(s => s.id === sid); if (i < 0) return;
+  const vals = SH.hf.getSheetValues(SH.ids[i]) || [];
+  const tsv = vals.slice(0, 40).map(r => (r || []).slice(0, 12).map(v => v == null || typeof v === 'object' ? '' : typeof v === 'number' ? numToRaw(Math.round(v * 100) / 100) : String(v)).join('\t')).join('\n');
+  const out = $('#plumeOut'); out.textContent = 'Plume lit le tableau croisé…';
+  Plume.ctl = new AbortController();
+  try {
+    const res = await aiChat(`Voici un tableau croisé dynamique (TSV) tiré du classeur « ${cur.title || 'Sans titre'} » :\n${tsv}\n\nCommente-le pour un particulier, en français, en 3 phrases simples au plus : le poste ou la catégorie la plus importante (avec son chiffre), l'évolution ou l'écart notable, et une chose qui sort de l'ordinaire s'il y en a. N'invente aucun chiffre : utilise seulement ceux du tableau.`, { signal: Plume.ctl.signal, onText: ({ text }) => { out.textContent = text; } });
+    Plume.result = res.text.trim(); out.textContent = Plume.result; Plume.target = null;
+    $('#plumeActs').innerHTML = `<button class="pbtn ghost" data-pa="copy">Copier</button>`; $('#plumeActs').hidden = false;
+  } catch (e) { out.textContent = e && e.name === 'AbortError' ? '' : aiError(e); }
+  Plume.ctl = null;
+}
+
+async function runPlumePivot(kind) {
+  if (Plume.ctl) Plume.ctl.abort();
+  commitEdit(false); plThreadReset(); $('#plumeActs').hidden = true; $('#plumeOut').textContent = '';
+  const ask = $('#plumeAsk').value.trim();
+  if (kind === 'analyser' && !AI.key) { plSay('« Analyser ces données » a besoin d\'une clé API (Réglages). Le tableau croisé guidé, lui, fonctionne sans.'); return; }
+  $('#plumeGo').disabled = true; Plume.ctl = new AbortController();
+  try {
+    if (kind === 'analyser') await plumePivotSuggest(Plume.ctl.signal);
+    else if (kind === 'tcd') { const C = pvContext(); if (C.err) plSay(C.err); else { plSay(`Je prends le tableau ${rngRef(C.base)} de la feuille « ${C.S.name} » (${C.S.rowsN} lignes). Je vous pose quelques questions.`); await runPivotWizard({}, C.base, C.S); } }
+    else { plSay(ask, 'me'); $('#plumeAsk').value = ''; await plumePivotFromText(ask, Plume.ctl.signal); }
+  } catch (e) {
+    const out = $('#plumeOut');
+    if (e && e.name === 'AbortError') out.textContent = '';
+    else out.textContent = e instanceof SyntaxError || (e && e.message === 'Réponse illisible') ? 'La réponse de Plume était incomplète. Réessayez.' : aiError(e);
+  }
+  $('#plumeGo').disabled = false; Plume.ctl = null; plGoLabel();
 }
 
 /* =========================================================
@@ -8297,7 +8788,7 @@ Demande : ${ask}
 ${BUILD_SPEC}`;
   out.classList.remove('mono'); out.textContent = 'Plume construit…';
   const signal = Plume.ctl.signal;
-  let plan = aiJson((await aiChat(base, { signal })).text);
+  let plan = aiJson((await plumeConverse(base, { signal })).text);
   let res = applyBuild(plan);
   if (res.errors.length) {
     // une seconde passe pour corriger les formules en erreur
@@ -8336,7 +8827,7 @@ function showPlumeActs() {
 $('#plumeChips').addEventListener('mousedown', e => e.preventDefault());
 $('#plumeChips').addEventListener('click', e => { const b = e.target.closest('[data-p]'); if (b) runPlume(b.dataset.p); });
 $('#plumeGo').addEventListener('click', () => runPlume(null));
-$('#plumeAsk').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runPlume(null); } });
+$('#plumeAsk').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || (PL.pending && !e.shiftKey))) { e.preventDefault(); runPlume(null); } });
 $('#plumeActs').addEventListener('mousedown', e => e.preventDefault());
 $('#plumeActs').addEventListener('click', async e => {
   const b = e.target.closest('[data-pa]'); if (!b) return;
