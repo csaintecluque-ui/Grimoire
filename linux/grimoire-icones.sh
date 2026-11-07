@@ -10,6 +10,11 @@
 #   bash grimoire-icones.sh            installer
 #   bash grimoire-icones.sh --tout     icônes Grimoire pour les 5 types, quelle que soit l'appli par défaut
 #   bash grimoire-icones.sh --retirer  tout retirer
+#   bash grimoire-icones.sh --diagnostic  vérifier ce que le bureau voit (appli par défaut, thème, icône résolue)
+#
+# Les icônes sont copiées dans hicolor et aussi dans le thème d'icônes actif
+# (Mint-Y, Papirus, Adwaita…) : certains thèmes fournissent déjà une icône pour
+# ces types et passent avant hicolor, ce qui laissait une page blanche.
 #
 # À relancer après avoir choisi Grimoire par défaut pour un nouveau type.
 set -euo pipefail
@@ -19,6 +24,7 @@ TOUT=0
 for a in "$@"; do
   case "$a" in
     --retirer) MODE=retirer ;;
+    --diagnostic) MODE=diagnostic ;;
     --tout) TOUT=1 ;;
     -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Option inconnue : $a (voir --help)"; exit 1 ;;
@@ -73,6 +79,69 @@ icone() {
   esac
 }
 
+# Thème d'icônes actif du bureau (Cinnamon, GNOME, MATE, XFCE, KDE)
+theme_actif() {
+  local t=""
+  if command -v gsettings >/dev/null; then
+    t="$(gsettings get org.cinnamon.desktop.interface icon-theme 2>/dev/null || true)"
+    [ -z "$t" ] || [ "$t" = "''" ] && t="$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null || true)"
+    [ -z "$t" ] || [ "$t" = "''" ] && t="$(gsettings get org.mate.interface icon-theme 2>/dev/null || true)"
+  fi
+  if [ -z "$t" ] || [ "$t" = "''" ]; then
+    command -v xfconf-query >/dev/null && t="$(xfconf-query -c xsettings -p /Net/IconThemeName 2>/dev/null || true)"
+  fi
+  if [ -z "$t" ] && [ -f "$HOME/.config/kdeglobals" ]; then
+    t="$(sed -n 's/^Theme=//p' "$HOME/.config/kdeglobals" | head -1)"
+  fi
+  t="${t//\'/}"
+  [ -n "$t" ] && [ "$t" != hicolor ] && echo "$t" || true
+}
+
+# index.theme d'un thème (dans l'ordre de recherche de GTK)
+index_theme() {
+  local t="$1" d
+  for d in "$HOME/.icons" "$DATA/icons" ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
+    d="${d//:/ }"
+    for b in $d; do [ -f "$b/icons/$t/index.theme" ] && { echo "$b/icons/$t/index.theme"; return; }; [ -f "$b/$t/index.theme" ] && { echo "$b/$t/index.theme"; return; }; done
+  done
+}
+
+# Dossiers « mimetypes » du thème pour une taille donnée (ex. : mimetypes/48 ou 48x48/mimetypes)
+dossiers_mime() {
+  local idx="$1" taille="$2"
+  awk -v want="$taille" '
+    /^\[/ { sec=substr($0,2,length($0)-2); ctx=""; size=""; next }
+    /^Context=/ { ctx=substr($0,9) }
+    /^Size=/ { size=substr($0,6) }
+    { if (sec!="" && ctx=="MimeTypes" && size==want && !done[sec]) { print sec; done[sec]=1 } }
+  ' "$idx"
+}
+
+# Copie des icônes dans un thème utilisateur (dossier de base ~/.local/share/icons/<thème>)
+installer_dans_theme() {
+  local t="$1" idx n tl d ok=0
+  idx="$(index_theme "$t")"; [ -n "$idx" ] || return 0
+  for n in "${NOMS[@]}"; do for tl in "${TAILLES[@]}"; do
+    while read -r d; do
+      [ -n "$d" ] || continue
+      mkdir -p "$DATA/icons/$t/$d"
+      icone "$n" "$tl" | base64 -d > "$DATA/icons/$t/$d/grimoire-$n.png"; ok=1
+    done < <(dossiers_mime "$idx" "$tl")
+  done; done
+  if [ "$ok" = 1 ]; then
+    [ -f "$DATA/icons/$t/icon-theme.cache" ] && command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t -q "$DATA/icons/$t" || true
+    touch "$DATA/icons/$t" 2>/dev/null || true
+    echo "  + icônes copiées aussi dans le thème actif « $t »"
+  fi
+}
+
+retirer_du_theme() {
+  local t="$1" n
+  [ -d "$DATA/icons/$t" ] || return 0
+  for n in "${NOMS[@]}"; do find "$DATA/icons/$t" -name "grimoire-$n.png" -delete 2>/dev/null || true; done
+  find "$DATA/icons/$t" -type d -empty -delete 2>/dev/null || true
+}
+
 rafraichir() {
   command -v update-mime-database >/dev/null && update-mime-database "$MIMEDIR" >/dev/null 2>&1 || true
   if [ -f "$HICOLOR/icon-theme.cache" ] && command -v gtk-update-icon-cache >/dev/null; then
@@ -81,15 +150,45 @@ rafraichir() {
   touch "$HICOLOR" 2>/dev/null || true
 }
 
+diagnostic() {
+  local t idx ligne nom mime ext defaut tmp
+  t="$(theme_actif)"; echo "  Thème d'icônes actif : ${t:-hicolor (ou non détecté)}"
+  idx="$(index_theme "${t:-hicolor}")"; echo "  index.theme : ${idx:-introuvable}"
+  echo "  Fichier d'icônes MIME utilisateur : $([ -f "$MIMEDIR/icons" ] && echo "$MIMEDIR/icons" || echo 'absent (script pas encore lancé ?)')"
+  for ligne in "${TYPES[@]}"; do
+    IFS='|' read -r nom mime ext <<< "$ligne"
+    defaut="$(xdg-mime query default "$mime" 2>/dev/null || true)"
+    echo
+    echo "  $ext ($mime)"
+    echo "    appli par défaut : ${defaut:-aucune}"
+    echo "    icône déclarée   : $(grep -s "^$mime:" "$MIMEDIR/icons" | cut -d: -f2 || true)"
+    echo "    hicolor 48       : $([ -f "$HICOLOR/48x48/mimetypes/grimoire-$nom.png" ] && echo présent || echo absent)"
+    if command -v gio >/dev/null; then
+      # fichier témoin avec le bon en-tête, pour que le type soit reconnu comme un vrai fichier
+      tmp="$(mktemp --suffix="$ext")"
+      case "$ext" in .pdf) printf '%%PDF-1.4\n' > "$tmp" ;; .csv) printf 'a;b\n1;2\n' > "$tmp" ;; *) printf 'PK\003\004' > "$tmp" ;; esac
+      echo "    type reconnu     : $(gio info -a standard::content-type "$tmp" 2>/dev/null | sed -n 's/.*standard::content-type: //p')"
+      echo "    icône résolue    : $(gio info -a standard::icon "$tmp" 2>/dev/null | sed -n 's/.*standard::icon: //p')"
+      rm -f "$tmp"
+    fi
+  done
+  echo
+  echo "  Si « icône résolue » commence par grimoire-… mais que le gestionnaire de fichiers montre une page blanche,"
+  echo "  le thème ne trouve pas l'icône : relance l'installation (elle copie aussi dans le thème actif), puis nemo -q."
+}
+
 echo
 echo "  Grimoire - icônes des fichiers sous Linux"
 echo
+
+if [ "$MODE" = diagnostic ]; then diagnostic; exit 0; fi
 
 if [ "$MODE" = retirer ]; then
   rm -f "$PAQUET"
   for n in "${NOMS[@]}"; do for t in "${TAILLES[@]}"; do
     rm -f "$HICOLOR/${t}x${t}/mimetypes/grimoire-$n.png"
   done; done
+  THEME="$(theme_actif)"; [ -n "$THEME" ] && retirer_du_theme "$THEME"
   rafraichir
   echo "  C'est retiré. Ferme et rouvre le gestionnaire de fichiers pour voir le changement."
   exit 0
@@ -144,6 +243,7 @@ mkdir -p "$MIMEDIR/packages"
   printf '%s' "$XML"
   echo '</mime-info>'
 } > "$PAQUET"
+THEME="$(theme_actif)"; [ -n "$THEME" ] && installer_dans_theme "$THEME"
 rafraichir
 
 echo
