@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.18.1';
+const APP_VERSION = '1.18.2';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -6419,8 +6419,38 @@ async function importFile(f) {
       toast('Texte importé.');
     } else toast('Format non pris en charge. Importez un fichier .docx, .xlsx, .csv ou .txt.', true);
   } catch (err) {
-    toast('Import impossible : le fichier est peut-être protégé ou endommagé.', true);
+    console.warn('Import impossible', err);
+    let d = { msg: 'Import impossible : le fichier est peut-être protégé ou endommagé.' };
+    try { d = await diagnoseImport(f, ext); } catch {}
+    if (d.pdf) { toast('Ce fichier est en réalité un PDF : ouverture comme PDF.'); await importPdfFiles([new File([f], title + '.pdf', { type: 'application/pdf', lastModified: f.lastModified })]); return; }
+    showImportProblem(f.name, d.msg);
   }
+}
+// Pourquoi un fichier ne s'ouvre pas : d'après ses premiers octets, pas au hasard.
+async function diagnoseImport(f, ext) {
+  const head = new Uint8Array(await f.slice(0, 8).arrayBuffer());
+  const is = (...b) => b.every((v, i) => head[i] === v);
+  const word = /^doc/.test(ext), quoi = word ? 'document Word' : 'classeur Excel', appli = word ? 'Word' : 'Excel';
+  if (!f.size) return { msg: `« ${f.name} » est vide (0 octet) : le fichier n'a jamais été écrit complètement. Cherchez une version précédente (voir ci-dessous).` };
+  if (is(0x25, 0x50, 0x44, 0x46)) return { pdf: true };
+  if (is(0xD0, 0xCF, 0x11, 0xE0)) return { msg: /^(docx|xlsx|xlsm)$/.test(ext)
+    ? `« ${f.name} » est protégé par un mot de passe (${appli} l'a chiffré). Ouvrez-le dans ${appli}, puis Fichier › Informations › Protéger › Chiffrer avec mot de passe : effacez le mot de passe, enregistrez, et ouvrez-le de nouveau dans Grimoire.`
+    : `« ${f.name} » est dans l'ancien format .${ext} : ouvrez-le dans ${appli} ou LibreOffice et enregistrez-le en .${word ? 'docx' : 'xlsx'}.` };
+  if (is(0x50, 0x4B)) return { msg: `« ${f.name} » est un ${quoi} endommagé ou incomplet (copie interrompue, téléchargement coupé). Essayez de l'ouvrir dans ${appli}, qui sait parfois le réparer, ou cherchez une version précédente.` };
+  const zero = head.every(v => v === 0);
+  return { msg: `« ${f.name} » n'est pas un vrai ${quoi} : ${zero ? 'il ne contient que des zéros' : 'son contenu n\'est ni du Word ni de l\'Excel (il contient d\'autres données, souvent des restes d\'autres fichiers du disque)'}. Ce n'est pas une protection : le fichier a été abîmé, en général par une copie ou un enregistrement interrompu (clé USB retirée trop tôt, coupure, mise en veille, synchronisation). Il ne peut pas être réparé tel quel, mais une version saine existe peut-être ailleurs (voir ci-dessous).` };
+}
+function showImportProblem(name, msg) {
+  const aide = [
+    'Grimoire : si ce fichier y a déjà été ouvert, il est dans la liste des documents ; Exporter › copie Word (.docx) en refait un fichier sain.',
+    'Windows : clic droit sur le fichier › Propriétés › Versions précédentes, ou la Corbeille, ou l\'historique OneDrive.',
+    'La personne qui vous l\'a envoyé, ou le courriel d\'origine.'
+  ];
+  let d = $('#importProblem');
+  if (!d) { d = document.createElement('dialog'); d.id = 'importProblem'; d.className = 'imp-pb'; document.body.appendChild(d); }
+  d.innerHTML = `<h2>Ce fichier ne peut pas être ouvert</h2><p>${esc(msg)}</p><p class="imp-t">Où retrouver une version saine :</p><ul>${aide.map(a => `<li>${esc(a)}</li>`).join('')}</ul><div class="set-acts"><button class="pbtn" type="button">Compris</button></div>`;
+  d.querySelector('button').addEventListener('click', () => d.close());
+  try { d.showModal(); } catch { toast(msg, true); }
 }
 function guessSep(t) { const l = t.split('\n')[0] || ''; return (l.match(/;/g) || []).length > (l.match(/,/g) || []).length ? ';' : (l.includes('\t') ? '\t' : ','); }
 
