@@ -851,3 +851,20 @@ body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-heigh
 .bureau-only{display:none}
 html.bureau .bureau-only{display:block}
 html.bureau .web-only{display:none}
+
+/* Barre de menus (Fichier, Édition, Affichage…) */
+.menubar{display:flex;align-items:center;gap:2px;flex:none;background:var(--chrome);color:var(--chrome-fg);padding:0 calc(var(--gr) - 4px) 4px calc(var(--gl) - 6px);border-bottom:1px solid var(--chrome-line);min-height:30px;user-select:none;overflow-x:auto;scrollbar-width:none}
+.menubar::-webkit-scrollbar{display:none}
+.mb-top{background:none;border:0;color:inherit;font:inherit;font-size:13.5px;padding:4px 9px;border-radius:6px;cursor:pointer;white-space:nowrap;opacity:.88}
+.mb-top:hover,.mb-top.on{background:color-mix(in srgb,var(--chrome-fg) 14%,transparent);opacity:1}
+body.m-phone .menubar{display:none}
+.mb-pop{position:fixed;z-index:80;min-width:250px;max-width:min(420px,calc(100vw - 8px));max-height:calc(100vh - 90px);overflow-y:auto;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.18),0 2px 6px rgba(0,0,0,.08);padding:5px}
+.mb-it{display:flex;align-items:center;gap:10px;width:100%;background:none;border:0;color:inherit;font:inherit;font-size:13.5px;text-align:left;padding:6px 10px;border-radius:6px;cursor:pointer}
+.mb-it .ic{width:16px;height:16px;flex:none;opacity:.7}
+.mb-it>span:nth-child(2){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mb-it kbd{font:11.5px var(--f-mono);opacity:.6;background:none;border:0;padding:0;margin-left:16px;white-space:nowrap}
+.mb-it .mb-arr{display:flex;opacity:.6}
+.mb-it:hover,.mb-it.on,.mb-it.kb{background:var(--accent-soft)}
+.mb-sep{height:1px;background:var(--line);margin:5px 6px}
+@media print{.menubar,.mb-pop{display:none!important}}
+body:not(.m-phone) .bar{border-bottom-color:transparent}
