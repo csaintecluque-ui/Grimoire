@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.17.3';
+const APP_VERSION = '1.17.4';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -8722,5 +8722,11 @@ $('#acOn').checked = AC.on; $('#acMine').value = AC.mine;
 $('#acOn').addEventListener('change', e => { AC.on = e.target.checked; ls.set('grim.autocorr', AC.on); toast(AC.on ? 'Correction automatique activée.' : 'Correction automatique désactivée.'); });
 $('#acMine').addEventListener('change', e => { AC.mine = e.target.value; ls.set('grim.autocorr.mine', AC.mine); AC_MINE = acMineMap(); toast('Remplacements enregistrés.'); });
 
-Store.init().then(() => { syncUI(); if (SY.cfg) syncNow(); scheduleReminders(); const nid = new URLSearchParams(location.search).get('note'); if (nid) { history.replaceState(null, '', location.pathname); focusNote(nid); } });
+Store.init().then(() => {
+  syncUI(); if (SY.cfg) syncNow(); scheduleReminders();
+  const q = new URLSearchParams(location.search), nid = q.get('note');
+  // ?ouvrir=… : adresse d'arrivée des fichiers ouverts depuis l'ordinateur (une par type, pour avoir une icône par type) ; rien à faire ici, le fichier arrive par launchQueue
+  if (nid || q.has('ouvrir')) history.replaceState(null, '', location.pathname);
+  if (nid) focusNote(nid);
+});
 })();

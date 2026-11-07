@@ -16,16 +16,34 @@
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
+  "launch_handler": { "client_mode": "focus-existing" },
   "file_handlers": [
     {
-      "action": "./",
+      "action": "./?ouvrir=document",
+      "accept": { "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"] },
+      "icons": [{ "src": "icons/fichier-document.png", "sizes": "256x256", "type": "image/png" }],
+      "launch_type": "single-client"
+    },
+    {
+      "action": "./?ouvrir=classeur",
       "accept": {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-        "application/vnd.ms-excel.sheet.macroEnabled.12": [".xlsm"],
-        "text/csv": [".csv"],
-        "application/pdf": [".pdf"]
-      }
+        "application/vnd.ms-excel.sheet.macroEnabled.12": [".xlsm"]
+      },
+      "icons": [{ "src": "icons/fichier-classeur.png", "sizes": "256x256", "type": "image/png" }],
+      "launch_type": "single-client"
+    },
+    {
+      "action": "./?ouvrir=csv",
+      "accept": { "text/csv": [".csv"] },
+      "icons": [{ "src": "icons/fichier-csv.png", "sizes": "256x256", "type": "image/png" }],
+      "launch_type": "single-client"
+    },
+    {
+      "action": "./?ouvrir=pdf",
+      "accept": { "application/pdf": [".pdf"] },
+      "icons": [{ "src": "icons/fichier-pdf.png", "sizes": "256x256", "type": "image/png" }],
+      "launch_type": "single-client"
     }
   ]
 }
