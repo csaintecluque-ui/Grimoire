@@ -50,9 +50,10 @@
     <section class="view home" id="home">
       <div class="home-in">
         <div class="hello">
-          <h1 id="greet">Bonsoir, Cyril.</h1>
+          <h1 id="greet">Bonjour.</h1>
           <p id="today"></p>
         </div>
+        <form class="banner who-ask" id="whoAsk" hidden><span>Comment vous appelez-vous ? Grimoire vous saluera et signera vos commentaires de ce prénom, sur cet appareil.</span><span class="who-f"><input id="whoIn" type="text" autocomplete="given-name" placeholder="Prénom" maxlength="40" aria-label="Prénom"><button class="pbtn" type="submit">OK</button><button class="lnk" type="button" id="whoLater">Plus tard</button></span></form>
         <div class="banner" id="updBanner" hidden><span>Grimoire a été mis à jour.</span><button class="pbtn" id="updBtn">Recharger</button></div>
         <div class="banner" id="installBanner" hidden><span>Installez Grimoire pour l'ouvrir comme une appli, même hors connexion.</span><button class="pbtn install-btn">Installer</button></div>
         <div class="sync-warn" id="syncWarn" hidden><p>Sauvegarde en ligne désactivée : vos notes et documents ne sont gardés que sur cet appareil, et peuvent disparaître (fenêtre Notion, navigation privée, nettoyage du navigateur).</p><div class="sync-wa"><button type="button" class="pbtn" id="syncGo">Activer la sauvegarde</button><button type="button" class="lnk" id="syncLater">Plus tard</button></div></div>
@@ -343,6 +344,12 @@
       <div class="home-in">
         <div class="hello"><h1>Réglages</h1><p>Ces réglages restent sur cet appareil.</p></div>
         <div class="set-card">
+          <h2>Utilisateur</h2>
+          <p class="set-note">Propre à cet appareil : sur l'ordinateur d'un autre membre de la famille, mettez son prénom. Sert à l'accueil, aux commentaires, au suivi des modifications et comme auteur des fichiers Word.</p>
+          <div class="set-row who-row"><label class="field" for="meName"><span>Prénom</span><input id="meName" type="text" autocomplete="given-name" maxlength="40" placeholder="Prénom"></label>
+            <label class="field who-ini" for="meIni"><span>Initiales</span><input id="meIni" type="text" maxlength="4" placeholder="Initiales"></label></div>
+        </div>
+        <div class="set-card">
           <h2>Affichage</h2>
           <div class="set-row"><div><b>Mode</b><small>« Auto » choisit selon l'appareil. Le bouton en haut bascule à tout moment.</small></div>
             <div class="seg" id="segMode" role="group" aria-label="Mode d'affichage"><button data-v="auto">Auto</button><button data-v="pc">PC</button><button data-v="phone">Téléphone</button></div></div>
@@ -366,7 +373,7 @@
           <h2>Correction automatique</h2>
           <label class="ac-tg"><input type="checkbox" id="acOn"> <span>Corriger pendant la frappe (documents, notes, texte des cellules)</span></label>
           <p class="set-note">Comme dans Word : majuscule en début de phrase, accents et apostrophes oubliés (deja → déjà, jai → j’ai, l’equipe → l’équipe), fautes de frappe courantes, DEux MAjuscules, espace insécable avant ; : ! ?, guillemets « », apostrophe ’ et points de suspension. Les sigles en majuscules (CA, PSA…) et les formules ne sont jamais touchés. <b>Ctrl+Z</b> juste après une correction l'annule, et ce mot n'est plus corrigé. Les mots mal orthographiés restent soulignés par le correcteur du téléphone ou du navigateur.</p>
-          <label class="field" for="acMine"><span>Mes remplacements</span><textarea id="acMine" rows="4" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="msm = Mesdames, Messieurs,&#10;cdt = Cordialement,&#10;csc = Cyril SAINTE-CLUQUE"></textarea></label>
+          <label class="field" for="acMine"><span>Mes remplacements</span><textarea id="acMine" rows="4" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="msm = Mesdames, Messieurs,&#10;cdt = Cordialement,&#10;sig = Prénom NOM"></textarea></label>
           <p class="set-note">Un remplacement par ligne : « abréviation = texte ». Il s'applique dès que vous tapez un espace ou une ponctuation après l'abréviation.</p>
         </div>
         <div class="set-card" id="syncCard">

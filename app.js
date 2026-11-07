@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.17.5';
+const APP_VERSION = '1.17.6';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -410,9 +410,22 @@ $('#titleIn').addEventListener('keydown', e => { if (e.key === 'Enter') { e.prev
 /* =========================================================
    Accueil
    ========================================================= */
+// Utilisateur de cet appareil (chaque appareil a le sien : il n'est pas synchronisé)
+const userName = () => String((ls.get('grim.author', {}) || {}).name || '').trim();
+const initialsOf = n => String(n || '').trim().split(/[\s-]+/).filter(Boolean).map(w => w[0].toUpperCase()).join('').slice(0, 4);
+function setUser(name, ini) {
+  name = String(name || '').trim().slice(0, 40);
+  ini = String(ini || '').trim().toUpperCase().slice(0, 4) || initialsOf(name);
+  if (name) ls.set('grim.author', { name, ini }); else { try { localStorage.removeItem('grim.author'); } catch {} }
+  renderGreet();
+}
+function renderGreet() {
+  const h = new Date().getHours(), n = userName();
+  $('#greet').textContent = (h >= 18 || h < 5 ? 'Bonsoir' : 'Bonjour') + (n ? ', ' + n : '') + '.';
+  const ask = $('#whoAsk'); if (ask) ask.hidden = !!n;
+}
 (() => {
-  const h = new Date().getHours();
-  $('#greet').textContent = (h >= 18 || h < 5 ? 'Bonsoir' : 'Bonjour') + ', Cyril.';
+  renderGreet();
   const d = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
   $('#today').textContent = d.charAt(0).toUpperCase() + d.slice(1);
 })();
@@ -6434,7 +6447,7 @@ async function saveFile(filename, data) {
    Commentaires (documents) : dans la marge de droite, comme Word et Google Docs
    ========================================================= */
 const CM = { active: null, edit: null, showDone: false, panel: false };
-const cmAuthor = () => Object.assign({ name: 'Cyril', ini: 'CSC' }, ls.get('grim.author', {}));
+const cmAuthor = () => { const n = userName() || 'Utilisateur', a = ls.get('grim.author', {}) || {}; return { name: n, ini: a.ini || initialsOf(n) || 'U' }; };
 const cmList = () => (state.cur.comments ||= []);
 const cmFind = id => (state.cur && state.cur.comments || []).find(c => c.id === id);
 const cmAnchors = id => [...ed.querySelectorAll('[data-c]')].filter(el => el.dataset.c === id);
@@ -7264,7 +7277,7 @@ async function exportDocx() {
   if (hasHdr) zip.file('word/header1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr ${D_NS}><w:p><w:pPr><w:pStyle w:val="Header"/><w:jc w:val="center"/></w:pPr>${wRun(P.header)}</w:p></w:hdr>`);
   if (hasFtr) zip.file('word/footer1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr ${D_NS}>${ftrParas}</w:ftr>`);
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
-  zip.file('docProps/core.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEsc(state.cur.title || '')}</dc:title><dc:creator>CSC</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`);
+  zip.file('docProps/core.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEsc(state.cur.title || '')}</dc:title><dc:creator>${xmlEsc(cmAuthor().name)}</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`);
   const sect = `<w:sectPr>${SECT_COLS ? '<w:type w:val="continuous"/>' : ''}${hasHdr ? '<w:headerReference w:type="default" r:id="rIdHdr"/>' : ''}${hasFtr ? '<w:footerReference w:type="default" r:id="rIdFtr"/>' : ''}<w:pgSz w:w="${pgW}" w:h="${pgH}"${land ? ' w:orient="landscape"' : ''}/><w:pgMar w:top="${mar}" w:right="${mar}" w:bottom="${mar}" w:left="${mar}" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>`;
   zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${D_NS}><w:body>${body}${sect}</w:body></w:document>`);
   const bytes = await zip.generateAsync({ type: 'uint8array' });
@@ -8532,6 +8545,7 @@ async function openSettings() {
 function segSet(id, v) { $$('#' + id + ' button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === v))); }
 async function renderSettings() {
   segSet('segMode', MODE); segSet('segTheme', ls.get('grim.theme', 'auto')); segSet('segProv', AI.provider);
+  { const a = ls.get('grim.author', {}) || {}; $('#meName').value = a.name || ''; $('#meIni').value = a.ini || ''; $('#meIni').placeholder = initialsOf(a.name) || 'Initiales'; }
   $('#aiKey').value = AI.key; $('#aiModel').value = AI.model; $('#aiMe').value = ls.get('grim.me', '') || ''; $('#aiModel').placeholder = AI_DEF[AI.provider];
   $('#aiModels').innerHTML = AI_SUGG[AI.provider].map(m => `<option value="${m}">`).join('');
   $('#appVer').textContent = APP_VERSION;
@@ -8551,6 +8565,10 @@ $('#segTheme').addEventListener('click', e => { const b = e.target.closest('[dat
 $('#segProv').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (!b) return; AI.provider = b.dataset.v; AI.model = ''; ls.set('grim.ai', AI); $('#aiRes').textContent = ''; renderSettings(); });
 $('#aiKey').addEventListener('input', e => { AI.key = e.target.value.trim(); ls.set('grim.ai', AI); });
 $('#aiMe').addEventListener('input', e => ls.set('grim.me', e.target.value));
+$('#meName').addEventListener('change', () => { setUser($('#meName').value, ''); $('#meIni').value = (ls.get('grim.author', {}) || {}).ini || ''; toast(userName() ? 'Bonjour, ' + userName() + ' !' : 'Prénom retiré.'); });
+$('#meIni').addEventListener('change', () => { setUser($('#meName').value, $('#meIni').value); $('#meIni').value = (ls.get('grim.author', {}) || {}).ini || ''; });
+$('#whoAsk').addEventListener('submit', e => { e.preventDefault(); const v = $('#whoIn').value.trim(); if (!v) return; setUser(v, ''); toast('Bonjour, ' + userName() + ' !'); });
+$('#whoLater').addEventListener('click', () => { $('#whoAsk').hidden = true; });
 $('#aiModel').addEventListener('input', e => { AI.model = e.target.value.trim(); ls.set('grim.ai', AI); });
 $('#aiTest').addEventListener('click', async () => {
   const r = $('#aiRes'); r.className = 'set-res'; r.textContent = 'Test en cours…';
