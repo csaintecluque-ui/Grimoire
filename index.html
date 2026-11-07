@@ -50,9 +50,10 @@
     <section class="view home" id="home">
       <div class="home-in">
         <div class="hello">
-          <h1 id="greet">Bonsoir, Cyril.</h1>
+          <h1 id="greet">Bonjour.</h1>
           <p id="today"></p>
         </div>
+        <form class="banner who-ask" id="whoAsk" hidden><span>Comment vous appelez-vous ? Grimoire vous saluera et signera vos commentaires de ce prénom, sur cet appareil.</span><span class="who-f"><input id="whoIn" type="text" autocomplete="given-name" placeholder="Prénom" maxlength="40" aria-label="Prénom"><button class="pbtn" type="submit">OK</button><button class="lnk" type="button" id="whoLater">Plus tard</button></span></form>
         <div class="banner" id="updBanner" hidden><span>Grimoire a été mis à jour.</span><button class="pbtn" id="updBtn">Recharger</button></div>
         <div class="banner" id="installBanner" hidden><span>Installez Grimoire pour l'ouvrir comme une appli, même hors connexion.</span><button class="pbtn install-btn">Installer</button></div>
         <div class="sync-warn" id="syncWarn" hidden><p>Sauvegarde en ligne désactivée : vos notes et documents ne sont gardés que sur cet appareil, et peuvent disparaître (fenêtre Notion, navigation privée, nettoyage du navigateur).</p><div class="sync-wa"><button type="button" class="pbtn" id="syncGo">Activer la sauvegarde</button><button type="button" class="lnk" id="syncLater">Plus tard</button></div></div>
@@ -343,6 +344,12 @@
       <div class="home-in">
         <div class="hello"><h1>Réglages</h1><p>Ces réglages restent sur cet appareil.</p></div>
         <div class="set-card">
+          <h2>Utilisateur</h2>
+          <p class="set-note">Propre à cet appareil : sur l'ordinateur d'un autre membre de la famille, mettez son prénom. Sert à l'accueil, aux commentaires, au suivi des modifications et comme auteur des fichiers Word.</p>
+          <div class="set-row who-row"><label class="field" for="meName"><span>Prénom</span><input id="meName" type="text" autocomplete="given-name" maxlength="40" placeholder="Prénom"></label>
+            <label class="field who-ini" for="meIni"><span>Initiales</span><input id="meIni" type="text" maxlength="4" placeholder="Initiales"></label></div>
+        </div>
+        <div class="set-card">
           <h2>Affichage</h2>
           <div class="set-row"><div><b>Mode</b><small>« Auto » choisit selon l'appareil. Le bouton en haut bascule à tout moment.</small></div>
             <div class="seg" id="segMode" role="group" aria-label="Mode d'affichage"><button data-v="auto">Auto</button><button data-v="pc">PC</button><button data-v="phone">Téléphone</button></div></div>
@@ -366,7 +373,7 @@
           <h2>Correction automatique</h2>
           <label class="ac-tg"><input type="checkbox" id="acOn"> <span>Corriger pendant la frappe (documents, notes, texte des cellules)</span></label>
           <p class="set-note">Comme dans Word : majuscule en début de phrase, accents et apostrophes oubliés (deja → déjà, jai → j’ai, l’equipe → l’équipe), fautes de frappe courantes, DEux MAjuscules, espace insécable avant ; : ! ?, guillemets « », apostrophe ’ et points de suspension. Les sigles en majuscules (CA, PSA…) et les formules ne sont jamais touchés. <b>Ctrl+Z</b> juste après une correction l'annule, et ce mot n'est plus corrigé. Les mots mal orthographiés restent soulignés par le correcteur du téléphone ou du navigateur.</p>
-          <label class="field" for="acMine"><span>Mes remplacements</span><textarea id="acMine" rows="4" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="msm = Mesdames, Messieurs,&#10;cdt = Cordialement,&#10;csc = Cyril SAINTE-CLUQUE"></textarea></label>
+          <label class="field" for="acMine"><span>Mes remplacements</span><textarea id="acMine" rows="4" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="msm = Mesdames, Messieurs,&#10;cdt = Cordialement,&#10;sig = Prénom NOM"></textarea></label>
           <p class="set-note">Un remplacement par ligne : « abréviation = texte ». Il s'applique dès que vous tapez un espace ou une ponctuation après l'abréviation.</p>
         </div>
         <div class="set-card" id="syncCard">
@@ -391,24 +398,33 @@
           <h2>Application</h2>
           <p class="set-note" id="instState"></p>
           <div class="set-acts"><button class="pbtn install-btn" hidden>Installer Grimoire</button></div>
-          <details class="sync-help"><summary>Installer sur l'ordinateur (hors connexion)</summary><ol>
+          <div class="bureau-only">
+            <p class="set-note">Fichiers de l'ordinateur : les .docx, .xlsx, .csv et .pdf s'ouvrent avec Grimoire d'un double-clic, avec une icône selon leur type, et Enregistrer (Ctrl+S) met à jour le fichier d'origine.</p>
+            <div class="set-acts"><button class="pbtn" id="bureauDefaut" type="button">Ouvrir ces fichiers avec Grimoire par défaut</button><button class="pbtn ghost" id="bureauRetablir" type="button" hidden>Revenir aux applis d'avant</button></div>
+            <p class="set-res" id="bureauRes"></p>
+          </div>
+          <div class="web-only set-dl">
+            <p class="set-note"><b>Appli de bureau</b> pour Windows et Linux : un installateur à télécharger, comme LibreOffice. Les .docx, .xlsx, .csv et .pdf s'ouvrent d'un double-clic avec leur icône, et les mises à jour arrivent toutes seules.</p>
+            <div class="set-acts"><a class="pbtn" href="https://github.com/csaintecluque-ui/Grimoire/releases/latest" target="_blank" rel="noopener" data-ic="download"><span>Télécharger l'appli de bureau</span></a></div>
+          </div>
+          <details class="sync-help web-only"><summary>Installer sur l'ordinateur (hors connexion)</summary><ol>
             <li>Ouvrir <b>csaintecluque-ui.github.io/Grimoire</b> dans <b>Chrome, Chromium, Edge ou Brave</b>. Firefox ne sait pas installer d'applis web sous Linux.</li>
             <li>Cliquer sur le bouton <b>Installer Grimoire</b> ci-dessus, ou sur l'icône d'installation au bout de la barre d'adresse (dans Chrome, elle est aussi dans le menu ⋮ → <i>Caster, enregistrer et partager</i>).</li>
             <li>Grimoire apparaît dans le menu des applications (rubrique Bureautique ou Applications Chrome) et peut être épinglé au tableau de bord. Il s'ouvre et fonctionne sans connexion ; la sauvegarde en ligne reprend au retour du réseau.</li>
           </ol></details>
-          <details class="sync-help"><summary>Ouvrir les .docx, .xlsx, .csv et .pdf avec Grimoire</summary><ol>
+          <details class="sync-help web-only"><summary>Ouvrir les .docx, .xlsx, .csv et .pdf avec Grimoire</summary><ol>
             <li>Grimoire doit d'abord être installé (ci-dessus).</li>
             <li>Dans le gestionnaire de fichiers (Nemo sous Linux Mint) : clic droit sur un fichier → <i>Ouvrir avec</i> → <b>Grimoire</b>. Au premier fichier, le navigateur demande l'autorisation : cocher <i>Ne plus demander</i> puis <i>Ouvrir</i>.</li>
             <li>Pour que le double-clic l'ouvre toujours dans Grimoire : clic droit → <i>Propriétés</i> → onglet <i>Ouvrir avec</i> → choisir Grimoire → <b>Définir par défaut</b>. À faire une fois par type (.docx, .xlsx…). Sous Windows : clic droit → <i>Ouvrir avec</i> → <i>Choisir une autre application</i> → Grimoire → <i>Toujours</i>.</li>
             <li>Le fichier ouvert est copié dans Grimoire : vos modifications y sont enregistrées. Pour remettre à jour le fichier d'origine, <b>Exporter</b> en .docx ou .xlsx par-dessus.</li>
           </ol></details>
-          <details class="sync-help"><summary>Icônes des fichiers ouverts avec Grimoire</summary>
-            <p class="set-note">Une fois Grimoire choisi par défaut, les fichiers prennent une icône au sceau selon leur type : DOC, XLS, CSV, PDF. Sous Windows, sans ce petit script, ils apparaissent en pages blanches. À lancer une fois sur chaque ordinateur ; sans droit administrateur, et réversible.</p>
-            <div class="set-acts"><a class="pbtn" href="windows/grimoire-icones.ps1" download data-ic="download"><span>Script Windows</span></a><a class="pbtn ghost" href="linux/grimoire-icones.sh" download data-ic="download"><span>Script Linux</span></a></div>
+          <details class="sync-help web-only"><summary>Installer Grimoire pour les fichiers de l'ordinateur (icônes et appli par défaut)</summary>
+            <p class="set-note">Une fois Grimoire choisi par défaut, les fichiers prennent une icône au sceau selon leur type : DOC, XLS, CSV, PDF. Sous Windows, Edge et Chrome ne le font pas eux-mêmes : le fichier d'installation s'en charge, comme l'installateur de LibreOffice. Une fois par ordinateur ; sans droit administrateur, et réversible.</p>
+            <div class="set-acts"><a class="pbtn" href="windows/grimoire-installation.cmd" download data-ic="download"><span>Installation Windows</span></a><a class="pbtn ghost" href="linux/grimoire-installation.sh" download data-ic="download"><span>Installation Linux</span></a></div>
             <ol>
-              <li><b>Windows</b> : clic droit sur <i>grimoire-icones.ps1</i> → <i>Exécuter avec PowerShell</i> (accepter l'avertissement). Puis, une fois par type : clic droit sur un .docx → <i>Ouvrir avec</i> → <i>Choisir une autre application</i> → <b>Grimoire · Document</b> → <i>Toujours</i> ; un .xlsx → <b>Grimoire · Classeur</b>.</li>
-              <li><b>Linux</b> : choisir d'abord Grimoire par défaut pour les .docx, .xlsx…, puis dans un terminal : <code>bash ~/Téléchargements/grimoire-icones.sh</code>. Fermer et rouvrir le gestionnaire de fichiers (<code>nemo -q</code>).</li>
-              <li>Pour retirer : <code>-Retirer</code> (Windows) ou <code>--retirer</code> (Linux) à la fin de la commande.</li>
+              <li><b>Windows</b> (une fois par PC, Grimoire installé depuis Edge ou Chrome) : double-cliquer <i>grimoire-installation.cmd</i>. Si Windows affiche « Windows a protégé votre ordinateur » : <i>Informations complémentaires</i> → <i>Exécuter quand même</i>. La page Grimoire des Paramètres s'ouvre : <b>Définir par défaut</b>. C'est tout.</li>
+              <li><b>Linux</b> (une fois par PC, Grimoire installé depuis Chromium, Chrome, Brave ou Edge) : dans un terminal, <code>bash ~/Téléchargements/grimoire-installation.sh</code>. Grimoire devient l'appli par défaut des .docx, .xlsx, .csv et .pdf, avec leurs icônes. Puis fermer et rouvrir le gestionnaire de fichiers (<code>nemo -q</code>). Rien d'autre à faire.</li>
+              <li>Pour retirer : <code>grimoire-installation.cmd -Retirer</code> (Windows) ou <code>--retirer</code> (Linux, remet aussi les applis d'avant) à la fin de la commande.</li>
               <li>Mac, téléphone, tablette : le navigateur ne permet pas de changer ces icônes.</li>
             </ol>
           </details>

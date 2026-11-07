@@ -1,0 +1,143 @@
+{
+  "name": "grimoire",
+  "productName": "Grimoire",
+  "version": "1.18.0",
+  "description": "Suite bureautique personnelle : documents, classeurs et formules, PDF.",
+  "main": "main.js",
+  "desktopName": "grimoire.desktop",
+  "author": {
+    "name": "Cyril SAINTE-CLUQUE",
+    "email": "csaintecluque-ui@users.noreply.github.com"
+  },
+  "homepage": "https://csaintecluque-ui.github.io/Grimoire/",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "scripts": {
+    "preparer": "node preparer.js",
+    "start": "node preparer.js && electron .",
+    "windows": "node preparer.js && electron-builder --win --publish never",
+    "linux": "node preparer.js && electron-builder --linux --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
+  "devDependencies": {
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "io.github.csaintecluque-ui.grimoire",
+    "productName": "Grimoire",
+    "copyright": "Cyril SAINTE-CLUQUE",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "app/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../linux/grimoire-installation.sh",
+        "to": "grimoire-installation.sh"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Grimoire-Installation-${version}.${ext}",
+      "fileAssociations": [
+        {
+          "ext": "docx",
+          "name": "Grimoire.Document",
+          "description": "Document Word",
+          "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "icon": "fichier-document",
+          "role": "Editor"
+        },
+        {
+          "ext": "xlsx",
+          "name": "Grimoire.Classeur",
+          "description": "Classeur Excel",
+          "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "icon": "fichier-classeur",
+          "role": "Editor"
+        },
+        {
+          "ext": "xlsm",
+          "name": "Grimoire.Classeur",
+          "description": "Classeur Excel avec macros",
+          "mimeType": "application/vnd.ms-excel.sheet.macroEnabled.12",
+          "icon": "fichier-classeur",
+          "role": "Editor"
+        },
+        {
+          "ext": "csv",
+          "name": "Grimoire.CSV",
+          "description": "Fichier CSV",
+          "mimeType": "text/csv",
+          "icon": "fichier-csv",
+          "role": "Editor"
+        },
+        {
+          "ext": "pdf",
+          "name": "Grimoire.PDF",
+          "description": "Document PDF",
+          "mimeType": "application/pdf",
+          "icon": "fichier-pdf",
+          "role": "Editor"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Grimoire",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "Office",
+      "executableName": "grimoire",
+      "synopsis": "Suite bureautique personnelle",
+      "artifactName": "grimoire_${version}_amd64.${ext}",
+      "syncDesktopName": true,
+      "mimeTypes": [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel.sheet.macroEnabled.12",
+        "text/csv",
+        "application/pdf"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "csaintecluque-ui",
+        "repo": "Grimoire",
+        "releaseType": "draft"
+      }
+    ]
+  }
+}

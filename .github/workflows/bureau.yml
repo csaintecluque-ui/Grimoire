@@ -1,0 +1,102 @@
+# Grimoire — construit l'appli de bureau (.exe Windows, .deb Linux) et la publie.
+# - Pull request : construction pour vérifier ; les installateurs sont dans l'onglet
+#   Actions (« Artifacts ») pour essayer avant de fusionner.
+# - main : si la version de app.js (APP_VERSION) n'a pas encore de release, crée la
+#   release vX.Y.Z avec les installateurs ; les applis installées se mettent à jour.
+name: Appli de bureau
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bureau-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publier: ${{ steps.v.outputs.publier }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(grep -oP "APP_VERSION = '\K[0-9]+\.[0-9]+\.[0-9]+" app.js)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" != "pull_request" ] && ! gh release view "v$V" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "publier=true" >> "$GITHUB_OUTPUT"; echo "Version $V : nouvelle release"
+          else
+            echo "publier=false" >> "$GITHUB_OUTPUT"; echo "Version $V : construction de vérification seulement"
+          fi
+
+  construire:
+    needs: version
+    if: github.event_name == 'pull_request' || needs.version.outputs.publier == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            cible: --win
+          - os: ubuntu-latest
+            cible: --linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: bureau
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bureau/package-lock.json
+      - run: npm ci
+      - run: node preparer.js
+      - run: npx electron-builder ${{ matrix.cible }} --publish never
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grimoire-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            bureau/dist/*.exe
+            bureau/dist/*.exe.blockmap
+            bureau/dist/*.deb
+            bureau/dist/latest*.yml
+
+  publier:
+    needs: [version, construire]
+    if: needs.version.outputs.publier == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: paquets
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.version.outputs.version }}
+        run: |
+          ls -la paquets
+          cat > notes.md <<EOF
+          ## Installer Grimoire $V
+
+          - **Windows** : télécharger \`Grimoire-Installation-$V.exe\` et l'ouvrir. Au premier lancement, Windows peut afficher « Windows a protégé votre ordinateur » : *Informations complémentaires* → *Exécuter quand même*.
+          - **Linux (Mint, Ubuntu, Debian)** : télécharger \`grimoire_${V}_amd64.deb\` et l'ouvrir (double-clic), puis *Installer le paquet*.
+
+          Au premier lancement, Grimoire propose de devenir l'appli par défaut des .docx, .xlsx, .csv et .pdf. Les mises à jour suivantes arrivent toutes seules.
+
+          Documents de la version navigateur : *Réglages → Sauvegarder tout* dans le navigateur, puis *Réglages → Restaurer une sauvegarde* dans l'appli.
+          EOF
+          gh release create "v$V" paquets/* --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "Grimoire $V" --notes-file notes.md --latest

@@ -1,22 +1,27 @@
-﻿<#
-  Grimoire - icônes des fichiers sous Windows
-  -------------------------------------------
-  Chrome et Edge enregistrent Grimoire pour ouvrir les .docx, .xlsx, .csv et .pdf,
-  mais ne donnent aucune icône de fichier à Windows : l'Explorateur affiche alors
-  des pages blanches, toutes identiques.
+<# : Grimoire - double-cliquer ce fichier (Windows)
+@echo off
+set "GRIM_SELF=%~f0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create([IO.File]::ReadAllText($env:GRIM_SELF, [Text.Encoding]::UTF8))) %*"
+exit /b
+#>
+<#
+  Grimoire - fichiers ouverts avec Grimoire sous Windows
+  ------------------------------------------------------
+  Double-cliquer ce fichier (grimoire-installation.cmd), une fois par PC,
+  après avoir installé Grimoire depuis Edge ou Chrome.
 
-  Ce script, à lancer une fois (clic droit > Exécuter avec PowerShell) :
+  Comme l'installateur de LibreOffice, il :
     1. copie quatre icônes (DOC, XLS, CSV, PDF) dans %LOCALAPPDATA%\Grimoire\icones ;
     2. crée quatre types de fichiers « Grimoire · Document / Classeur / CSV / PDF »
-       qui ouvrent Grimoire exactement comme le fait Chrome ou Edge, avec leur icône ;
-    3. les propose dans « Ouvrir avec » pour les extensions concernées.
+       qui ouvrent Grimoire exactement comme le fait Edge ou Chrome, avec leur icône ;
+    3. déclare Grimoire dans Paramètres > Applications > Applications par défaut,
+       et ouvre cette page : un clic sur « Définir par défaut » et c'est fini.
 
-  Ensuite, une fois par type : clic droit sur un fichier > Ouvrir avec >
-  Choisir une autre application > « Grimoire · Document » (ou Classeur…) >
-  cocher « Toujours utiliser cette application » > OK.
+  Windows interdit à tout programme (LibreOffice compris) de se choisir lui-même
+  comme appli par défaut : ce dernier clic reste à faire par l'utilisateur.
 
   Aucun droit administrateur : tout est écrit dans le profil de l'utilisateur
-  (HKCU). Pour tout retirer : relancer le script avec le paramètre -Retirer.
+  (HKCU). Pour tout retirer : grimoire-installation.cmd -Retirer
 #>
 param([switch]$Retirer)
 
@@ -25,6 +30,8 @@ $marque  = 'Grimoire-icones'
 $dossier = Join-Path $env:LOCALAPPDATA 'Grimoire\icones'
 $hkcu    = [Microsoft.Win32.Registry]::CurrentUser
 $classes = 'Software\Classes'
+$capCle  = 'Software\Grimoire-icones\Capabilities'
+$regApps = 'Software\RegisteredApplications'
 
 $types = @(
   @{ Id = 'Grimoire.Document'; Appli = 'Grimoire · Document'; Libelle = 'Document Grimoire';    Icone = 'document'; Ext = @('.docx') },
@@ -100,7 +107,29 @@ function Retirer-Tout {
       if ($owp -and ($owp.GetValueNames() -contains $t.Id)) { $owp.DeleteValue($t.Id) }
     }
   }
+  $ra = $hkcu.OpenSubKey($regApps, $true)
+  if ($ra) { foreach ($n in $ra.GetValueNames()) { if ([string]$ra.GetValue($n) -eq $capCle) { $ra.DeleteValue($n); Write-Host "  - appli « $n » retirée des applications par défaut" } } }
+  $hkcu.DeleteSubKeyTree('Software\Grimoire-icones', $false)
   if (Test-Path -LiteralPath $dossier) { Remove-Item -LiteralPath $dossier -Recurse -Force }
+}
+
+# Déclare Grimoire comme une vraie appli Windows (comme LibreOffice) : il apparaît dans
+# Paramètres > Applications par défaut, avec la liste de ses types de fichiers.
+function Declarer-Appli($srcApp) {
+  $hkcu.DeleteSubKeyTree('Software\Grimoire-icones', $false)
+  $cap = $hkcu.CreateSubKey($capCle)
+  $cap.SetValue('ApplicationName', 'Grimoire')
+  $cap.SetValue('ApplicationDescription', 'Suite bureautique personnelle : documents, classeurs, PDF.')
+  $icoApp = [string]$srcApp.GetValue('ApplicationIcon')
+  if ($icoApp) { $cap.SetValue('ApplicationIcon', $icoApp) }
+  $fa = $hkcu.CreateSubKey("$capCle\FileAssociations")
+  foreach ($t in $types) { foreach ($ext in $t.Ext) { $fa.SetValue($ext, $t.Id) } }
+  $ra = $hkcu.CreateSubKey($regApps)
+  $nom = 'Grimoire'
+  $deja = [string]$ra.GetValue($nom)
+  if ($deja -and $deja -ne $capCle) { $nom = 'Grimoire (fichiers)' }
+  $ra.SetValue($nom, $capCle)
+  return $nom
 }
 
 Write-Host ''
@@ -119,7 +148,7 @@ try {
     if (-not $source) {
       Write-Host '  Grimoire n''est pas trouvé comme appli installée sur ce PC.' -ForegroundColor Red
       Write-Host '  Installe-le d''abord depuis Chrome ou Edge (icône d''installation dans la barre d''adresse),'
-      Write-Host '  puis relance ce script.'
+      Write-Host '  puis relance ce fichier.'
     }
     else {
       Write-Host "  Appli Grimoire trouvée (type $source)."
@@ -158,14 +187,25 @@ try {
         Write-Host "  + $($t.Appli)  ($($t.Ext -join ', '))"
       }
 
+      $nomAppli = Declarer-Appli $srcApp
       Rafraichir-Explorateur
       Write-Host ''
-      Write-Host '  Terminé. Dernière étape, une fois par type de fichier :' -ForegroundColor Green
-      Write-Host '    clic droit sur un .docx > Ouvrir avec > Choisir une autre application'
-      Write-Host '    > « Grimoire · Document » > Toujours (ou cocher « Toujours utiliser… »).'
-      Write-Host '    Pareil avec un .xlsx > « Grimoire · Classeur » (et .csv / .pdf si tu veux).'
+      Write-Host '  Presque fini : il reste un clic, que Windows réserve à l''utilisateur.' -ForegroundColor Green
       Write-Host ''
-      Write-Host '  Si l''appli Grimoire est désinstallée puis réinstallée, relance ce script.'
+      $build = 0; try { $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber } catch {}
+      if ($build -ge 22000) {
+        Write-Host '  La page « Grimoire » des Paramètres Windows va s''ouvrir :'
+        Write-Host '    cliquer « Définir par défaut » en haut de la page.'
+        Write-Host '    (S''il n''y est pas : cliquer .docx puis « Grimoire · Document », .xlsx puis « Grimoire · Classeur ».)'
+        Start-Process ('ms-settings:defaultapps?registeredAppUser=' + [uri]::EscapeDataString($nomAppli))
+      }
+      else {
+        Write-Host '  Windows 10 : clic droit sur un .docx > Ouvrir avec > Choisir une autre application'
+        Write-Host '    > « Grimoire · Document » > cocher « Toujours utiliser cette application » > OK.'
+        Write-Host '    Pareil avec un .xlsx > « Grimoire · Classeur » (et .csv / .pdf si tu veux).'
+      }
+      Write-Host ''
+      Write-Host '  Si l''appli Grimoire est désinstallée puis réinstallée, relance ce fichier.'
     }
   }
 }

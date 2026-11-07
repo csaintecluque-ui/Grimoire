@@ -1,38 +1,46 @@
 #!/usr/bin/env bash
-# Grimoire - icônes des fichiers sous Linux
-# -----------------------------------------
-# Donne aux fichiers ouverts par Grimoire une icône à son sceau, différente
-# selon le type (DOC, XLS, CSV, PDF), dans Nemo, Nautilus, Dolphin, Thunar…
+# Grimoire - installation des fichiers sous Linux
+# ------------------------------------------------
+# Une commande, une fois par ordinateur, après avoir installé Grimoire depuis
+# Chromium, Chrome, Brave ou Edge :
 #
-# Par défaut, seuls les types dont Grimoire est l'appli par défaut changent
-# d'icône (comme sous Windows). Rien n'est écrit en dehors du dossier personnel.
+#   bash ~/Téléchargements/grimoire-installation.sh
 #
-#   bash grimoire-icones.sh            installer
-#   bash grimoire-icones.sh --tout     icônes Grimoire pour les 5 types, quelle que soit l'appli par défaut
-#   bash grimoire-icones.sh --retirer  tout retirer
-#   bash grimoire-icones.sh --diagnostic  vérifier ce que le bureau voit (appli par défaut, thème, icône résolue)
+# Comme l'installateur de LibreOffice :
+#   - Grimoire devient l'appli par défaut des .docx, .xlsx, .xlsm, .csv et .pdf
+#     (les applis d'avant sont notées, pour pouvoir revenir en arrière) ;
+#   - ces fichiers prennent une icône au sceau selon leur type (DOC, XLS, CSV,
+#     PDF) dans Nemo, Nautilus, Dolphin, Thunar…, copiée dans hicolor et dans le
+#     thème d'icônes actif (Mint-Y, Papirus…), qui passe avant hicolor.
+# Rien n'est écrit en dehors du dossier personnel, pas besoin de sudo.
 #
-# Les icônes sont copiées dans hicolor et aussi dans le thème d'icônes actif
-# (Mint-Y, Papirus, Adwaita…) : certains thèmes fournissent déjà une icône pour
-# ces types et passent avant hicolor, ce qui laissait une page blanche.
-#
-# À relancer après avoir choisi Grimoire par défaut pour un nouveau type.
+#   --sans-defaut  ne pas changer les applis par défaut (icônes seulement
+#                  pour les types déjà ouverts par Grimoire)
+#   --tout         icônes Grimoire pour les 5 types, même sans Grimoire installé
+#   --diagnostic   vérifier ce que le bureau voit (appli par défaut, thème, icône)
+#   --retirer      tout retirer et remettre les applis par défaut d'avant
+#   --bureau=X.desktop  appli à utiliser (l'appli de bureau Grimoire passe grimoire.desktop)
 set -euo pipefail
 
 MODE=installer
 TOUT=0
+DEFAUT=1
+BUREAU_FORCE=""
 for a in "$@"; do
   case "$a" in
     --retirer) MODE=retirer ;;
     --diagnostic) MODE=diagnostic ;;
     --tout) TOUT=1 ;;
-    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --sans-defaut) DEFAUT=0 ;;
+    --bureau=*) BUREAU_FORCE="${a#--bureau=}" ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Option inconnue : $a (voir --help)"; exit 1 ;;
   esac
 done
 
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 HICOLOR="$DATA/icons/hicolor"
+AVANT="$DATA/grimoire/defauts-avant-grimoire.txt"
 MIMEDIR="$DATA/mime"
 PAQUET="$MIMEDIR/packages/grimoire-icones.xml"
 TAILLES=(16 22 24 32 48 64 128)
@@ -102,8 +110,9 @@ index_theme() {
   local t="$1" d
   for d in "$HOME/.icons" "$DATA/icons" ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
     d="${d//:/ }"
-    for b in $d; do [ -f "$b/icons/$t/index.theme" ] && { echo "$b/icons/$t/index.theme"; return; }; [ -f "$b/$t/index.theme" ] && { echo "$b/$t/index.theme"; return; }; done
+    for b in $d; do [ -f "$b/icons/$t/index.theme" ] && { echo "$b/icons/$t/index.theme"; return 0; }; [ -f "$b/$t/index.theme" ] && { echo "$b/$t/index.theme"; return 0; }; done
   done
+  return 0
 }
 
 # Dossiers « mimetypes » du thème pour une taille donnée (ex. : mimetypes/48 ou 48x48/mimetypes)
@@ -178,7 +187,7 @@ diagnostic() {
 }
 
 echo
-echo "  Grimoire - icônes des fichiers sous Linux"
+echo "  Grimoire - installation des fichiers sous Linux"
 echo
 
 if [ "$MODE" = diagnostic ]; then diagnostic; exit 0; fi
@@ -189,32 +198,52 @@ if [ "$MODE" = retirer ]; then
     rm -f "$HICOLOR/${t}x${t}/mimetypes/grimoire-$n.png"
   done; done
   THEME="$(theme_actif)"; [ -n "$THEME" ] && retirer_du_theme "$THEME"
+  if [ -f "$AVANT" ]; then
+    while IFS='|' read -r mime app; do
+      [ -n "$mime" ] && [ -n "$app" ] && xdg-mime default "$app" "$mime" 2>/dev/null && echo "  - $mime : de nouveau ouvert par $app"
+    done < "$AVANT"
+    rm -f "$AVANT"
+  fi
   rafraichir
   echo "  C'est retiré. Ferme et rouvre le gestionnaire de fichiers pour voir le changement."
   exit 0
 fi
 
 # Appli Grimoire installée par Chrome / Chromium / Edge / Brave
-BUREAU=""
-for f in "$DATA"/applications/*.desktop; do
+BUREAU="$BUREAU_FORCE"
+[ -n "$BUREAU" ] || for f in "$DATA"/applications/*.desktop; do
   [ -f "$f" ] || continue
   if grep -qx 'Name=Grimoire' "$f"; then BUREAU="$(basename "$f")"; break; fi
 done
 if [ -z "$BUREAU" ] && [ "$TOUT" = 0 ]; then
   echo "  Grimoire n'est pas trouvé comme appli installée."
-  echo "  Installe-le depuis Chrome, Chromium, Edge ou Brave, choisis-le par défaut"
-  echo "  pour tes .docx / .xlsx, puis relance ce script (ou utilise --tout)."
+  echo "  Installe-le d'abord depuis Chromium, Chrome, Brave ou Edge (Firefox ne sait pas"
+  echo "  installer d'applis web sous Linux), puis relance cette commande."
   exit 1
 fi
 [ -n "$BUREAU" ] && echo "  Appli Grimoire trouvée ($BUREAU)."
+
+# Grimoire par défaut pour chaque type, en notant l'appli d'avant (une seule fois)
+if [ -n "$BUREAU" ] && [ "$DEFAUT" = 1 ]; then
+  mkdir -p "$(dirname "$AVANT")"
+  premier=0; [ -f "$AVANT" ] || premier=1
+  for ligne in "${TYPES[@]}"; do
+    IFS='|' read -r nom mime ext <<< "$ligne"
+    avant="$(xdg-mime query default "$mime" 2>/dev/null || true)"
+    [ "$premier" = 1 ] && [ -n "$avant" ] && [ "$avant" != "$BUREAU" ] && echo "$mime|$avant" >> "$AVANT"
+    if [ "$avant" != "$BUREAU" ]; then
+      xdg-mime default "$BUREAU" "$mime" && echo "  + $ext : ouvert par Grimoire${avant:+ (avant : $avant)}"
+    fi
+  done
+fi
 
 XML=""
 for ligne in "${TYPES[@]}"; do
   IFS='|' read -r nom mime ext <<< "$ligne"
   defaut="$(xdg-mime query default "$mime" 2>/dev/null || true)"
-  if [ "$TOUT" = 1 ] || { [ -n "$BUREAU" ] && [ "$defaut" = "$BUREAU" ]; }; then
+  if [ "$TOUT" = 1 ] || { [ -n "$BUREAU" ] && { [ "$DEFAUT" = 1 ] || [ "$defaut" = "$BUREAU" ]; }; }; then
     XML+="  <mime-type type=\"$mime\"><icon name=\"grimoire-$nom\"/></mime-type>"$'\n'
-    echo "  + $ext : icône Grimoire"
+    echo "  + $ext : icône $(echo "$nom" | tr a-z A-Z | sed 's/DOCUMENT/DOC/;s/CLASSEUR/XLS/')"
   else
     echo "  . $ext : ouvert par ${defaut:-aucune appli} et non par Grimoire, icône inchangée"
   fi
@@ -224,9 +253,8 @@ if [ -z "$XML" ]; then
   rm -f "$PAQUET"
   rafraichir
   echo
-  echo "  Grimoire n'est l'appli par défaut d'aucun de ces types."
-  echo "  Clic droit sur un .docx > Propriétés > Ouvrir avec > Grimoire > Définir par défaut,"
-  echo "  puis relance ce script."
+  echo "  Grimoire n'est l'appli par défaut d'aucun de ces types (option --sans-defaut)."
+  echo "  Relance sans --sans-defaut pour qu'il le devienne."
   exit 0
 fi
 
@@ -238,7 +266,7 @@ done; done
 mkdir -p "$MIMEDIR/packages"
 {
   echo '<?xml version="1.0" encoding="UTF-8"?>'
-  echo '<!-- Créé par grimoire-icones.sh : icônes des fichiers ouverts avec Grimoire -->'
+  echo '<!-- Créé par grimoire-installation.sh : icônes des fichiers ouverts avec Grimoire -->'
   echo '<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">'
   printf '%s' "$XML"
   echo '</mime-info>'

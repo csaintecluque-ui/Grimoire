@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.17.4';
+const APP_VERSION = '1.18.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -275,6 +275,8 @@ async function flushSave() {
   if (pendingSave) { pendingSave = false; flushSave(); }
 }
 window.addEventListener('beforeunload', () => { if (saveTimer) flushSave(); });
+// Appelé par l'appli de bureau avant de fermer la fenêtre : rien de tapé ne se perd
+window.__grimoireFlush = async () => { try { if (state.view === 'sheet') commitEdit(false); if (saveTimer || (state.cur && !state.cur._saved)) await flushSave(); } catch {} };
 
 /* =========================================================
    Modèles
@@ -410,9 +412,22 @@ $('#titleIn').addEventListener('keydown', e => { if (e.key === 'Enter') { e.prev
 /* =========================================================
    Accueil
    ========================================================= */
+// Utilisateur de cet appareil (chaque appareil a le sien : il n'est pas synchronisé)
+const userName = () => String((ls.get('grim.author', {}) || {}).name || '').trim();
+const initialsOf = n => String(n || '').trim().split(/[\s-]+/).filter(Boolean).map(w => w[0].toUpperCase()).join('').slice(0, 4);
+function setUser(name, ini) {
+  name = String(name || '').trim().slice(0, 40);
+  ini = String(ini || '').trim().toUpperCase().slice(0, 4) || initialsOf(name);
+  if (name) ls.set('grim.author', { name, ini }); else { try { localStorage.removeItem('grim.author'); } catch {} }
+  renderGreet();
+}
+function renderGreet() {
+  const h = new Date().getHours(), n = userName();
+  $('#greet').textContent = (h >= 18 || h < 5 ? 'Bonsoir' : 'Bonjour') + (n ? ', ' + n : '') + '.';
+  const ask = $('#whoAsk'); if (ask) ask.hidden = !!n;
+}
 (() => {
-  const h = new Date().getHours();
-  $('#greet').textContent = (h >= 18 || h < 5 ? 'Bonsoir' : 'Bonjour') + ', Cyril.';
+  renderGreet();
   const d = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
   $('#today').textContent = d.charAt(0).toUpperCase() + d.slice(1);
 })();
@@ -614,7 +629,7 @@ async function fireReminder(n) {
   const body = n.text.length > 180 ? n.text.slice(0, 177) + '…' : n.text;
   let shown = false;
   if ('Notification' in window && Notification.permission === 'granted') {
-    try { const reg = await navigator.serviceWorker.ready; await reg.showNotification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { note: n.id }, requireInteraction: true }); shown = true; }
+    try { const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((_, ko) => setTimeout(() => ko(new Error('sans service worker')), 1500))]); await reg.showNotification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { note: n.id }, requireInteraction: true }); shown = true; }
     catch { try { new Notification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png' }); shown = true; } catch {} }
   }
   if (!shown || document.visibilityState === 'visible') toast('🔔 ' + body);
@@ -6434,7 +6449,7 @@ async function saveFile(filename, data) {
    Commentaires (documents) : dans la marge de droite, comme Word et Google Docs
    ========================================================= */
 const CM = { active: null, edit: null, showDone: false, panel: false };
-const cmAuthor = () => Object.assign({ name: 'Cyril', ini: 'CSC' }, ls.get('grim.author', {}));
+const cmAuthor = () => { const n = userName() || 'Utilisateur', a = ls.get('grim.author', {}) || {}; return { name: n, ini: a.ini || initialsOf(n) || 'U' }; };
 const cmList = () => (state.cur.comments ||= []);
 const cmFind = id => (state.cur && state.cur.comments || []).find(c => c.id === id);
 const cmAnchors = id => [...ed.querySelectorAll('[data-c]')].filter(el => el.dataset.c === id);
@@ -6855,7 +6870,7 @@ const FH = {
   db: null, links: new Map(),
   open() { return this.db ||= new Promise((res, rej) => { const r = indexedDB.open('grimoire-fichiers', 1); r.onupgradeneeded = () => r.result.createObjectStore('h'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
   async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('h', mode); const q = fn(t.objectStore('h')); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); },
-  async get(id) { if (this.links.has(id)) return this.links.get(id); let h = null; try { h = await this.tx('readonly', st => st.get(id)) || null; } catch {} this.links.set(id, h); return h; },
+  async get(id) { if (this.links.has(id)) return this.links.get(id); let h = null; try { h = await this.tx('readonly', st => st.get(id)) || null; } catch {} if (this.links.has(id)) return this.links.get(id); /* lié pendant la lecture : ne pas l'écraser */ if (h && h.__path && window.grimoireBureau) h = window.grimoireBureau.poignee(h.__path); this.links.set(id, h); return h; },
   async set(id, h) { this.links.set(id, h); try { await this.tx('readwrite', st => st.put(h, id)); } catch {} },
   async del(id) { this.links.delete(id); this.dirty(id, false); try { await this.tx('readwrite', st => st.delete(id)); } catch {} },
   dirty(id, v) { const m = ls.get('grim.fdirty', {}); if (v === undefined) return !!m[id]; if (v) m[id] = 1; else delete m[id]; ls.set('grim.fdirty', m); }
@@ -7264,7 +7279,7 @@ async function exportDocx() {
   if (hasHdr) zip.file('word/header1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr ${D_NS}><w:p><w:pPr><w:pStyle w:val="Header"/><w:jc w:val="center"/></w:pPr>${wRun(P.header)}</w:p></w:hdr>`);
   if (hasFtr) zip.file('word/footer1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr ${D_NS}>${ftrParas}</w:ftr>`);
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
-  zip.file('docProps/core.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEsc(state.cur.title || '')}</dc:title><dc:creator>CSC</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`);
+  zip.file('docProps/core.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEsc(state.cur.title || '')}</dc:title><dc:creator>${xmlEsc(cmAuthor().name)}</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`);
   const sect = `<w:sectPr>${SECT_COLS ? '<w:type w:val="continuous"/>' : ''}${hasHdr ? '<w:headerReference w:type="default" r:id="rIdHdr"/>' : ''}${hasFtr ? '<w:footerReference w:type="default" r:id="rIdFtr"/>' : ''}<w:pgSz w:w="${pgW}" w:h="${pgH}"${land ? ' w:orient="landscape"' : ''}/><w:pgMar w:top="${mar}" w:right="${mar}" w:bottom="${mar}" w:left="${mar}" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>`;
   zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${D_NS}><w:body>${body}${sect}</w:body></w:document>`);
   const bytes = await zip.generateAsync({ type: 'uint8array' });
@@ -8532,11 +8547,13 @@ async function openSettings() {
 function segSet(id, v) { $$('#' + id + ' button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === v))); }
 async function renderSettings() {
   segSet('segMode', MODE); segSet('segTheme', ls.get('grim.theme', 'auto')); segSet('segProv', AI.provider);
+  { const a = ls.get('grim.author', {}) || {}; $('#meName').value = a.name || ''; $('#meIni').value = a.ini || ''; $('#meIni').placeholder = initialsOf(a.name) || 'Initiales'; }
   $('#aiKey').value = AI.key; $('#aiModel').value = AI.model; $('#aiMe').value = ls.get('grim.me', '') || ''; $('#aiModel').placeholder = AI_DEF[AI.provider];
   $('#aiModels').innerHTML = AI_SUGG[AI.provider].map(m => `<option value="${m}">`).join('');
   $('#appVer').textContent = APP_VERSION;
   const inst = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
-  $('#instState').textContent = inst ? 'Grimoire est installé sur cet appareil : il s\'ouvre comme une appli et fonctionne hors connexion.'
+  $('#instState').textContent = window.grimoireBureau ? 'Application de bureau Grimoire : elle s\'ouvre depuis le menu Démarrer ou le menu des applications, fonctionne hors connexion et se met à jour toute seule.'
+    : inst ? 'Grimoire est installé sur cet appareil : il s\'ouvre comme une appli et fonctionne hors connexion.'
     : installEvt ? 'Grimoire n\'est pas encore installé sur cet appareil.'
     : 'Grimoire n\'est pas installé ici. Si le bouton Installer n\'apparaît pas, ouvrez Grimoire dans Chrome, Edge ou Brave (voir ci-dessous).';
   const n = state.docs.size;
@@ -8551,6 +8568,10 @@ $('#segTheme').addEventListener('click', e => { const b = e.target.closest('[dat
 $('#segProv').addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (!b) return; AI.provider = b.dataset.v; AI.model = ''; ls.set('grim.ai', AI); $('#aiRes').textContent = ''; renderSettings(); });
 $('#aiKey').addEventListener('input', e => { AI.key = e.target.value.trim(); ls.set('grim.ai', AI); });
 $('#aiMe').addEventListener('input', e => ls.set('grim.me', e.target.value));
+$('#meName').addEventListener('change', () => { setUser($('#meName').value, ''); $('#meIni').value = (ls.get('grim.author', {}) || {}).ini || ''; toast(userName() ? 'Bonjour, ' + userName() + ' !' : 'Prénom retiré.'); });
+$('#meIni').addEventListener('change', () => { setUser($('#meName').value, $('#meIni').value); $('#meIni').value = (ls.get('grim.author', {}) || {}).ini || ''; });
+$('#whoAsk').addEventListener('submit', e => { e.preventDefault(); const v = $('#whoIn').value.trim(); if (!v) return; setUser(v, ''); toast('Bonjour, ' + userName() + ' !'); });
+$('#whoLater').addEventListener('click', () => { $('#whoAsk').hidden = true; });
 $('#aiModel').addEventListener('input', e => { AI.model = e.target.value.trim(); ls.set('grim.ai', AI); });
 $('#aiTest').addEventListener('click', async () => {
   const r = $('#aiRes'); r.className = 'set-res'; r.textContent = 'Test en cours…';

@@ -31,20 +31,34 @@ Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 2. *Settings → Pages → Build and deployment* : *Deploy from a branch*, branche `main`, dossier `/ (root)`.
 3. Après une minute, l'appli est à l'adresse `https://<utilisateur>.github.io/<dépôt>/`.
 
-## Installer l'appli
+## Appli de bureau (Windows, Linux)
+
+Le plus simple sur ordinateur : télécharger l'installateur sur la page [Releases](https://github.com/csaintecluque-ui/Grimoire/releases/latest), comme pour LibreOffice.
+
+- **Windows** : `Grimoire-Installation-x.y.z.exe`, à ouvrir (installation pour l'utilisateur, sans droit administrateur). Au premier lancement, Windows peut afficher « Windows a protégé votre ordinateur » (installateur non signé) : *Informations complémentaires* → *Exécuter quand même*.
+- **Linux** (Mint, Ubuntu, Debian) : `grimoire_x.y.z_amd64.deb`, double-clic → *Installer le paquet*.
+
+Au premier lancement, Grimoire propose de devenir l'appli par défaut des .docx, .xlsx, .csv et .pdf : sous Linux c'est fait aussitôt (icônes DOC, XLS, CSV, PDF comprises, applis d'avant notées pour pouvoir y revenir) ; sous Windows, la page Grimoire des *Paramètres → Applications par défaut* s'ouvre, il reste à cliquer *Définir par défaut* (Windows réserve ce clic à l'utilisateur, LibreOffice compris). Réglable ensuite dans *Réglages → Application*.
+
+C'est la même appli que la version web, servie depuis l'ordinateur : hors connexion, et des données qui ne dépendent plus d'un navigateur (ni nettoyage du navigateur, ni désinstallation de la PWA). Enregistrer (Ctrl+S) met à jour le fichier d'origine sous Windows comme sous Linux ; à la fermeture, Grimoire finit d'enregistrer avant de quitter. Les mises à jour arrivent toutes seules (bandeau « Redémarrer pour mettre à jour » sous Windows, « Installer la mise à jour » sous Linux).
+
+Les documents ne passent pas tout seuls de la version navigateur à l'appli : *Réglages → Sauvegarder tout* dans le navigateur, puis *Réglages → Restaurer une sauvegarde* dans l'appli (ou la sauvegarde en ligne GitHub des deux côtés).
+
+**Pour le développement** (dossier `bureau/`) : `npm install` puis `npm start` lance l'appli ; `npm run linux` construit le .deb. Une nouvelle release est construite et publiée automatiquement par GitHub Actions (`.github/workflows/bureau.yml`) dès que `APP_VERSION` de `app.js` change sur `main` ; sur une pull request, les installateurs sont construits pour vérification (onglet *Actions* → *Artifacts*).
+
+## Installer l'appli web
 
 - **Android (Chrome)** : ouvrir l'adresse, menu ⋮ → *Installer l'application* (ou le bandeau « Installer » dans Grimoire).
 - **PC (Chrome, Chromium, Edge ou Brave, y compris sous Linux)** : icône d'installation à droite de la barre d'adresse, ou Réglages → Application → Installer Grimoire. Firefox ne sait pas installer d'applis web sous Linux.
-- **Ouvrir les fichiers avec Grimoire** (une fois installé) : clic droit sur un .docx, .xlsx, .csv ou .pdf → *Ouvrir avec* → Grimoire ; *Propriétés → Ouvrir avec → Définir par défaut* pour le double-clic. Le document reste lié au fichier : Enregistrer (Ctrl+S) met à jour l'original. Un fichier ouvert alors que Grimoire est déjà lancé arrive dans la fenêtre existante (pas de deuxième fenêtre).
+- **Ouvrir les fichiers avec Grimoire** (une fois installé) : lancer le fichier d'installation de son système (voir plus bas), ou clic droit sur un .docx, .xlsx, .csv ou .pdf → *Ouvrir avec* → Grimoire. Le document reste lié au fichier : Enregistrer (Ctrl+S) met à jour l'original. Un fichier ouvert alors que Grimoire est déjà lancé arrive dans la fenêtre existante (pas de deuxième fenêtre).
 - **Notion** : dans une page, taper `/embed` et coller l'adresse.
 
-### Icônes des fichiers (Windows et Linux)
+### Fichiers de l'ordinateur : appli par défaut et icônes (Windows et Linux)
 
-Depuis la 1.17.4, Grimoire déclare lui-même une icône par type de fichier (DOC, XLS, CSV, PDF, au sceau, voir `windows/icones-apercu.png`) dans son manifest (`file_handlers[].icons`). Sous **Windows** (Chrome ou Edge), rien à installer : après la mise à jour de l'appli, les .docx, .xlsx, .csv et .pdf ouverts par Grimoire prennent l'icône de leur type. Si une association datait d'avant, refaire une fois : clic droit sur le fichier → *Ouvrir avec* → *Choisir une autre application* → Grimoire → *Toujours*. Si Chrome n'a pas encore repris le nouveau manifest : désinstaller Grimoire (**sans** cocher « Supprimer aussi les données ») et le réinstaller.
+Une appli web ne peut rien écrire elle-même dans le système : Chrome et Edge enregistrent Grimoire pour les .docx, .xlsx, .csv et .pdf, mais avec une seule icône, celle de l'appli (le manifest déclare une icône par type, que Chromium n'applique pas encore). Un fichier d'installation fait donc, une fois par ordinateur, ce que fait l'installateur de LibreOffice : icônes au sceau selon le type (DOC, XLS, CSV, PDF, voir `windows/icones-apercu.png`) et Grimoire comme appli par défaut. À télécharger aussi depuis Grimoire : *Réglages → Application*. Sans droit administrateur, réversible, à relancer si l'appli est réinstallée. Grimoire doit d'abord être installé depuis un navigateur à moteur Chromium (Edge, Chrome, Chromium, Brave) : Firefox ne sait pas ouvrir de fichiers avec une appli web.
 
-Le script `windows/grimoire-icones.ps1` reste disponible pour les navigateurs qui n'appliquent pas ces icônes (clic droit → *Exécuter avec PowerShell*, puis *Ouvrir avec* → « Grimoire · Document » / « Grimoire · Classeur » → *Toujours*). Pour retirer : `powershell -ExecutionPolicy Bypass -File grimoire-icones.ps1 -Retirer`.
-
-- **Linux** (Nemo, Nautilus, Dolphin, Thunar…) : Chrome n'y applique pas les icônes du manifest. Choisir d'abord Grimoire par défaut pour les types voulus, puis `bash grimoire-icones.sh` ; seuls les types ouverts par Grimoire changent d'icône (`--tout` pour les cinq). Les icônes sont copiées dans `hicolor` et dans le thème d'icônes actif (Mint-Y, Papirus…), car certains thèmes passent avant `hicolor`. Rouvrir le gestionnaire de fichiers (`nemo -q`). Si une page blanche persiste : `bash grimoire-icones.sh --diagnostic` montre l'appli par défaut, le thème et l'icône que le bureau résout pour chaque type. Pour retirer : `--retirer`.
+- **Windows** : double-cliquer `windows/grimoire-installation.cmd` (si Windows affiche « Windows a protégé votre ordinateur » : *Informations complémentaires* → *Exécuter quand même*). La page Grimoire de *Paramètres → Applications par défaut* s'ouvre : cliquer **Définir par défaut**. Windows interdit à tout programme, LibreOffice compris, de se choisir lui-même par défaut : ce clic reste à faire. Windows 10 : *Ouvrir avec* → « Grimoire · Document » / « Grimoire · Classeur » → *Toujours*. Pour retirer : `grimoire-installation.cmd -Retirer` dans une invite de commandes.
+- **Linux** (Nemo, Nautilus, Dolphin, Thunar…) : `bash ~/Téléchargements/grimoire-installation.sh`, puis rouvrir le gestionnaire de fichiers (`nemo -q`). Grimoire devient l'appli par défaut des cinq types (les applis d'avant sont notées) et les icônes sont copiées dans `hicolor` et dans le thème actif (Mint-Y, Papirus…). Options : `--sans-defaut` (icônes seulement), `--diagnostic` (ce que voit le bureau pour chaque type), `--retirer` (tout retirer et remettre les applis d'avant).
 - **Mac, téléphone, tablette** : le navigateur ne permet pas de changer ces icônes.
 
 ## Mettre à jour
