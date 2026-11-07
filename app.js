@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.18.0';
+const APP_VERSION = '1.18.2';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -353,6 +353,7 @@ const TPL = {
    ========================================================= */
 function show(view) {
   state.view = view;
+  if (typeof closeMenus === 'function') { closeMenus(); renderMenubar(); }
   ['home', 'writer', 'sheet', 'settings', 'pdfv'].forEach(v => { $('#' + v).hidden = v !== view; });
   $('#pageCss').textContent = '';
   const inDoc = view === 'writer' || view === 'sheet' || view === 'pdfv';
@@ -6418,8 +6419,38 @@ async function importFile(f) {
       toast('Texte importé.');
     } else toast('Format non pris en charge. Importez un fichier .docx, .xlsx, .csv ou .txt.', true);
   } catch (err) {
-    toast('Import impossible : le fichier est peut-être protégé ou endommagé.', true);
+    console.warn('Import impossible', err);
+    let d = { msg: 'Import impossible : le fichier est peut-être protégé ou endommagé.' };
+    try { d = await diagnoseImport(f, ext); } catch {}
+    if (d.pdf) { toast('Ce fichier est en réalité un PDF : ouverture comme PDF.'); await importPdfFiles([new File([f], title + '.pdf', { type: 'application/pdf', lastModified: f.lastModified })]); return; }
+    showImportProblem(f.name, d.msg);
   }
+}
+// Pourquoi un fichier ne s'ouvre pas : d'après ses premiers octets, pas au hasard.
+async function diagnoseImport(f, ext) {
+  const head = new Uint8Array(await f.slice(0, 8).arrayBuffer());
+  const is = (...b) => b.every((v, i) => head[i] === v);
+  const word = /^doc/.test(ext), quoi = word ? 'document Word' : 'classeur Excel', appli = word ? 'Word' : 'Excel';
+  if (!f.size) return { msg: `« ${f.name} » est vide (0 octet) : le fichier n'a jamais été écrit complètement. Cherchez une version précédente (voir ci-dessous).` };
+  if (is(0x25, 0x50, 0x44, 0x46)) return { pdf: true };
+  if (is(0xD0, 0xCF, 0x11, 0xE0)) return { msg: /^(docx|xlsx|xlsm)$/.test(ext)
+    ? `« ${f.name} » est protégé par un mot de passe (${appli} l'a chiffré). Ouvrez-le dans ${appli}, puis Fichier › Informations › Protéger › Chiffrer avec mot de passe : effacez le mot de passe, enregistrez, et ouvrez-le de nouveau dans Grimoire.`
+    : `« ${f.name} » est dans l'ancien format .${ext} : ouvrez-le dans ${appli} ou LibreOffice et enregistrez-le en .${word ? 'docx' : 'xlsx'}.` };
+  if (is(0x50, 0x4B)) return { msg: `« ${f.name} » est un ${quoi} endommagé ou incomplet (copie interrompue, téléchargement coupé). Essayez de l'ouvrir dans ${appli}, qui sait parfois le réparer, ou cherchez une version précédente.` };
+  const zero = head.every(v => v === 0);
+  return { msg: `« ${f.name} » n'est pas un vrai ${quoi} : ${zero ? 'il ne contient que des zéros' : 'son contenu n\'est ni du Word ni de l\'Excel (il contient d\'autres données, souvent des restes d\'autres fichiers du disque)'}. Ce n'est pas une protection : le fichier a été abîmé, en général par une copie ou un enregistrement interrompu (clé USB retirée trop tôt, coupure, mise en veille, synchronisation). Il ne peut pas être réparé tel quel, mais une version saine existe peut-être ailleurs (voir ci-dessous).` };
+}
+function showImportProblem(name, msg) {
+  const aide = [
+    'Grimoire : si ce fichier y a déjà été ouvert, il est dans la liste des documents ; Exporter › copie Word (.docx) en refait un fichier sain.',
+    'Windows : clic droit sur le fichier › Propriétés › Versions précédentes, ou la Corbeille, ou l\'historique OneDrive.',
+    'La personne qui vous l\'a envoyé, ou le courriel d\'origine.'
+  ];
+  let d = $('#importProblem');
+  if (!d) { d = document.createElement('dialog'); d.id = 'importProblem'; d.className = 'imp-pb'; document.body.appendChild(d); }
+  d.innerHTML = `<h2>Ce fichier ne peut pas être ouvert</h2><p>${esc(msg)}</p><p class="imp-t">Où retrouver une version saine :</p><ul>${aide.map(a => `<li>${esc(a)}</li>`).join('')}</ul><div class="set-acts"><button class="pbtn" type="button">Compris</button></div>`;
+  d.querySelector('button').addEventListener('click', () => d.close());
+  try { d.showModal(); } catch { toast(msg, true); }
 }
 function guessSep(t) { const l = t.split('\n')[0] || ''; return (l.match(/;/g) || []).length > (l.match(/,/g) || []).length ? ';' : (l.includes('\t') ? '\t' : ','); }
 
@@ -8507,6 +8538,197 @@ $('#palIn').addEventListener('keydown', e => {
 $('#palList').addEventListener('click', e => { const b = e.target.closest('.pal-it'); if (b) runPal(+b.dataset.i); });
 $('#palette').addEventListener('mousedown', e => { if (e.target === $('#palette')) closePalette(); });
 $('#palBtn').addEventListener('click', openPalette);
+
+/* =========================================================
+   Barre de menus (Fichier, Édition, Affichage, Insertion, Format…), comme Word ou Google Docs.
+   Construite à partir des commandes de la palette : toute nouvelle commande y apparaît d'elle-même.
+   ========================================================= */
+const MB = { open: -1, model: [], sub: null };
+function menuModel() {
+  const v = state.view, all = commands().filter(c => c.group !== 'Documents');
+  const recents = commands().filter(c => c.group === 'Documents').slice(0, 12);
+  const used = new Set();
+  // un élément : libellé exact, expression régulière sur le libellé, ou 'Groupe:' pour tout un groupe
+  const pick = (...ms) => {
+    const out = [];
+    ms.forEach(m => {
+      if (m === '-') { out.push('-'); return; }
+      if (m && typeof m === 'object' && !(m instanceof RegExp)) { out.push(m); return; }
+      const hits = all.filter(c => !used.has(c) && (typeof m === 'string' ? (m.endsWith(':') ? c.group === m.slice(0, -1) : c.label === m) : m.test(c.label)));
+      hits.forEach(c => { used.add(c); out.push(c); });
+    });
+    return out;
+  };
+  const cmd = (label, run, kbd, icon) => ({ label, run, kbd, icon });
+  const sub = (label, items, icon) => (items = items.filter(Boolean)).length ? { label, sub: items, icon } : null;
+  const doc = v === 'writer' || v === 'sheet' || v === 'pdfv';
+  const undoRun = r => () => v === 'writer' ? (r ? W.redo() : W.undo()) : v === 'sheet' ? (r ? redo() : undo()) : v === 'pdfv' ? pdfUndo(r) : null;
+  const clip = k => () => {
+    if (k !== 'paste') { exec(k); return; }
+    if (navigator.clipboard && navigator.clipboard.readText) navigator.clipboard.readText().then(t => { if (t) exec('insertText', t); }).catch(() => toast('Pour coller : Ctrl+V.'));
+    else toast('Pour coller : Ctrl+V.');
+  };
+  const align = a => () => exec('justify' + a);
+  const aide = async () => { const w = WELCOME(); if (!state.docs.has(w.id)) { try { await Store.save(w); } catch {} } if (state.cur) { if (state.view === 'sheet') commitEdit(false); await flushSave(); } openDoc(w.id); };
+
+  const M = [];
+  const menu = (label, ...parts) => {
+    const items = parts.flat(Infinity).filter(Boolean);
+    const clean = []; items.forEach(it => { if (it === '-' && (!clean.length || clean[clean.length - 1] === '-')) return; clean.push(it); });
+    while (clean[clean.length - 1] === '-') clean.pop();
+    if (clean.length) M.push({ label, items: clean });
+  };
+  const fichier = () => { const imprimer = pick('Imprimer ou créer un PDF'); return [
+    pick('Nouveau document', 'Nouveau classeur'),
+    sub('Nouveau d\'après un modèle', pick(/\(modèle\)$/).map(c => ({ ...c, label: c.label.replace(/ \(modèle\)$/, '') })), 'grid'),
+    '-', pick('Ouvrir un fichier Word, Excel, CSV ou PDF', 'Ouvrir un PDF, ou fusionner des PDF et des photos'),
+    sub('Ouvrir un document récent', recents, 'doc'),
+    '-', pick('Enregistrer', 'Enregistrer sous…', 'Renommer'),
+    doc ? sub('Exporter', pick('Exporter:'), 'download') : null, imprimer,
+    '-', pick('Sauvegarder tous mes documents', 'Réglages'),
+    doc ? ['-', pick('Retour à l\'accueil').map(c => ({ ...c, label: 'Fermer le document' }))] : null
+  ]; };
+  const affichageFin = () => ['-', pick(/^Passer en mode/, /^Passer au thème/)];
+  const outils = () => [pick('Révision:'), '-', pick('Plume:')];
+
+  if (v === 'writer') {
+    menu('Fichier', fichier());
+    menu('Édition', cmd('Annuler', undoRun(false), 'Ctrl Z', 'undo'), cmd('Rétablir', undoRun(true), 'Ctrl Y', 'redo'), '-',
+      cmd('Couper', clip('cut'), 'Ctrl X'), cmd('Copier', clip('copy'), 'Ctrl C', 'copy'), cmd('Coller', clip('paste'), 'Ctrl V'), cmd('Tout sélectionner', () => exec('selectAll'), 'Ctrl A'), '-',
+      pick('Rechercher', 'Rechercher et remplacer'));
+    menu('Affichage', pick('Affichage:'), affichageFin());
+    menu('Insertion', pick('Image', /^Tableau/, 'Lien', 'Commentaire', '-', 'Saut de page', 'Séparateur', 'Sommaire', 'Date du jour'), pick('Insérer:'));
+    menu('Format',
+      cmd('Gras', W.bold, 'Ctrl B', 'type'), cmd('Italique', W.italic, 'Ctrl I', 'type'), cmd('Souligné', W.underline, 'Ctrl U', 'type'), pick('Barré', 'Exposant', 'Indice'), '-',
+      pick(/^Titre \d$/, 'Paragraphe normal', 'Citation'), '-',
+      sub('Alignement', [cmd('À gauche', align('Left')), cmd('Centré', align('Center')), cmd('À droite', align('Right')), cmd('Justifié', align('Full'))], 'alignL'),
+      pick('Interligne et espacement', 'Augmenter le retrait', 'Diminuer le retrait'), '-',
+      pick('Liste à puces', 'Liste numérotée', 'Liste de cases à cocher'), '-',
+      pick('Couleur du texte', 'Surligner', 'Effacer la mise en forme'), '-',
+      pick(/colonne/), '-', pick('Modifier les styles (Titre 1, Paragraphe…)', 'Mise en page, en-tête et pied de page'), pick('Mise en forme:', 'Format:'));
+    menu('Outils', outils());
+  } else if (v === 'sheet') {
+    menu('Fichier', fichier());
+    menu('Édition', cmd('Annuler', undoRun(false), 'Ctrl Z', 'undo'), cmd('Rétablir', undoRun(true), 'Ctrl Y', 'redo'), '-',
+      pick('Recopier vers le bas', 'Recopier vers la droite'), '-', pick('Rechercher dans le classeur', 'Rechercher et remplacer'), '-',
+      pick('Supprimer la ligne', 'Supprimer la colonne'), '-', pick(/^Masquer/, /^Afficher les (lignes|colonnes)/), '-', pick('Renommer cette feuille'));
+    menu('Affichage', pick(/^Figer/, 'Ne rien figer'), '-', pick('Feuille suivante', 'Feuille précédente'), affichageFin());
+    menu('Insertion', pick(/^Insérer une ligne/, /^Insérer une colonne/), '-', pick('Nouvelle feuille', 'Dupliquer cette feuille'), '-',
+      pick('Somme automatique', 'Graphique', 'Tableau croisé dynamique', 'Liste déroulante', 'Case à cocher', 'Note sur la cellule'), pick('Insérer:'));
+    menu('Format', pick('Gras', 'Italique', 'Souligné'), '-',
+      pick('Format standard', 'Format monétaire (€)', 'Format pourcentage', 'Format deux décimales', 'Format date', 'Format texte (garder les zéros, numéros…)'),
+      sub('Autres devises', pick(/^Format monétaire : /).map(c => ({ ...c, label: c.label.replace(/^Format monétaire : /, '') })), 'grid'),
+      pick('Ajouter une décimale', 'Réduire les décimales'), '-',
+      pick('Retour à la ligne automatique', 'Fusionner ou séparer les cellules'), '-',
+      pick('Couleur de fond', 'Couleur du texte'), sub('Bordures', pick(/bordure/i), 'borders'), '-', pick('Mise en forme conditionnelle'), pick('Cellules:'));
+    menu('Données', pick('Trier de A à Z', 'Trier de Z à A', '-', 'Filtrer la colonne', 'Retirer tous les filtres', '-', 'Plages nommées'), pick('Données:', 'Structure:', 'Feuilles:'));
+    menu('Outils', outils());
+  } else {
+    menu('Fichier', fichier());
+    if (v === 'pdfv') menu('Édition', cmd('Annuler', undoRun(false), 'Ctrl Z', 'undo'), cmd('Rétablir', undoRun(true), 'Ctrl Y', 'redo'));
+    menu('Affichage', affichageFin());
+    menu('Outils', outils());
+  }
+  // Filet de sécurité : une commande qu'aucun menu n'a prise va dans « Outils »
+  const reste = all.filter(c => !used.has(c) && c.group !== 'Créer' && c.group !== 'Document');
+  if (reste.length) { let o = M.find(m => m.label === 'Outils'); if (!o) { o = { label: 'Outils', items: [] }; M.push(o); } if (o.items.length) o.items.push('-'); o.items.push(...reste); }
+  menu('Aide', cmd('Rechercher une commande…', openPalette, 'Ctrl K', 'command'), cmd('Aide-mémoire de Grimoire', aide, '', 'doc'), '-',
+    cmd('À propos de Grimoire', () => toast('Grimoire ' + APP_VERSION + ' · suite bureautique personnelle'), '', 'feather'));
+  return M;
+}
+function renderMenubar() {
+  const nav = $('#menubar'); if (!nav) return;
+  MB.model = menuModel();
+  nav.innerHTML = MB.model.map((m, i) => `<button type="button" class="mb-top" role="menuitem" aria-haspopup="true" aria-expanded="false" data-m="${i}">${esc(m.label)}</button>`).join('');
+}
+function menuItemsHtml(items, path) {
+  return items.map((it, i) => {
+    if (it === '-') return '<div class="mb-sep" role="separator"></div>';
+    const p = path.concat(i).join('.');
+    if (it.sub) return `<button type="button" class="mb-it has-sub" role="menuitem" aria-haspopup="true" data-p="${p}">${it.icon ? ic(it.icon) : '<span class="ic"></span>'}<span>${esc(it.label)}</span><span class="mb-arr">${ic('right')}</span></button>`;
+    return `<button type="button" class="mb-it" role="menuitem" data-p="${p}">${it.icon ? ic(it.icon) : '<span class="ic"></span>'}<span>${esc(it.label)}</span>${it.kbd ? `<kbd>${esc(it.kbd)}</kbd>` : ''}</button>`;
+  }).join('');
+}
+function itemAt(p) { const k = String(p).split('.').map(Number); let it = MB.model[MB.open].items[k[0]]; for (let j = 1; j < k.length; j++) it = it.sub[k[j]]; return it; }
+function openMenu(i) {
+  closeSubmenu();
+  MB.open = i;
+  $$('#menubar .mb-top').forEach(b => { const on = +b.dataset.m === i; b.classList.toggle('on', on); b.setAttribute('aria-expanded', String(on)); });
+  const top = $(`#menubar .mb-top[data-m="${i}"]`), pop = $('#mbPop');
+  pop.innerHTML = menuItemsHtml(MB.model[i].items, []);
+  pop.hidden = false;
+  const r = top.getBoundingClientRect();
+  pop.style.left = Math.max(4, Math.min(r.left, innerWidth - pop.offsetWidth - 4)) + 'px';
+  pop.style.top = r.bottom + 'px';
+  MB.hi = -1;
+}
+function closeSubmenu() { const s = $('#mbSub'); if (s) s.hidden = true; MB.sub = null; }
+function openSubmenu(btn) {
+  const it = itemAt(btn.dataset.p); if (!it || !it.sub) return;
+  if (MB.sub === btn.dataset.p) return;
+  MB.sub = btn.dataset.p;
+  $$('#mbPop .mb-it').forEach(b => b.classList.toggle('on', b === btn));
+  const s = $('#mbSub'); s.innerHTML = menuItemsHtml(it.sub, btn.dataset.p.split('.').map(Number)); s.hidden = false;
+  const r = btn.getBoundingClientRect();
+  let left = r.right - 2; if (left + s.offsetWidth > innerWidth - 4) left = r.left - s.offsetWidth + 2;
+  s.style.left = Math.max(4, left) + 'px';
+  s.style.top = Math.max(4, Math.min(r.top - 5, innerHeight - s.offsetHeight - 4)) + 'px';
+}
+function closeMenus() {
+  if (MB.open < 0) return;
+  MB.open = -1; closeSubmenu();
+  $('#mbPop').hidden = true;
+  $$('#menubar .mb-top').forEach(b => { b.classList.remove('on'); b.setAttribute('aria-expanded', 'false'); });
+}
+function runMenuItem(p) {
+  const it = itemAt(p); if (!it || it.sub || !it.run) return;
+  closeMenus();
+  if (state.view === 'sheet' && SH.editing) commitEdit(false);
+  setTimeout(() => { try { const r = it.run(); if (r && r.catch) r.catch(e => console.warn(e)); } catch (e) { console.warn(e); toast('Commande impossible ici.', true); } }, 0);
+}
+// Les menus ne prennent jamais le focus : la sélection du texte ou de la cellule reste en place.
+['#menubar', '#mbPop', '#mbSub'].forEach(s => $(s).addEventListener('mousedown', e => e.preventDefault()));
+$('#menubar').addEventListener('click', e => {
+  const b = e.target.closest('.mb-top'); if (!b) return;
+  if (MB.open === +b.dataset.m) closeMenus(); else { renderMenubar(); openMenu(+b.dataset.m); }
+});
+// Survol : ne bascule d'un menu à l'autre que si la souris a vraiment bougé (pas après une ouverture au clavier)
+document.addEventListener('mousemove', e => { MB.pt = { x: e.clientX, y: e.clientY }; }, { passive: true });
+const mbImmobile = e => MB.lock && e.clientX === MB.lock.x && e.clientY === MB.lock.y;
+$('#menubar').addEventListener('mouseover', e => { if (mbImmobile(e)) return; MB.lock = null; const b = e.target.closest('.mb-top'); if (b && MB.open >= 0 && MB.open !== +b.dataset.m) openMenu(+b.dataset.m); });
+const mbClick = e => { const b = e.target.closest('.mb-it'); if (!b) return; if (b.classList.contains('has-sub')) openSubmenu(b); else runMenuItem(b.dataset.p); };
+$('#mbPop').addEventListener('click', mbClick); $('#mbSub').addEventListener('click', mbClick);
+$('#mbPop').addEventListener('mouseover', e => { if (mbImmobile(e)) return; MB.lock = null; const b = e.target.closest('.mb-it'); if (!b) return; if (b.classList.contains('has-sub')) openSubmenu(b); else if (MB.sub) { closeSubmenu(); $$('#mbPop .mb-it').forEach(x => x.classList.remove('on')); } });
+document.addEventListener('mousedown', e => { if (MB.open >= 0 && !e.target.closest('#menubar, #mbPop, #mbSub')) closeMenus(); }, true);
+window.addEventListener('resize', closeMenus);
+window.addEventListener('blur', closeMenus);
+// Clavier, menu ouvert : flèches, Entrée, Échap
+document.addEventListener('keydown', e => {
+  if (MB.open < 0) return;
+  const inSub = !!MB.sub, box = inSub ? $('#mbSub') : $('#mbPop');
+  const its = [...box.querySelectorAll('.mb-it')];
+  let cur = its.findIndex(b => b.classList.contains('kb'));
+  const mark = k => { its.forEach((b, j) => b.classList.toggle('kb', j === k)); if (its[k]) its[k].scrollIntoView({ block: 'nearest' }); };
+  if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); if (inSub) closeSubmenu(); else closeMenus(); return; }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopImmediatePropagation(); const d = e.key === 'ArrowDown' ? 1 : -1; mark(cur < 0 ? (d > 0 ? 0 : its.length - 1) : (cur + d + its.length) % its.length); return; }
+  if (e.key === 'ArrowRight') { e.preventDefault(); e.stopImmediatePropagation(); if (!inSub && its[cur] && its[cur].classList.contains('has-sub')) { openSubmenu(its[cur]); const f = $('#mbSub .mb-it'); if (f) f.classList.add('kb'); } else openMenu((MB.open + 1) % MB.model.length); return; }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopImmediatePropagation(); if (inSub) closeSubmenu(); else openMenu((MB.open - 1 + MB.model.length) % MB.model.length); return; }
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopImmediatePropagation(); if (its[cur]) its[cur].click(); return; }
+  if (e.key.length === 1 || e.key === 'Tab') closeMenus();
+}, true);
+renderMenubar();
+// Alt+F (Fichier), Alt+E (Édition), Alt+A (Affichage), Alt+I (Insertion), Alt+O (Format), Alt+D (Données), Alt+U (Outils), Alt+H (Aide) ; F10 ouvre Fichier
+document.addEventListener('keydown', e => {
+  if (isPhone() || e.ctrlKey || e.metaKey) return;
+  const keys = { f: 'Fichier', e: 'Édition', a: 'Affichage', i: 'Insertion', o: 'Format', d: 'Données', u: 'Outils', h: 'Aide' };
+  const want = e.key === 'F10' && !e.shiftKey && !e.altKey ? 'Fichier' : (e.altKey && !e.shiftKey ? keys[(e.code || '').replace(/^Key/, '').toLowerCase()] : null);
+  if (!want) return;
+  renderMenubar(); const i = MB.model.findIndex(m => m.label === want); if (i < 0) return;
+  e.preventDefault(); e.stopPropagation();
+  if (state.view === 'sheet' && SH.editing) commitEdit(false);
+  MB.lock = MB.pt ? { ...MB.pt } : null;
+  openMenu(i); const f = $('#mbPop .mb-it'); if (f) f.classList.add('kb');
+}, true);
 
 /* --- raccourcis globaux */
 document.addEventListener('keydown', e => {
