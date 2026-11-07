@@ -31,7 +31,22 @@ Suite bureautique personnelle, installable sur téléphone et ordinateur (PWA) :
 2. *Settings → Pages → Build and deployment* : *Deploy from a branch*, branche `main`, dossier `/ (root)`.
 3. Après une minute, l'appli est à l'adresse `https://<utilisateur>.github.io/<dépôt>/`.
 
-## Installer l'appli
+## Appli de bureau (Windows, Linux)
+
+Le plus simple sur ordinateur : télécharger l'installateur sur la page [Releases](https://github.com/csaintecluque-ui/Grimoire/releases/latest), comme pour LibreOffice.
+
+- **Windows** : `Grimoire-Installation-x.y.z.exe`, à ouvrir (installation pour l'utilisateur, sans droit administrateur). Au premier lancement, Windows peut afficher « Windows a protégé votre ordinateur » (installateur non signé) : *Informations complémentaires* → *Exécuter quand même*.
+- **Linux** (Mint, Ubuntu, Debian) : `grimoire_x.y.z_amd64.deb`, double-clic → *Installer le paquet*.
+
+Au premier lancement, Grimoire propose de devenir l'appli par défaut des .docx, .xlsx, .csv et .pdf : sous Linux c'est fait aussitôt (icônes DOC, XLS, CSV, PDF comprises, applis d'avant notées pour pouvoir y revenir) ; sous Windows, la page Grimoire des *Paramètres → Applications par défaut* s'ouvre, il reste à cliquer *Définir par défaut* (Windows réserve ce clic à l'utilisateur, LibreOffice compris). Réglable ensuite dans *Réglages → Application*.
+
+C'est la même appli que la version web, servie depuis l'ordinateur : hors connexion, et des données qui ne dépendent plus d'un navigateur (ni nettoyage du navigateur, ni désinstallation de la PWA). Enregistrer (Ctrl+S) met à jour le fichier d'origine sous Windows comme sous Linux ; à la fermeture, Grimoire finit d'enregistrer avant de quitter. Les mises à jour arrivent toutes seules (bandeau « Redémarrer pour mettre à jour » sous Windows, « Installer la mise à jour » sous Linux).
+
+Les documents ne passent pas tout seuls de la version navigateur à l'appli : *Réglages → Sauvegarder tout* dans le navigateur, puis *Réglages → Restaurer une sauvegarde* dans l'appli (ou la sauvegarde en ligne GitHub des deux côtés).
+
+**Pour le développement** (dossier `bureau/`) : `npm install` puis `npm start` lance l'appli ; `npm run linux` construit le .deb. Une nouvelle release est construite et publiée automatiquement par GitHub Actions (`.github/workflows/bureau.yml`) dès que `APP_VERSION` de `app.js` change sur `main` ; sur une pull request, les installateurs sont construits pour vérification (onglet *Actions* → *Artifacts*).
+
+## Installer l'appli web
 
 - **Android (Chrome)** : ouvrir l'adresse, menu ⋮ → *Installer l'application* (ou le bandeau « Installer » dans Grimoire).
 - **PC (Chrome, Chromium, Edge ou Brave, y compris sous Linux)** : icône d'installation à droite de la barre d'adresse, ou Réglages → Application → Installer Grimoire. Firefox ne sait pas installer d'applis web sous Linux.

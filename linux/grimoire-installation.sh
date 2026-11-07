@@ -19,18 +19,21 @@
 #   --tout         icônes Grimoire pour les 5 types, même sans Grimoire installé
 #   --diagnostic   vérifier ce que le bureau voit (appli par défaut, thème, icône)
 #   --retirer      tout retirer et remettre les applis par défaut d'avant
+#   --bureau=X.desktop  appli à utiliser (l'appli de bureau Grimoire passe grimoire.desktop)
 set -euo pipefail
 
 MODE=installer
 TOUT=0
 DEFAUT=1
+BUREAU_FORCE=""
 for a in "$@"; do
   case "$a" in
     --retirer) MODE=retirer ;;
     --diagnostic) MODE=diagnostic ;;
     --tout) TOUT=1 ;;
     --sans-defaut) DEFAUT=0 ;;
-    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --bureau=*) BUREAU_FORCE="${a#--bureau=}" ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Option inconnue : $a (voir --help)"; exit 1 ;;
   esac
 done
@@ -207,8 +210,8 @@ if [ "$MODE" = retirer ]; then
 fi
 
 # Appli Grimoire installée par Chrome / Chromium / Edge / Brave
-BUREAU=""
-for f in "$DATA"/applications/*.desktop; do
+BUREAU="$BUREAU_FORCE"
+[ -n "$BUREAU" ] || for f in "$DATA"/applications/*.desktop; do
   [ -f "$f" ] || continue
   if grep -qx 'Name=Grimoire' "$f"; then BUREAU="$(basename "$f")"; break; fi
 done

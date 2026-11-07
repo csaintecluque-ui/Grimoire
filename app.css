@@ -846,3 +846,8 @@ body.m-phone #pdfDlg{left:8px;right:8px;width:auto;top:auto;bottom:8px;max-heigh
 /* liens-boutons (« Plus tard »…) */
 .banner .lnk,.sync-warn .lnk{background:none;border:0;padding:4px 2px;color:var(--fg);opacity:.75;text-decoration:underline;text-underline-offset:3px;font:inherit;cursor:pointer}
 .banner .lnk:hover,.sync-warn .lnk:hover{opacity:1}
+
+/* Appli de bureau (Electron) : ce qui ne concerne que la version web, ou que l'appli */
+.bureau-only{display:none}
+html.bureau .bureau-only{display:block}
+html.bureau .web-only{display:none}

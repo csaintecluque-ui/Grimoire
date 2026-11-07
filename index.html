@@ -398,18 +398,27 @@
           <h2>Application</h2>
           <p class="set-note" id="instState"></p>
           <div class="set-acts"><button class="pbtn install-btn" hidden>Installer Grimoire</button></div>
-          <details class="sync-help"><summary>Installer sur l'ordinateur (hors connexion)</summary><ol>
+          <div class="bureau-only">
+            <p class="set-note">Fichiers de l'ordinateur : les .docx, .xlsx, .csv et .pdf s'ouvrent avec Grimoire d'un double-clic, avec une icône selon leur type, et Enregistrer (Ctrl+S) met à jour le fichier d'origine.</p>
+            <div class="set-acts"><button class="pbtn" id="bureauDefaut" type="button">Ouvrir ces fichiers avec Grimoire par défaut</button><button class="pbtn ghost" id="bureauRetablir" type="button" hidden>Revenir aux applis d'avant</button></div>
+            <p class="set-res" id="bureauRes"></p>
+          </div>
+          <div class="web-only set-dl">
+            <p class="set-note"><b>Appli de bureau</b> pour Windows et Linux : un installateur à télécharger, comme LibreOffice. Les .docx, .xlsx, .csv et .pdf s'ouvrent d'un double-clic avec leur icône, et les mises à jour arrivent toutes seules.</p>
+            <div class="set-acts"><a class="pbtn" href="https://github.com/csaintecluque-ui/Grimoire/releases/latest" target="_blank" rel="noopener" data-ic="download"><span>Télécharger l'appli de bureau</span></a></div>
+          </div>
+          <details class="sync-help web-only"><summary>Installer sur l'ordinateur (hors connexion)</summary><ol>
             <li>Ouvrir <b>csaintecluque-ui.github.io/Grimoire</b> dans <b>Chrome, Chromium, Edge ou Brave</b>. Firefox ne sait pas installer d'applis web sous Linux.</li>
             <li>Cliquer sur le bouton <b>Installer Grimoire</b> ci-dessus, ou sur l'icône d'installation au bout de la barre d'adresse (dans Chrome, elle est aussi dans le menu ⋮ → <i>Caster, enregistrer et partager</i>).</li>
             <li>Grimoire apparaît dans le menu des applications (rubrique Bureautique ou Applications Chrome) et peut être épinglé au tableau de bord. Il s'ouvre et fonctionne sans connexion ; la sauvegarde en ligne reprend au retour du réseau.</li>
           </ol></details>
-          <details class="sync-help"><summary>Ouvrir les .docx, .xlsx, .csv et .pdf avec Grimoire</summary><ol>
+          <details class="sync-help web-only"><summary>Ouvrir les .docx, .xlsx, .csv et .pdf avec Grimoire</summary><ol>
             <li>Grimoire doit d'abord être installé (ci-dessus).</li>
             <li>Dans le gestionnaire de fichiers (Nemo sous Linux Mint) : clic droit sur un fichier → <i>Ouvrir avec</i> → <b>Grimoire</b>. Au premier fichier, le navigateur demande l'autorisation : cocher <i>Ne plus demander</i> puis <i>Ouvrir</i>.</li>
             <li>Pour que le double-clic l'ouvre toujours dans Grimoire : clic droit → <i>Propriétés</i> → onglet <i>Ouvrir avec</i> → choisir Grimoire → <b>Définir par défaut</b>. À faire une fois par type (.docx, .xlsx…). Sous Windows : clic droit → <i>Ouvrir avec</i> → <i>Choisir une autre application</i> → Grimoire → <i>Toujours</i>.</li>
             <li>Le fichier ouvert est copié dans Grimoire : vos modifications y sont enregistrées. Pour remettre à jour le fichier d'origine, <b>Exporter</b> en .docx ou .xlsx par-dessus.</li>
           </ol></details>
-          <details class="sync-help"><summary>Installer Grimoire pour les fichiers de l'ordinateur (icônes et appli par défaut)</summary>
+          <details class="sync-help web-only"><summary>Installer Grimoire pour les fichiers de l'ordinateur (icônes et appli par défaut)</summary>
             <p class="set-note">Une fois Grimoire choisi par défaut, les fichiers prennent une icône au sceau selon leur type : DOC, XLS, CSV, PDF. Sous Windows, Edge et Chrome ne le font pas eux-mêmes : le fichier d'installation s'en charge, comme l'installateur de LibreOffice. Une fois par ordinateur ; sans droit administrateur, et réversible.</p>
             <div class="set-acts"><a class="pbtn" href="windows/grimoire-installation.cmd" download data-ic="download"><span>Installation Windows</span></a><a class="pbtn ghost" href="linux/grimoire-installation.sh" download data-ic="download"><span>Installation Linux</span></a></div>
             <ol>

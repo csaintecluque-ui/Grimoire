@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.17.6';
+const APP_VERSION = '1.18.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -275,6 +275,8 @@ async function flushSave() {
   if (pendingSave) { pendingSave = false; flushSave(); }
 }
 window.addEventListener('beforeunload', () => { if (saveTimer) flushSave(); });
+// Appelé par l'appli de bureau avant de fermer la fenêtre : rien de tapé ne se perd
+window.__grimoireFlush = async () => { try { if (state.view === 'sheet') commitEdit(false); if (saveTimer || (state.cur && !state.cur._saved)) await flushSave(); } catch {} };
 
 /* =========================================================
    Modèles
@@ -627,7 +629,7 @@ async function fireReminder(n) {
   const body = n.text.length > 180 ? n.text.slice(0, 177) + '…' : n.text;
   let shown = false;
   if ('Notification' in window && Notification.permission === 'granted') {
-    try { const reg = await navigator.serviceWorker.ready; await reg.showNotification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { note: n.id }, requireInteraction: true }); shown = true; }
+    try { const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((_, ko) => setTimeout(() => ko(new Error('sans service worker')), 1500))]); await reg.showNotification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { note: n.id }, requireInteraction: true }); shown = true; }
     catch { try { new Notification('Rappel Grimoire', { body, tag: 'note-' + n.id, icon: 'icons/icon-192.png' }); shown = true; } catch {} }
   }
   if (!shown || document.visibilityState === 'visible') toast('🔔 ' + body);
@@ -6868,7 +6870,7 @@ const FH = {
   db: null, links: new Map(),
   open() { return this.db ||= new Promise((res, rej) => { const r = indexedDB.open('grimoire-fichiers', 1); r.onupgradeneeded = () => r.result.createObjectStore('h'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
   async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('h', mode); const q = fn(t.objectStore('h')); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); },
-  async get(id) { if (this.links.has(id)) return this.links.get(id); let h = null; try { h = await this.tx('readonly', st => st.get(id)) || null; } catch {} this.links.set(id, h); return h; },
+  async get(id) { if (this.links.has(id)) return this.links.get(id); let h = null; try { h = await this.tx('readonly', st => st.get(id)) || null; } catch {} if (this.links.has(id)) return this.links.get(id); /* lié pendant la lecture : ne pas l'écraser */ if (h && h.__path && window.grimoireBureau) h = window.grimoireBureau.poignee(h.__path); this.links.set(id, h); return h; },
   async set(id, h) { this.links.set(id, h); try { await this.tx('readwrite', st => st.put(h, id)); } catch {} },
   async del(id) { this.links.delete(id); this.dirty(id, false); try { await this.tx('readwrite', st => st.delete(id)); } catch {} },
   dirty(id, v) { const m = ls.get('grim.fdirty', {}); if (v === undefined) return !!m[id]; if (v) m[id] = 1; else delete m[id]; ls.set('grim.fdirty', m); }
@@ -8550,7 +8552,8 @@ async function renderSettings() {
   $('#aiModels').innerHTML = AI_SUGG[AI.provider].map(m => `<option value="${m}">`).join('');
   $('#appVer').textContent = APP_VERSION;
   const inst = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
-  $('#instState').textContent = inst ? 'Grimoire est installé sur cet appareil : il s\'ouvre comme une appli et fonctionne hors connexion.'
+  $('#instState').textContent = window.grimoireBureau ? 'Application de bureau Grimoire : elle s\'ouvre depuis le menu Démarrer ou le menu des applications, fonctionne hors connexion et se met à jour toute seule.'
+    : inst ? 'Grimoire est installé sur cet appareil : il s\'ouvre comme une appli et fonctionne hors connexion.'
     : installEvt ? 'Grimoire n\'est pas encore installé sur cet appareil.'
     : 'Grimoire n\'est pas installé ici. Si le bouton Installer n\'apparaît pas, ouvrez Grimoire dans Chrome, Edge ou Brave (voir ci-dessous).';
   const n = state.docs.size;
