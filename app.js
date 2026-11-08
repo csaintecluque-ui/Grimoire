@@ -759,7 +759,6 @@ function syncUI(s) {
   const txt = !SY.cfg ? '' : s === 'run' ? 'Sauvegarde en ligne…' : s === 'err' ? SY.err : when ? 'Sauvegardé en ligne à ' + when + '.' : '';
   if (st) { st.textContent = txt; st.className = 'set-res' + (s === 'err' ? ' err' : s === 'ok' ? ' ok' : ''); }
   const f = $('#syncFoot'); if (f) { f.textContent = SY.cfg ? txt : ''; f.classList.toggle('err', s === 'err'); }
-  const w = $('#syncWarn'); if (w) w.hidden = !!SY.cfg || ss.get('grim.syncLater');
   $('#syncOn') && ($('#syncOn').hidden = !!SY.cfg); $('#syncNow') && ($('#syncNow').hidden = !SY.cfg); $('#syncOff') && ($('#syncOff').hidden = !SY.cfg);
 }
 const ss = { get: k => { try { return sessionStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} } };
@@ -791,8 +790,6 @@ async function syncEnable() {
 $('#syncOn').addEventListener('click', syncEnable);
 $('#syncNow').addEventListener('click', () => syncNow());
 $('#syncOff').addEventListener('click', () => { SY.cfg = null; ls.set('grim.sync', null); try { localStorage.removeItem('grim.sync'); } catch {} syncUI(); toast('Sauvegarde en ligne désactivée sur cet appareil (les données en ligne sont conservées).'); });
-$('#syncLater').addEventListener('click', () => { ss.set('grim.syncLater', '1'); syncUI(); });
-$('#syncGo').addEventListener('click', () => openSettings().then(() => setTimeout(() => $('#syncCard').scrollIntoView({ block: 'start', behavior: 'smooth' }), 80)));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { if (SY.cfg && !SY.busy) syncNow(); } else scheduleSync(500); });
 addEventListener('online', () => scheduleSync(500));
 setInterval(() => { if (document.visibilityState === 'visible') scheduleSync(0); }, 120000);
