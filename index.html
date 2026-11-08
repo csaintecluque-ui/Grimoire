@@ -153,6 +153,7 @@
           <button class="tb" data-w="cols" title="Colonnes : mettre le passage en 2 ou 3 colonnes" data-ic="cols2"></button>
           <button class="tb" data-w="track" title="Suivi des modifications (Ctrl+Maj+E)" aria-pressed="false" data-ic="pen"></button>
           <button class="tb" data-w="comment" title="Nouveau commentaire sur la sélection (Ctrl+Alt+M)" data-ic="comment"></button>
+          <button class="tb" data-w="gram" title="Orthographe et grammaire (F7)" aria-pressed="false" data-ic="abc"></button>
           <button class="tb" data-w="find" title="Rechercher et remplacer (Ctrl+F)" data-ic="search"></button>
           <button class="tb" data-w="layout" title="Mise en page, en-tête et pied de page" data-ic="layout"></button>
           <button class="tb" data-w="outline" title="Afficher ou masquer le plan" data-ic="outline"></button>
@@ -180,7 +181,9 @@
       <div class="trk-bar" id="trackBar" hidden></div>
       <div class="w-body">
         <nav class="outline" id="outline" aria-label="Plan du document"><p class="eyebrow">Plan</p><ol id="outlineList"></ol></nav>
-        <div class="w-scroll" id="wScroll"><div class="page-wrap"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article><div id="pgMarks" aria-hidden="true"></div><aside class="cmt-rail" id="cmtRail" aria-label="Commentaires"></aside></div></div><style id="cmtCss"></style><style id="docStyles"></style>
+        <div class="w-scroll" id="wScroll"><div class="page-wrap"><article class="page" id="ed" contenteditable="true" spellcheck="true" lang="fr" aria-label="Contenu du document"></article><div id="pgMarks" aria-hidden="true"></div><aside class="fn-area" id="fnArea" hidden aria-label="Notes de bas de page"></aside><aside class="cmt-rail" id="cmtRail" aria-label="Commentaires"></aside></div></div><style id="cmtCss"></style><style id="docStyles"></style>
+        <div class="fpop sdlg wdlg" id="wDlg" hidden role="dialog"></div>
+        <div class="fpop fn-pop" id="fnPop" hidden role="dialog" aria-label="Note de bas de page"></div>
         <div class="img-bar tbl-bar" id="tblBar" hidden role="toolbar" aria-label="Tableau">
           <button data-tb="rowAbove">+ Ligne au-dessus</button><button data-tb="rowBelow">+ Ligne en dessous</button><button data-tb="colLeft">+ Colonne à gauche</button><button data-tb="colRight">+ Colonne à droite</button>
           <button data-tb="rowDel">− Ligne</button><button data-tb="colDel">− Colonne</button><button data-tb="merge">Fusionner →</button><button data-tb="split">Scinder</button>
@@ -226,6 +229,7 @@
           <span class="tb-grp" id="pdfAnnTools" hidden>
             <span class="tb-sep"></span>
             <button class="tb" data-pt="select" title="Sélectionner, déplacer, redimensionner" data-ic="cursor"></button>
+            <button class="tb" data-pt="edtext" title="Modifier le texte du PDF : cliquez sur une ligne" data-ic="edtext"></button>
             <button class="tb" data-pt="text" title="Ajouter du texte" data-ic="type"></button>
             <button class="tb" data-pt="hl" title="Surligner" data-ic="highlighter"></button>
             <button class="tb" data-pt="ink" title="Dessiner à main levée" data-ic="pen"></button>
@@ -256,8 +260,9 @@
         </div>
       </div>
       <div class="findbar sfind" id="pdfFind" hidden role="search">
-        <div class="sf-row"><input id="pfQ" placeholder="Rechercher dans le PDF" autocomplete="off" aria-label="Rechercher dans le PDF"><span class="sf-count" id="pfCount"></span>
+        <div class="sf-row"><input id="pfQ" placeholder="Rechercher dans le PDF" autocomplete="off" aria-label="Rechercher dans le PDF"><span class="sf-count" id="pfCount"></span><button class="fb-link" data-pf="rep" title="Remplacer (Ctrl+H)">Remplacer</button>
           <button class="xbtn" data-pf="prev" title="Précédent (Maj+Entrée)" aria-label="Précédent">&#8593;</button><button class="xbtn" data-pf="next" title="Suivant (Entrée)" aria-label="Suivant">&#8595;</button><button class="xbtn" data-pf="close" title="Fermer" aria-label="Fermer">×</button></div>
+        <div class="sf-row pf-rep"><input id="prQ" placeholder="Remplacer par" autocomplete="off" aria-label="Remplacer par"><button class="pbtn" data-pf="repall">Tout remplacer</button></div>
       </div>
       <div class="pdf-scroll" id="pdfScroll"><div class="pdf-pages" id="pdfPages"></div></div>
       <div class="fpop sdlg" id="pdfDlg" hidden role="dialog"></div>
@@ -373,9 +378,16 @@
         <div class="set-card" id="acCard">
           <h2>Correction automatique</h2>
           <label class="ac-tg"><input type="checkbox" id="acOn"> <span>Corriger pendant la frappe (documents, notes, texte des cellules)</span></label>
-          <p class="set-note">Comme dans Word : majuscule en début de phrase, accents et apostrophes oubliés (deja → déjà, jai → j’ai, l’equipe → l’équipe), fautes de frappe courantes, DEux MAjuscules, espace insécable avant ; : ! ?, guillemets « », apostrophe ’ et points de suspension. Les sigles en majuscules (CA, PSA…) et les formules ne sont jamais touchés. <b>Ctrl+Z</b> juste après une correction l'annule, et ce mot n'est plus corrigé. Les mots mal orthographiés restent soulignés par le correcteur du téléphone ou du navigateur.</p>
+          <p class="set-note">Comme dans Word : majuscule en début de phrase, accents et apostrophes oubliés (deja → déjà, jai → j’ai, l’equipe → l’équipe), fautes de frappe courantes, DEux MAjuscules, espace insécable avant ; : ! ?, guillemets « », apostrophe ’ et points de suspension. Les sigles en majuscules (CA, PSA…) et les formules ne sont jamais touchés. <b>Ctrl+Z</b> juste après une correction l'annule, et ce mot n'est plus corrigé. Les autres fautes sont soulignées par le correcteur ci-dessous.</p>
           <label class="field" for="acMine"><span>Mes remplacements</span><textarea id="acMine" rows="4" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="msm = Mesdames, Messieurs,&#10;cdt = Cordialement,&#10;sig = Prénom NOM"></textarea></label>
           <p class="set-note">Un remplacement par ligne : « abréviation = texte ». Il s'applique dès que vous tapez un espace ou une ponctuation après l'abréviation.</p>
+        </div>
+        <div class="set-card" id="gcCard">
+          <h2>Correcteur d'orthographe et de grammaire</h2>
+          <label class="ac-tg"><input type="checkbox" id="gcOn"> <span>Souligner les fautes dans les documents (orthographe en rouge, grammaire en bleu, typographie en pointillés)</span></label>
+          <p class="set-note">Correcteur Grammalecte, installé avec Grimoire : le texte ne quitte pas l'appareil. Clic sur un mot souligné pour les suggestions ; F7 pour la liste de toutes les fautes du document. Au premier usage, environ 9 Mo sont téléchargés puis gardés pour fonctionner hors connexion.</p>
+          <label class="field" for="gcDict"><span>Mon dictionnaire</span><textarea id="gcDict" rows="3" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="Un mot par ligne : noms propres, sigles, mots de métier…"></textarea></label>
+          <p class="set-note" id="gcIgnNote"></p>
         </div>
         <div class="set-card" id="syncCard">
           <h2>Sauvegarde en ligne</h2>

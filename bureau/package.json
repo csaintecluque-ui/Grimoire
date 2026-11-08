@@ -1,7 +1,7 @@
 {
   "name": "grimoire",
   "productName": "Grimoire",
-  "version": "1.20.0",
+  "version": "1.23.0",
   "description": "Suite bureautique personnelle : documents, classeurs et formules, PDF.",
   "main": "main.js",
   "desktopName": "grimoire.desktop",
