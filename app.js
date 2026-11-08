@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.20.0';
+const APP_VERSION = '1.21.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -109,6 +109,9 @@ const IC = {
   cursor: '<path d="M5 3l14 7-6 2-2 6z"/>',
   square: '<rect x="4" y="5" width="16" height="14" rx="1.5"/>',
   whiteout: '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 12h10" stroke-dasharray="2 2"/>',
+  lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  unlock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-1.9"/>',
+  target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor"/>',
   redact: '<rect x="3" y="8" width="18" height="8" rx="1" fill="currentColor"/><path d="M3 4h12M3 20h8"/>',
   sign: '<path d="M3 17c3-1 4-9 6-9s0 8 2 8 3-4 4-4 1 3 3 3 2-1 3-1"/><path d="M3 21h18"/>',
   rotL: '<path d="M3 4v6h6"/><path d="M3.5 10A8.5 8.5 0 1 1 6 16.5"/>',
@@ -2556,6 +2559,7 @@ function select(r, c, extend) {
 }
 function updateFx() {
   if (SH.editing) return;
+  fx.readOnly = !!sheetProt() && lockedIn({ r1: SH.sel.r, r2: SH.sel.r, c1: SH.sel.c, c2: SH.sel.c }, true);
   if (document.activeElement !== $('#fxRef')) $('#fxRef').value = rngRef(rng());
   fx.value = rawOf(SH.sel.r, SH.sel.c);
 }
@@ -2647,6 +2651,7 @@ function toggleMerge() {
   commitEdit(false);
   const R = expandMerged(rng());
   const one = SH.merges.find(m => m.r1 === R.r1 && m.c1 === R.c1 && m.r2 === R.r2 && m.c2 === R.c2);
+  if (lockedIn(R)) return;
   pushHist(R); SH.mgDirty ||= true;
   const cells = state.cur.cells;
   if (one) { const x = cells[addr(R.r1, R.c1)]; if (x && x.f) delete x.f.mg; afterChange(); drawSel(); return toast('Cellules séparées'); }
@@ -2666,6 +2671,7 @@ function toggleMerge() {
 }
 function setHidden(kind, on) {
   commitEdit(false);
+  if (lockedIn('all')) return;
   const cur = state.cur, R = rng(); pushHist('meta');
   cur.hid ||= { r: [], c: [] };
   if (kind === 'r') {
@@ -2682,9 +2688,9 @@ function setHidden(kind, on) {
   scheduleSave();
   toast(on ? (kind === 'r' ? 'Lignes masquées' : 'Colonnes masquées') : (kind === 'r' ? 'Toutes les lignes sont affichées' : 'Toutes les colonnes sont affichées'));
 }
-function unhideCol(c) { const cur = state.cur; pushHist('meta'); cur.hid.c = cur.hid.c.filter(x => x !== c); buildGrid(); renderValues(); applyFilters(); applyFreeze(); select(SH.sel.r, c); scheduleSave(); }
+function unhideCol(c) { const cur = state.cur; if (lockedIn('all')) return; pushHist('meta'); cur.hid.c = cur.hid.c.filter(x => x !== c); buildGrid(); renderValues(); applyFilters(); applyFreeze(); select(SH.sel.r, c); scheduleSave(); }
 function stepDecimals(delta) {
-  commitEdit(false); pushHist(rng());
+  commitEdit(false); if (lockedIn(rng())) return; pushHist(rng());
   const first = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
   const v = (SH.vals[SH.sel.r] || [])[SH.sel.c];
   let base = first.d;
@@ -2767,10 +2773,10 @@ function cfTxt(r, c, v) {
   if (typeof v === 'number') { const x = cellOf(r, c); return x && x.f && x.f.n === 'date' ? fmtDate(v) : String(v); }
   return typeof v === 'boolean' ? (v ? 'VRAI' : 'FAUX') : String(v);
 }
-function computeCF() {
+function computeCF(rowsShown, colsShown) {
   const cur = state.cur; SH.cfMap = {};
-  const rules = cur.cf || []; if (!rules.length || !V.ok) return;
-  const rowsShown = V.list, colsShown = Object.keys(SH.colTh).map(Number);
+  const rules = cur.cf || []; if (!rules.length || (!V.ok && !rowsShown)) return;
+  rowsShown ||= V.list; colsShown ||= Object.keys(SH.colTh).map(Number);
   rules.forEach(rule => {
     const r2 = Math.min(rule.r2, cur.rows - 1), c2 = Math.min(rule.c2, cur.cols - 1);
     const ctx = cfCtx(rule, r2, c2);
@@ -2893,7 +2899,7 @@ function applyRaw(r, c, raw) {
   if (SH.hf) SH.hf.setCellContents({ sheet: SH.sid, row: r, col: c }, [[hfVal(cells[k] || { v: raw })]]);
 }
 function afterChange() { SH.vver = (SH.vver || 0) + 1; if (SH.noEvents) SH.valsDirty = true; renderValues(); updateFx(); updateSelStatus(); updateSheetTools(); scheduleSave(); }
-function setRaw(r, c, raw) { pushHist({ r1: r, r2: r, c1: c, c2: c }); applyRaw(r, c, raw); afterChange(); }
+function setRaw(r, c, raw) { if (lockedIn({ r1: r, r2: r, c1: c, c2: c })) return; pushHist({ r1: r, r2: r, c1: c, c2: c }); applyRaw(r, c, raw); afterChange(); }
 function batch(fn) { if (SH.hf) SH.hf.batch(fn); else fn(); }
 // Très grande sélection (plus d'un million de cases, par exemple Ctrl+A sur un gros classeur) :
 // on ne parcourt que les cases remplies, au lieu de créer des millions de cases vides.
@@ -2907,9 +2913,9 @@ function eachInRange(fn, quiet) {
   for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) fn(r, c);
 }
 
-function clearRange() { pushHist(rng()); batch(() => eachInRange((r, c) => applyRaw(r, c, ''), true)); afterChange(); }
+function clearRange() { if (lockedIn(rng())) return; pushHist(rng()); batch(() => eachInRange((r, c) => applyRaw(r, c, ''), true)); afterChange(); }
 function setFmt(key, val) {
-  commitEdit(false); pushHist(rng());
+  commitEdit(false); if (lockedIn(rng())) return; pushHist(rng());
   const first = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
   if (['b', 'i', 'u', 'w'].includes(key)) val = first[key] ? 0 : 1;
   if (key === 'a' && first.a === val) val = '';
@@ -2944,6 +2950,7 @@ function growEditor() {
   cellEd.classList.toggle('fm', cellEd.value[0] === '=');
 }
 function startEdit(initial, keep) {
+  if (lockedIn({ r1: SH.sel.r, r2: SH.sel.r, c1: SH.sel.c, c2: SH.sel.c })) return;
   SH.refIns = null;
   const raw = keep ? String(rawOf(SH.sel.r, SH.sel.c)) : initial;
   if (isPhone()) {
@@ -3265,6 +3272,7 @@ gw.addEventListener('dblclick', e => {
 
 function startResize(e) {
   e.preventDefault(); e.stopPropagation();
+  if (lockedIn('all')) return;
   const c = +e.target.dataset.c, startX = e.clientX, col = $('#grid colgroup').children[c + 1], w0 = col.getBoundingClientRect().width || 104;
   const before = snap('meta');
   const mv = ev => { const w = Math.max(40, Math.round(w0 + ev.clientX - startX)); col.style.width = w + 'px'; state.cur.colW[c] = w; };
@@ -3367,6 +3375,7 @@ document.addEventListener('paste', e => {
   const txt = (e.clipboardData.getData('text/plain') || '').replace(/\r/g, '');
   const rows = txt.split('\n'); if (rows.length > 1 && rows[rows.length - 1] === '') rows.pop();
   const R = rng(), wide = rows.reduce((m, l) => Math.max(m, l.split('\t').length), 0);
+  if (lockedIn({ r1: R.r1, r2: R.r1 + rows.length - 1, c1: R.c1, c2: R.c1 + wide - 1 })) return;
   pushHist({ r1: R.r1, r2: R.r1 + rows.length - 1, c1: R.c1, c2: R.c1 + wide - 1 });
   ensureSize(R.r1 + rows.length - 1, R.c1 + wide - 1);
   SH.nc = (SH.nc || 0) + rows.length * wide;
@@ -3413,6 +3422,7 @@ function seriesOf(src) {
   return { a: nums[0], step, date: isDate };
 }
 function doFill(S, T, plain) {
+  if (lockedIn(T)) return;
   pushHist({ r1: Math.min(S.r1, T.r1), r2: Math.max(S.r2, T.r2), c1: Math.min(S.c1, T.c1), c2: Math.max(S.c2, T.c2) });
   ensureSize(T.r2, T.c2);
   const vertical = T.c1 === S.c1 && T.c2 === S.c2;
@@ -3543,6 +3553,7 @@ function sortZone(desc) {
     if (!d) d = ra === 0 ? a.v - b.v : ra === 1 ? String(a.v).localeCompare(String(b.v), 'fr', { numeric: true, sensitivity: 'base' }) : 0;
     return desc ? -d : d;
   });
+  if (lockedIn(Z)) return;
   pushHist(Z);
   batch(() => rows.forEach((row, i) => { const to = Z.r1 + i; row.cells.forEach((x, j) => putCell(to, Z.c1 + j, x, to - row.from, 0)); }));
   afterChange(); applyFilters();
@@ -3619,7 +3630,7 @@ function refreshSheetView() {
 }
 function renderTabs() {
   const cur = state.cur;
-  $('#tabList').innerHTML = cur.sheets.map((sh, i) => `<button class="tab" role="tab" data-i="${i}" aria-selected="${i === cur.active}">${esc(sh.name)}${i === cur.active ? '<span class="tab-more" aria-hidden="true">▾</span>' : ''}</button>`).join('');
+  $('#tabList').innerHTML = cur.sheets.map((sh, i) => `<button class="tab" role="tab" data-i="${i}" aria-selected="${i === cur.active}"${sh.prot ? ' title="Feuille protégée"' : ''}>${sh.prot ? `<span class="tab-lock">${ic('lock')}</span>` : ''}${esc(sh.name)}${i === cur.active ? '<span class="tab-more" aria-hidden="true">▾</span>' : ''}</button>`).join('');
   const a = $('#tabList .tab[aria-selected="true"]'); if (a) a.scrollIntoView({ inline: 'nearest', block: 'nearest' });
 }
 function switchSheet(i) {
@@ -3749,7 +3760,7 @@ function openFmt(kind) {
 }
 function setBorders(mode) {
   commitEdit(false);
-  const R = rng(); pushHist(R);
+  const R = rng(); if (lockedIn(R)) return; pushHist(R);
   eachInRange((r, c) => {
     const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
     const set = (side, on) => { if (on) x.f[side] = 1; else delete x.f[side]; };
@@ -3796,7 +3807,7 @@ function openDlg(html, cls) {
   const f = sDlg.querySelector('[autofocus]'); if (f && !isPhone()) setTimeout(() => f.focus(), 30);
   return sDlg.firstElementChild;
 }
-function closeDlg() { if (sDlg.hidden) return; sDlg.hidden = true; sDlg.innerHTML = ''; SH.dlg = null; if (state.view === 'sheet') gw.focus({ preventScroll: true }); }
+function closeDlg() { if (sDlg.hidden) return; sDlg.hidden = true; sDlg.innerHTML = ''; SH.dlg = null; const f = SH.dlgOnClose; SH.dlgOnClose = null; if (f) f(); if (state.view === 'sheet') gw.focus({ preventScroll: true }); }
 const dlgHead = t => `<div class="fp-h"><b>${t}</b><button class="xbtn" data-dx aria-label="Fermer">${ic('close')}</button></div>`;
 sDlg.addEventListener('click', e => { if (e.target.closest('[data-dx]')) closeDlg(); });
 sDlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDlg(); } });
@@ -3843,6 +3854,7 @@ function openDdEditor() {
   const del = $('#ddDel'); if (del) del.addEventListener('click', () => { applyToRange(f2 => { delete f2.dd; }); closeDlg(); toast('Liste retirée'); });
 }
 function applyToRange(fn) {
+  if (fn && !fn.unlockOk && lockedIn(rng())) return;
   pushHist(rng());
   eachInRange((r, c) => { const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {}; fn(x.f, r, c, x); if (!x.v && !Object.keys(x.f).length) delete state.cur.cells[k]; });
   afterChange();
@@ -3851,6 +3863,7 @@ function toggleCheckboxFmt() {
   commitEdit(false);
   const f = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
   const on = !f.chk;
+  if (lockedIn(rng())) return;
   pushHist(rng());
   batch(() => eachInRange((r, c) => {
     const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
@@ -3902,6 +3915,7 @@ function ddReject(r, c, raw) {
 /* notes */
 function openNoteEditor() {
   commitEdit(false);
+  if (lockedIn({ r1: SH.sel.r, r2: SH.sel.r, c1: SH.sel.c, c2: SH.sel.c })) return;
   const r = SH.sel.r, c = SH.sel.c, f = (cellOf(r, c) || {}).f || {};
   SH.dlg = 'note';
   openDlg(dlgHead('Note sur ' + addr(r, c)) + `<label class="dlg-f"><span>Texte de la note</span><textarea id="noteTx" rows="5" autofocus placeholder="Une remarque, une source, un rappel…">${esc(f.note || '')}</textarea></label>
@@ -3928,6 +3942,7 @@ function cfDescr(rule) {
 }
 function openCF(editId) {
   commitEdit(false);
+  if (lockedIn('all')) return;
   const cur = state.cur; cur.cf ||= [];
   SH.dlg = 'cf';
   const rule = editId ? cur.cf.find(x => x.id === editId) : null;
@@ -4106,6 +4121,7 @@ function sfReplaceIn(raw, q, rep, mc, whole) {
 }
 function sfReplace(all) {
   const q = $('#sfQ').value; if (!q) return;
+  if (lockedIn('all')) return;
   const rep = $('#sfR').value, mc = $('#sfCase').checked, whole = $('#sfWhole').checked;
   if (!SF.hits.length) sfRun();
   const todo = all ? SF.hits.slice() : SF.hits[SF.i] ? [SF.hits[SF.i]] : [];
@@ -4217,7 +4233,7 @@ $('#sFont').addEventListener('change', e => { setFmt('ff', e.target.value === 'I
 $('#sSize').addEventListener('change', e => { setFmt('fs', e.target.value === '10' ? '' : +e.target.value); gw.focus({ preventScroll: true }); });
 
 /* --- graphiques */
-const CHART_TYPES = [['col', 'Colonnes'], ['bar', 'Barres'], ['line', 'Courbes'], ['stack', 'Colonnes empilées'], ['pie', 'Secteurs']];
+const CHART_TYPES = [['col', 'Colonnes'], ['bar', 'Barres'], ['line', 'Courbes'], ['area', 'Aires'], ['stack', 'Colonnes empilées'], ['combo', 'Colonnes + courbe'], ['scatter', 'Nuage de points'], ['pie', 'Secteurs']];
 const chartLayer = $('#chartLayer'), chartTip = $('#chartTip');
 const CH = { sel: null, drag: null };
 const fmtAxis = new Intl.NumberFormat('fr-FR', { notation: 'compact', maximumFractionDigits: 1 });
@@ -4250,8 +4266,20 @@ function chartData(ch, vals, cellsOf) {
   const hasLbl = A[0].length > 1 && body.length > 0 && body.every(r => !isNum(r[0]));
   const sCols = []; for (let j = hasLbl ? 1 : 0; j < A[0].length; j++) sCols.push(j);
   const cats = body.map((r, i) => hasLbl ? bodyT[i][0] : String(i + 1));
-  const series = sCols.map((j, k) => ({ name: hasHdr ? (AT[0][j] || `Série ${k + 1}`) : `Série ${k + 1}`, vals: body.map(r => isNum(r[j]) ? r[j] : null) })).filter(s => s.vals.some(v => v != null));
-  return { cats, series, hasHdr, hasLbl };
+  let series = sCols.map((j, k) => ({ name: hasHdr ? (AT[0][j] || `Série ${k + 1}`) : `Série ${k + 1}`, vals: body.map(r => isNum(r[j]) ? r[j] : null) })).filter(s => s.vals.some(v => v != null));
+  // Nuage de points : la première colonne de nombres donne les abscisses (X), les suivantes les séries (Y).
+  let xs = null;
+  if (ch.type === 'scatter') {
+    if (!hasLbl && series.length >= 2) { xs = series[0].vals; series = series.slice(1); }
+    else xs = cats.map((_, i) => i + 1);
+  }
+  return { cats, series, hasHdr, hasLbl, xs };
+}
+// Colonnes + courbe : la courbe prend son propre axe (à droite) quand ses valeurs n'ont pas le même ordre de grandeur.
+function comboAxis2(D) {
+  const ext = list => { const v = list.flatMap(s => s.vals.filter(x => x != null).map(Math.abs)); return v.length ? Math.max(...v) : 0; };
+  const a = ext(D.series.slice(0, 1)), b = ext(D.series.slice(1));
+  return D.series.length > 1 && a > 0 && b > 0 && (a / b > 4 || b / a > 4);
 }
 const esc2 = s => esc(String(s));
 function chartSVG(ch, D, W, H) {
@@ -4273,6 +4301,8 @@ function chartSVG(ch, D, W, H) {
     out += `<text x="${cx}" y="${cy - 2}" text-anchor="middle" class="ch-tot">${esc(fmtAxis.format(tot))}</text><text x="${cx}" y="${cy + 14}" text-anchor="middle" class="ch-lbl">Total</text>`;
     return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc2(ch.title || 'Graphique')}">${out}</svg>`;
   }
+  if (ch.type === 'scatter') return scatterSVG(ch, D, W, H);
+  if (ch.type === 'combo') return comboSVG(ch, D, W, H);
   const horiz = ch.type === 'bar', stack = ch.type === 'stack';
   let lo = 0, hi = 0;
   if (stack) cats.forEach((_, i) => { let p = 0, n = 0; ser.forEach(s => { const v = s.vals[i] || 0; if (v >= 0) p += v; else n += v; }); hi = Math.max(hi, p); lo = Math.min(lo, n); });
@@ -4308,15 +4338,18 @@ function chartSVG(ch, D, W, H) {
     return `<path d="${d}" fill="var(--s${k + 1})" data-tip="${esc2(tip)}"/>`;
   };
   let m = '';
-  if (ch.type === 'line') {
+  if (ch.type === 'line' || ch.type === 'area') {
     ser.forEach((s, k) => {
-      let d = '', pen = false;
-      s.vals.forEach((v, i) => { if (v == null) { pen = false; return; } const x = (padL + band * (i + .5)).toFixed(1), y = val2(v).toFixed(1); d += (pen ? 'L' : 'M') + x + ',' + y; pen = true; });
+      let d = '', pen = false, fillD = '', seg = [];
+      const close = () => { if (seg.length) fillD += `M${seg[0][0]},${z}` + seg.map(p => `L${p[0]},${p[1]}`).join('') + `L${seg[seg.length - 1][0]},${z}Z`; seg = []; };
+      s.vals.forEach((v, i) => { if (v == null) { pen = false; close(); return; } const x = (padL + band * (i + .5)).toFixed(1), y = val2(v).toFixed(1); d += (pen ? 'L' : 'M') + x + ',' + y; pen = true; seg.push([x, y]); });
+      close();
+      if (ch.type === 'area') m += `<path d="${fillD}" fill="var(--s${k + 1})" fill-opacity=".28" stroke="none"/>`;
       m += `<path d="${d}" fill="none" stroke="var(--s${k + 1})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
       s.vals.forEach((v, i) => {
         if (v == null) return;
         const x = (padL + band * (i + .5)).toFixed(1), y = val2(v).toFixed(1);
-        if (n <= 24) m += `<circle cx="${x}" cy="${y}" r="4" fill="var(--s${k + 1})" stroke="var(--ch-bg)" stroke-width="2"/>`;
+        if (n <= 24 && ch.type === 'line') m += `<circle cx="${x}" cy="${y}" r="4" fill="var(--s${k + 1})" stroke="var(--ch-bg)" stroke-width="2"/>`;
         m += `<circle cx="${x}" cy="${y}" r="11" fill="transparent" data-tip="${esc2(s.name)} · ${esc2(cats[i])} : ${esc2(fmtVal.format(v))}"/>`;
       });
     });
@@ -4344,6 +4377,48 @@ function chartSVG(ch, D, W, H) {
       else { const y = Math.min(p0, p1), h = Math.abs(p1 - p0); m += rbar(padL + start, y, bw, h, v >= 0, j, tip); }
     }));
   }
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc2(ch.title || 'Graphique')}">${g}${m}</svg>`;
+}
+// Nuage de points : deux axes de nombres.
+function scatterSVG(ch, D, W, H) {
+  const ser = D.series.slice(0, 8), xs = D.xs || [];
+  const pts = []; ser.forEach((s, k) => s.vals.forEach((v, i) => { if (v != null && xs[i] != null) pts.push([xs[i], v, k, i]); }));
+  if (!pts.length) return `<div class="ch-empty">Aucun couple de nombres dans ${esc(rngRef(ch))}</div>`;
+  const sx = niceScale(Math.min(...pts.map(p => p[0])), Math.max(...pts.map(p => p[0]))), sy = niceScale(Math.min(0, ...pts.map(p => p[1])), Math.max(...pts.map(p => p[1])));
+  const padL = Math.max(...sy.ticks.map(t => fmtAxis.format(t).length)) * 7 + 10, padR = 12, padT = 8, padB = 26;
+  const pw = Math.max(20, W - padL - padR), ph = Math.max(20, H - padT - padB);
+  const X = v => padL + (v - sx.lo) / (sx.hi - sx.lo || 1) * pw, Y = v => padT + ph - (v - sy.lo) / (sy.hi - sy.lo || 1) * ph;
+  let g = '';
+  sy.ticks.forEach(t => { const p = Y(t).toFixed(1); g += `<line x1="${padL}" y1="${p}" x2="${padL + pw}" y2="${p}" class="ch-grid"/><text x="${padL - 6}" y="${+p + 4}" text-anchor="end" class="ch-ax">${esc(fmtAxis.format(t))}</text>`; });
+  sx.ticks.forEach(t => { const p = X(t).toFixed(1); g += `<line x1="${p}" y1="${padT}" x2="${p}" y2="${padT + ph}" class="ch-grid"/><text x="${p}" y="${H - 8}" text-anchor="middle" class="ch-ax">${esc(fmtAxis.format(t))}</text>`; });
+  g += `<line x1="${padL}" y1="${padT + ph}" x2="${padL + pw}" y2="${padT + ph}" class="ch-base"/>`;
+  const m = pts.map(([x, y, k, i]) => `<circle cx="${X(x).toFixed(1)}" cy="${Y(y).toFixed(1)}" r="${pts.length > 400 ? 2.5 : 4}" fill="var(--s${k + 1})" fill-opacity=".85" data-tip="${esc2(ser.length > 1 ? ser[k].name + ' · ' : '')}${esc2(D.cats[i] && D.hasLbl ? D.cats[i] + ' · ' : '')}X ${esc2(fmtVal.format(x))} · Y ${esc2(fmtVal.format(y))}"/>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc2(ch.title || 'Graphique')}">${g}${m}</svg>`;
+}
+// Colonnes + courbe : la première série en colonnes, les suivantes en courbes (axe de droite si besoin).
+function comboSVG(ch, D, W, H) {
+  const ser = D.series.slice(0, 8), cats = D.cats, two = comboAxis2(D);
+  const range = list => { let lo = 0, hi = 0; list.forEach(s => s.vals.forEach(v => { if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } })); return niceScale(lo, hi); };
+  const s1 = range(two ? ser.slice(0, 1) : ser), s2 = two ? range(ser.slice(1)) : s1;
+  const padL = Math.max(...s1.ticks.map(t => fmtAxis.format(t).length)) * 7 + 10, padR = two ? Math.max(...s2.ticks.map(t => fmtAxis.format(t).length)) * 7 + 10 : 10, padT = 8, padB = 26;
+  const pw = Math.max(20, W - padL - padR), ph = Math.max(20, H - padT - padB);
+  const Y = (sc, v) => padT + ph - (v - sc.lo) / (sc.hi - sc.lo || 1) * ph;
+  let g = '';
+  s1.ticks.forEach(t => { const p = Y(s1, t).toFixed(1); g += `<line x1="${padL}" y1="${p}" x2="${padL + pw}" y2="${p}" class="ch-grid"/><text x="${padL - 6}" y="${+p + 4}" text-anchor="end" class="ch-ax">${esc(fmtAxis.format(t))}</text>`; });
+  if (two) s2.ticks.forEach(t => { const p = Y(s2, t).toFixed(1); g += `<text x="${padL + pw + 6}" y="${+p + 4}" text-anchor="start" class="ch-ax">${esc(fmtAxis.format(t))}</text>`; });
+  const z = Y(s1, Math.max(s1.lo, Math.min(0, s1.hi))).toFixed(1);
+  g += `<line x1="${padL}" y1="${z}" x2="${padL + pw}" y2="${z}" class="ch-base"/>`;
+  const n = cats.length, band = pw / n, every = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(pw / 64))));
+  cats.forEach((c, i) => { if (i % every) return; const t = String(c).length > 14 ? String(c).slice(0, 13) + '…' : String(c); g += `<text x="${(padL + band * (i + .5)).toFixed(1)}" y="${H - 8}" text-anchor="middle" class="ch-ax">${esc(t)}</text>`; });
+  let m = '';
+  const bw = Math.max(2, band * .62), b0 = ser[0];
+  b0.vals.forEach((v, i) => { if (v == null) return; const y1 = Y(s1, v), y0 = +z, x = padL + band * i + (band - bw) / 2; m += `<rect x="${x.toFixed(1)}" y="${Math.min(y0, y1).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.abs(y1 - y0).toFixed(1)}" rx="3" fill="var(--s1)" data-tip="${esc2(b0.name)} · ${esc2(cats[i])} : ${esc2(fmtVal.format(v))}"/>`; });
+  ser.slice(1).forEach((s, j) => {
+    const k = j + 1; let d = '', pen = false;
+    s.vals.forEach((v, i) => { if (v == null) { pen = false; return; } d += (pen ? 'L' : 'M') + (padL + band * (i + .5)).toFixed(1) + ',' + Y(s2, v).toFixed(1); pen = true; });
+    m += `<path d="${d}" fill="none" stroke="var(--s${k + 1})" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+    s.vals.forEach((v, i) => { if (v == null) return; const x = (padL + band * (i + .5)).toFixed(1), y = Y(s2, v).toFixed(1); if (n <= 24) m += `<circle cx="${x}" cy="${y}" r="3.5" fill="var(--s${k + 1})" stroke="var(--ch-bg)" stroke-width="2"/>`; m += `<circle cx="${x}" cy="${y}" r="11" fill="transparent" data-tip="${esc2(s.name)} · ${esc2(cats[i])} : ${esc2(fmtVal.format(v))}"/>`; });
+  });
   return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc2(ch.title || 'Graphique')}">${g}${m}</svg>`;
 }
 function chartHTML(ch, vals, cellsOf, forPrint) {
@@ -4396,6 +4471,7 @@ chartLayer.addEventListener('pointerdown', e => {
   const ch = findChart(el.dataset.id); if (!ch) return;
   if (CH.sel !== ch.id) selectChart(ch.id);
   const p = chartPos(ch);
+  if (sheetProt()) return;
   CH.drag = { id: ch.id, mode: e.target.classList.contains('ch-rz') ? 'size' : 'move', sx: e.clientX, sy: e.clientY, x: p.x, y: p.y, w: ch.w, h: ch.h, moved: false, before: snap('meta') };
   try { el.setPointerCapture(e.pointerId); } catch {}
 });
@@ -4426,7 +4502,7 @@ chartLayer.addEventListener('click', e => {
   if (b.dataset.ca === 'edit') openChartEditor(id);
   else deleteChart(id);
 });
-function deleteChart(id) { pushHist('meta'); state.cur.charts = state.cur.charts.filter(c => c.id !== id); CH.sel = null; renderCharts(); scheduleSave(); toast('Graphique supprimé'); }
+function deleteChart(id) { if (lockedIn('all')) return; pushHist('meta'); state.cur.charts = state.cur.charts.filter(c => c.id !== id); CH.sel = null; renderCharts(); scheduleSave(); toast('Graphique supprimé'); }
 gw.addEventListener('mousedown', e => { if (CH.sel && !e.target.closest('.chart')) { CH.sel = null; renderCharts(); } }, true);
 document.addEventListener('keydown', e => {
   if (!CH.sel || state.view !== 'sheet' || SH.editing || e.target.closest('input,textarea,select')) return;
@@ -4435,6 +4511,7 @@ document.addEventListener('keydown', e => {
 }, true);
 function openChartEditor(id) {
   commitEdit(false);
+  if (lockedIn('all')) return;
   const cur = state.cur; cur.charts ||= [];
   const ex = id ? findChart(id) : null;
   let R = ex ? { r1: ex.r1, c1: ex.c1, r2: ex.r2, c2: ex.c2 } : rng();
@@ -4485,7 +4562,10 @@ const CT_ICON = {
   bar: '<path d="M4 5h9M4 10h15M4 15h6M4 20h11" stroke-width="3"/>',
   line: '<path d="M3 17l5-6 4 4 8-9"/>',
   stack: '<path d="M6 20v-5M6 13V9M12 20v-8M12 10V4M18 20v-4M18 14v-3" stroke-width="3"/>',
-  pie: '<circle cx="12" cy="12" r="8"/><path d="M12 4v8l6 5"/>'
+  pie: '<circle cx="12" cy="12" r="8"/><path d="M12 4v8l6 5"/>',
+  area: '<path d="M3 19l5-7 4 3 8-9v13z" fill="currentColor" fill-opacity=".3"/><path d="M3 19l5-7 4 3 8-9"/>',
+  combo: '<path d="M6 20v-7M12 20v-10M18 20v-5" stroke-width="3"/><path d="M3 9l6-4 6 3 6-4"/>',
+  scatter: '<circle cx="6" cy="16" r="1.6"/><circle cx="10" cy="11" r="1.6"/><circle cx="14" cy="14" r="1.6"/><circle cx="17" cy="7" r="1.6"/><circle cx="19" cy="11" r="1.6"/><path d="M3 3v18h18"/>'
 };
 
 /* --- tableau croisé dynamique : des formules (SOMME.SI.ENS…) sur une nouvelle feuille, qui se recalculent ;
@@ -4499,10 +4579,11 @@ const pvLow = k => typeof k === 'string' ? k.toLowerCase() : k;
 const pvCmp = (a, b) => typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b), 'fr', { numeric: true });
 // Définition complète (les anciennes n'avaient qu'une valeur : val / agg)
 function pvNorm(def) {
-  const d = { rowGroup: '', colGroup: '', cols: -1, filter: null, sort: 'label', pct: false, chart: '', ...clone(def) };
+  const d = { rowGroup: '', colGroup: '', cols: -1, rows2: -1, rowGroup2: '', filter: null, sort: 'label', pct: false, chart: '', ...clone(def) };
   if (!Array.isArray(d.vals) || !d.vals.length) d.vals = [{ j: d.val != null ? d.val : 0, agg: d.agg || 'sum' }];
   delete d.val; delete d.agg;
   if (d.cols === d.rows && d.colGroup === d.rowGroup) d.cols = -1;
+  if (d.rows2 == null || d.rows2 === d.rows || (d.rows2 === d.cols && d.cols >= 0)) d.rows2 = -1;
   if (d.filter && (d.filter.j == null || d.filter.j < 0 || !(d.filter.values || []).length)) d.filter = null;
   return d;
 }
@@ -4558,6 +4639,7 @@ const pvGroupName = g => ({ month: 'par mois', quarter: 'par trimestre', year: '
 function pvDescribe(def0, S) {
   const d = pvNorm(def0), h = S.hdr, isD = j => S.kinds[j] === 'date';
   let s = d.vals.map(v => pvValName(v, h)).join(' et ') + ` par ${h[d.rows]}` + (isD(d.rows) && d.rowGroup ? ' (' + pvGroupName(d.rowGroup) + ')' : '');
+  if (d.rows2 >= 0) s += ` puis par ${h[d.rows2]}` + (isD(d.rows2) && d.rowGroup2 ? ' (' + pvGroupName(d.rowGroup2) + ')' : '');
   if (d.cols >= 0) s += ` et par ${h[d.cols]}` + (isD(d.cols) && d.colGroup ? ' (' + pvGroupName(d.colGroup) + ')' : '');
   if (d.filter) s += `, seulement ${h[d.filter.j]} = ${d.filter.values.map(k => pvLabel(k, isD(d.filter.j) ? d.filter.g || '' : '')).join(' ou ')}`;
   const ct = CHART_TYPES.find(([k]) => k === d.chart);
@@ -4571,6 +4653,7 @@ function pivotCells(def0) {
   const col = j => `${SR}$${COLN(def.c1 + j)}$${def.r1 + 2}:$${COLN(def.c1 + j)}$${def.r2 + 1}`;
   const grp = (j, g) => kinds[j] === 'date' ? (g || '') : '';
   const rg = grp(def.rows, def.rowGroup), cg = def.cols >= 0 ? grp(def.cols, def.colGroup) : '';
+  const lv2 = def.rows2 >= 0, rg2 = lv2 ? grp(def.rows2, def.rowGroup2) : '';
   // filtre : lignes retenues
   const F = def.filter, fg = F ? grp(F.j, F.g) : '', fset = F ? new Set(F.values.map(pvLow)) : null;
   const rowsOk = [];
@@ -4578,23 +4661,31 @@ function pivotCells(def0) {
     if (fset) { const v = at(r, def.c1 + F.j); if (v == null || !fset.has(pvLow(pvKey(v, fg)))) continue; }
     rowsOk.push(r);
   }
-  const keysOf = (j, g) => { const m = new Map(); rowsOk.forEach(r => { const v = at(r, def.c1 + j); if (v == null) return; const k = pvKey(v, g); if (!m.has(pvLow(k))) m.set(pvLow(k), k); }); return [...m.values()].sort(pvCmp); };
+  const keysOf = (j, g, only) => { const m = new Map(); (only || rowsOk).forEach(r => { const v = at(r, def.c1 + j); if (v == null) return; const k = pvKey(v, g); if (!m.has(pvLow(k))) m.set(pvLow(k), k); }); return [...m.values()].sort(pvCmp); };
   const rowsK = keysOf(def.rows, rg), colsK = def.cols >= 0 ? keysOf(def.cols, cg) : [];
-  if (def.sort === 'desc' || def.sort === 'asc') {
-    const v0 = def.vals[0], acc = new Map();
-    rowsOk.forEach(r => {
-      const rv = at(r, def.c1 + def.rows); if (rv == null) return;
-      const kk = pvLow(pvKey(rv, rg)), x = at(r, def.c1 + v0.j), a = acc.get(kk) || { s: 0, n: 0, mx: -Infinity, mn: Infinity };
-      if (x != null) { a.n++; if (typeof x === 'number') { a.s += x; a.mx = Math.max(a.mx, x); a.mn = Math.min(a.mn, x); } }
-      acc.set(kk, a);
-    });
-    const val = k => { const a = acc.get(pvLow(k)) || { s: 0, n: 0, mx: 0, mn: 0 }; return v0.agg === 'count' ? a.n : v0.agg === 'avg' ? (a.n ? a.s / a.n : 0) : v0.agg === 'max' ? a.mx : v0.agg === 'min' ? a.mn : a.s; };
-    rowsK.sort((a, b) => def.sort === 'desc' ? val(b) - val(a) : val(a) - val(b));
-  }
+  // tri par valeur (premier calcul) : rubriques, et sous-rubriques à l'intérieur de chacune
+  const v0 = def.vals[0], acc = new Map();
+  const keyOfRow = r => { const rv = at(r, def.c1 + def.rows); if (rv == null) return null; let k = String(pvLow(pvKey(rv, rg))); if (lv2) { const r2v = at(r, def.c1 + def.rows2); k += '\u0001' + (r2v == null ? '' : String(pvLow(pvKey(r2v, rg2)))); } return k; };
+  const addAcc = (kk, x) => { const a = acc.get(kk) || { s: 0, n: 0, mx: -Infinity, mn: Infinity }; if (x != null) { a.n++; if (typeof x === 'number') { a.s += x; a.mx = Math.max(a.mx, x); a.mn = Math.min(a.mn, x); } } acc.set(kk, a); };
+  const byVal = def.sort === 'desc' || def.sort === 'asc';
+  if (byVal) rowsOk.forEach(r => { const k = keyOfRow(r); if (k == null) return; const x = at(r, def.c1 + v0.j); addAcc(k.split('\u0001')[0], x); if (lv2) addAcc(k, x); });
+  const valOf = kk => { const a = acc.get(kk) || { s: 0, n: 0, mx: 0, mn: 0 }; return v0.agg === 'count' ? a.n : v0.agg === 'avg' ? (a.n ? a.s / a.n : 0) : v0.agg === 'max' ? a.mx : v0.agg === 'min' ? a.mn : a.s; };
+  const ord = (a, b) => def.sort === 'desc' ? b - a : a - b;
+  if (byVal) rowsK.sort((a, b) => ord(valOf(String(pvLow(a))), valOf(String(pvLow(b)))));
   const pairs = (j, g, k) => { if (g) { const [lo, hi] = pvBounds(k, g); return [[col(j), `">=${lo}"`], [col(j), `"<${hi}"`]]; } return [[col(j), pvLit(k)]]; };
   const fAlts = F ? F.values.map(k => pairs(F.j, fg, k)) : [[]];
   const NONE = Symbol('aucune');
-  const fx = (v, rk, ck) => pvFormula(v.agg, col(v.j), fAlts.map(fp => [...fp, ...(rk !== NONE ? pairs(def.rows, rg, rk) : []), ...(ck !== NONE ? pairs(def.cols, cg, ck) : [])]));
+  // lignes du tableau : une par rubrique, ou (deux niveaux) les sous-rubriques puis le sous-total de chaque rubrique
+  const E = [];
+  rowsK.forEach(k1 => {
+    if (!lv2) { E.push({ k1, k2: NONE, crit: pairs(def.rows, rg, k1) }); return; }
+    const mine = rowsOk.filter(r => { const v = at(r, def.c1 + def.rows); return v != null && pvLow(pvKey(v, rg)) === pvLow(k1); });
+    const subs = keysOf(def.rows2, rg2, mine);
+    if (byVal) subs.sort((a, b) => ord(valOf(pvLow(k1) + '\u0001' + pvLow(a)), valOf(pvLow(k1) + '\u0001' + pvLow(b))));
+    subs.forEach((k2, i) => E.push({ k1, k2, first: i === 0, crit: [...pairs(def.rows, rg, k1), ...pairs(def.rows2, rg2, k2)] }));
+    E.push({ k1, k2: NONE, sub: true, crit: pairs(def.rows, rg, k1) });
+  });
+  const fx = (v, rc, ck) => pvFormula(v.agg, col(v.j), fAlts.map(fp => [...fp, ...(rc || []), ...(ck !== NONE ? pairs(def.cols, cg, ck) : [])]));
   const nfOf = v => { if (v.agg === 'count') return ''; const n = S.fmtOf(v.j); return n === 'date' || n === 'txt' ? '' : n; };
   const cells = {};
   const put = (r, c, v, fm) => {
@@ -4606,61 +4697,69 @@ function pivotCells(def0) {
     else if (kinds[j] === 'date' && typeof k === 'number') put(r, c, k, { ...fm, n: 'date' });
     else put(r, c, k, typeof k === 'number' ? { a: 'al', ...fm } : fm);
   };
-  const H = { b: 1, bg: 'cuivre', bb: 1 }, T = { b: 1, bt: 1 };
-  const rowTitle = hdr[def.rows] + (rg ? ' (' + pvGroupName(rg) + ')' : '');
-  const multi = def.vals.length > 1, hasCols = def.cols >= 0;
+  const labelTxt = (k, g, j) => g ? pvLabel(k, g) : kinds[j] === 'date' && typeof k === 'number' ? fmtDate(k) : String(k);
+  const H = { b: 1, bg: 'cuivre', bb: 1 }, T = { b: 1, bt: 1 }, SUB = { b: 1, bg: 'gris' };
+  const rowTitle = hdr[def.rows] + (rg ? ' (' + pvGroupName(rg) + ')' : ''), rowTitle2 = lv2 ? hdr[def.rows2] + (rg2 ? ' (' + pvGroupName(rg2) + ')' : '') : '';
+  const multi = def.vals.length > 1, hasCols = def.cols >= 0, L = lv2 ? 2 : 1; // L : colonnes de libellés
   const hr = hasCols && multi ? 2 : 1; // lignes de titres
-  const tr = hr + rowsK.length;        // ligne du total
+  const tr = hr + E.length;            // ligne du total
+  const rowFmt = e => e.sub ? SUB : {};
   let chart = null, lastC = 0;
   if (!hasCols) {
-    put(0, 0, rowTitle, { ...H });
-    let c = 1;
+    put(0, 0, rowTitle, { ...H }); if (lv2) put(0, 1, rowTitle2, { ...H });
+    let c = L;
     const vcols = [];
     def.vals.forEach(v => {
       const nf = nfOf(v);
       put(0, c, pvValName(v, hdr), { ...H, a: 'ar' });
-      rowsK.forEach((k, i) => put(hr + i, c, fx(v, k, NONE), nf ? { n: nf } : {}));
-      put(tr, c, fx(v, NONE, NONE), { ...T, ...(nf ? { n: nf } : {}) });
+      E.forEach((e, i) => put(hr + i, c, fx(v, e.crit, NONE), { ...rowFmt(e), ...(nf ? { n: nf } : {}) }));
+      put(tr, c, fx(v, null, NONE), { ...T, ...(nf ? { n: nf } : {}) });
       vcols.push(c); c++;
       if (def.pct && (v.agg === 'sum' || v.agg === 'count')) {
-        const L = COLN(c - 1);
+        const Lc = COLN(c - 1);
         put(0, c, '% du total', { ...H, a: 'ar' });
-        rowsK.forEach((k, i) => put(hr + i, c, `=SIERREUR(${L}${hr + i + 1}/${L}$${tr + 1};0)`, { n: 'pct' }));
-        put(tr, c, `=SIERREUR(${L}${tr + 1}/${L}$${tr + 1};0)`, { ...T, n: 'pct' });
+        E.forEach((e, i) => put(hr + i, c, `=SIERREUR(${Lc}${hr + i + 1}/${Lc}$${tr + 1};0)`, { ...rowFmt(e), n: 'pct' }));
+        put(tr, c, `=SIERREUR(${Lc}${tr + 1}/${Lc}$${tr + 1};0)`, { ...T, n: 'pct' });
         c++;
       }
     });
     lastC = c - 1;
-    if (def.chart && rowsK.length) chart = { r1: 0, c1: 0, r2: tr - 1, c2: vcols[0] };
+    if (def.chart && rowsK.length && !lv2) chart = { r1: 0, c1: 0, r2: tr - 1, c2: vcols[0] };
   } else {
-    let c = 1;
+    let c = L;
     put(0, 0, multi ? rowTitle : `${pvValName(def.vals[0], hdr)}`, { ...H });
     if (multi) put(1, 0, '', { ...H });
+    if (lv2) { put(0, 1, multi ? '' : rowTitle2, { ...H }); if (multi) put(1, 1, rowTitle2, { ...H }); }
     def.vals.forEach((v, vi) => {
       const nf = nfOf(v), start = c;
       if (multi) { put(0, c, pvValName(v, hdr), { ...H, a: 'ac' }); }
       colsK.forEach(k => {
         labelPut(hr - 1, c, k, cg, def.cols, { ...H, a: 'ar' });
-        rowsK.forEach((rk, i) => put(hr + i, c, fx(v, rk, k), nf ? { n: nf } : {}));
-        put(tr, c, fx(v, NONE, k), { ...T, ...(nf ? { n: nf } : {}) });
+        E.forEach((e, i) => put(hr + i, c, fx(v, e.crit, k), { ...rowFmt(e), ...(nf ? { n: nf } : {}) }));
+        put(tr, c, fx(v, null, k), { ...T, ...(nf ? { n: nf } : {}) });
         c++;
       });
       put(hr - 1, c, 'Total', { ...H, a: 'ar' });
-      rowsK.forEach((rk, i) => put(hr + i, c, fx(v, rk, NONE), { b: 1, ...(nf ? { n: nf } : {}) }));
-      put(tr, c, fx(v, NONE, NONE), { ...T, ...(nf ? { n: nf } : {}) });
+      E.forEach((e, i) => put(hr + i, c, fx(v, e.crit, NONE), { b: 1, ...rowFmt(e), ...(nf ? { n: nf } : {}) }));
+      put(tr, c, fx(v, null, NONE), { ...T, ...(nf ? { n: nf } : {}) });
       if (multi && c > start) { const k0 = addr(0, start); cells[k0].f.mg = { r: 1, c: c - start + 1 }; }
-      if (vi === 0 && def.chart && rowsK.length && colsK.length) chart = { r1: hr - 1, c1: 0, r2: tr - 1, c2: start + colsK.length - 1 };
+      if (vi === 0 && def.chart && rowsK.length && colsK.length && !lv2) chart = { r1: hr - 1, c1: 0, r2: tr - 1, c2: start + colsK.length - 1 };
       c++;
     });
     lastC = c - 1;
   }
-  rowsK.forEach((k, i) => labelPut(hr + i, 0, k, rg, def.rows, {}));
-  put(tr, 0, 'Total', { ...T });
+  E.forEach((e, i) => {
+    if (!lv2) return labelPut(hr + i, 0, e.k1, rg, def.rows, {});
+    if (e.sub) { put(hr + i, 0, 'Total ' + labelTxt(e.k1, rg, def.rows), { ...SUB }); put(hr + i, 1, '', { ...SUB }); return; }
+    if (e.first) labelPut(hr + i, 0, e.k1, rg, def.rows, { b: 1 });
+    labelPut(hr + i, 1, e.k2, rg2, def.rows2, {});
+  });
+  put(tr, 0, 'Total', { ...T }); if (lv2) put(tr, 1, '', { ...T });
   if (chart) {
     const type = !hasCols || def.chart !== 'pie' ? def.chart : 'col';
     chart = { r1: chart.r1, c1: chart.c1, r2: chart.r2, c2: chart.c2, type, title: pvValName(def.vals[0], hdr) + ' par ' + hdr[def.rows], at: { r: 0, c: lastC + 2 } };
   }
-  const colW = { 0: 180 }; for (let c = 1; c <= lastC; c++) colW[c] = 120;
+  const colW = { 0: 180 }; if (lv2) colW[1] = 160; for (let c = L; c <= lastC; c++) colW[c] = 120;
   return { def, cells, chart, rows: Math.max(60, tr + 20), cols: Math.max(12, lastC + (chart ? 10 : 3)), name: `TCD ${hdr[def.rows]}`, colW };
 }
 function pvChartObj(P, old) {
@@ -4737,6 +4836,7 @@ function openPivot(editIdx) {
   openDlg(dlgHead(editIdx != null ? 'Modifier le tableau croisé' : 'Tableau croisé dynamique') + `<p class="dlg-note">Source : ${esc(srcName)}!${rngRef(base)}, ${S.rowsN} ligne${S.rowsN > 1 ? 's' : ''}. ${editIdx != null ? '' : 'Le tableau est créé sur une nouvelle feuille, avec des formules qui se mettent à jour.'}</p>
     ${editIdx != null ? '' : `<label class="dlg-f"><span>Données</span><input id="pvRange" value="${esc(rngRef(base))}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>`}
     <div class="dlg-row"><label class="dlg-f"><span>Lignes</span><select id="pvRows">${opt(base.rows)}</select></label><label class="dlg-f pv-g" id="pvRowsGw"><span>Dates</span><select id="pvRowsG">${gopt(base.rowGroup)}</select></label></div>
+    <div class="dlg-row"><label class="dlg-f"><span>Puis par (sous-lignes, avec sous-totaux)</span><select id="pvRows2">${opt(base.rows2 ?? -1, '(aucune)')}</select></label><label class="dlg-f pv-g" id="pvRows2Gw"><span>Dates</span><select id="pvRows2G">${gopt(base.rowGroup2 || 'month')}</select></label></div>
     <div class="dlg-row"><label class="dlg-f"><span>Colonnes</span><select id="pvCols">${opt(base.cols, '(aucune)')}</select></label><label class="dlg-f pv-g" id="pvColsGw"><span>Dates</span><select id="pvColsG">${gopt(base.colGroup || 'month')}</select></label></div>
     <div class="dlg-f"><span>Valeurs</span><div id="pvVals">${base.vals.map(valRow).join('')}</div><button type="button" class="lnk pv-add" id="pvAddVal">+ Ajouter une valeur</button></div>
     <div class="dlg-row"><label class="dlg-f"><span>Filtre</span><select id="pvF">${opt(base.filter ? base.filter.j : -1, '(aucun)')}</select></label><label class="dlg-f pv-g" id="pvFGw"><span>Dates</span><select id="pvFG">${gopt(base.filter ? base.filter.g || '' : 'year')}</select></label></div>
@@ -4747,7 +4847,7 @@ function openPivot(editIdx) {
     <div class="fp-acts"><button class="pbtn" id="pvOk">${editIdx != null ? 'Modifier le tableau' : 'Créer le tableau'}</button></div>`, 'wide');
   $('#pvSort').value = base.sort || 'label'; $('#pvChart').value = base.chart || '';
   const isD = j => kinds[+j] === 'date';
-  const showG = () => { $('#pvRowsGw').hidden = !isD($('#pvRows').value); $('#pvColsGw').hidden = !isD($('#pvCols').value); $('#pvFGw').hidden = !isD($('#pvF').value); };
+  const showG = () => { $('#pvRowsGw').hidden = !isD($('#pvRows').value); $('#pvRows2Gw').hidden = !isD($('#pvRows2').value); $('#pvColsGw').hidden = !isD($('#pvCols').value); $('#pvFGw').hidden = !isD($('#pvF').value); };
   let fsel = new Set((base.filter ? base.filter.values : []).map(pvLow));
   const renderF = () => {
     const box = $('#pvFVals'), j = +$('#pvF').value; box.hidden = j < 0; if (j < 0) return;
@@ -4759,7 +4859,7 @@ function openPivot(editIdx) {
   };
   const display0 = n => { const d = new Date(EPOCH + n * 86400000); return d.toLocaleDateString('fr-FR', { timeZone: 'UTC' }); };
   showG(); renderF();
-  ['#pvRows', '#pvCols'].forEach(s => $(s).addEventListener('change', showG));
+  ['#pvRows', '#pvRows2', '#pvCols'].forEach(s => $(s).addEventListener('change', showG));
   $('#pvF').addEventListener('change', () => { fsel = new Set(); showG(); renderF(); });
   $('#pvFG').addEventListener('change', () => { fsel = new Set(); renderF(); });
   $('#pvAddVal').addEventListener('click', () => { const nj = kinds.findIndex(k => k === 'num'); $('#pvVals').insertAdjacentHTML('beforeend', valRow({ j: nj >= 0 ? nj : 0, agg: nj >= 0 ? 'sum' : 'count' })); });
@@ -4772,13 +4872,343 @@ function openPivot(editIdx) {
     const def = {
       src: base.src, r1: base.r1, c1: base.c1, r2: base.r2, c2: base.c2,
       rows: +$('#pvRows').value, rowGroup: isD($('#pvRows').value) ? $('#pvRowsG').value : '',
+      rows2: +$('#pvRows2').value, rowGroup2: isD($('#pvRows2').value) ? $('#pvRows2G').value : '',
       cols: +$('#pvCols').value, colGroup: isD($('#pvCols').value) ? $('#pvColsG').value : '',
       vals: $$('#pvVals .pv-v').map(el => ({ j: +el.querySelector('.pv-vj').value, agg: el.querySelector('.pv-va').value })),
       filter: fj >= 0 && fvals.length ? { j: fj, g: isD(fj) ? $('#pvFG').value : '', values: fvals } : null,
       sort: $('#pvSort').value, pct: $('#pvPct').checked, chart: $('#pvChart').value
     };
     closeDlg();
+    if (def.rows2 >= 0 && def.chart) { def.chart = ''; setTimeout(() => toast('Le graphique n\'est proposé qu\'avec un seul niveau de lignes.'), 2600); }
     if (editIdx != null) rebuildPivot(editIdx, def); else createPivot(def);
+  });
+}
+
+/* --- protection de la feuille
+   Feuille protégée : toutes les cases sont verrouillées, sauf celles marquées « déverrouillées »
+   (Format › Cases modifiables malgré la protection). Mot de passe facultatif, compatible Excel. */
+function xlPwHash(pw) {
+  let h = 0; const t = String(pw);
+  for (let i = 0; i < t.length; i++) { let v = t.charCodeAt(i) << (i + 1); const rot = v >> 15; v &= 0x7fff; h ^= (v | rot); }
+  h ^= t.length; h ^= 0xCE4B;
+  return h.toString(16).toUpperCase().padStart(4, '0');
+}
+// Mot de passe Excel moderne : SHA (sel + mot de passe en UTF-16), puis spinCount tours avec le compteur.
+async function shaPwOk(pw, sha) {
+  try {
+    const alg = { 'SHA-512': 'SHA-512', 'SHA-384': 'SHA-384', 'SHA-256': 'SHA-256', 'SHA-1': 'SHA-1' }[String(sha.alg).toUpperCase()] || 'SHA-512';
+    const salt = b64ToBytes(sha.salt || ''), pwb = new Uint8Array(pw.length * 2); for (let i = 0; i < pw.length; i++) { pwb[2 * i] = pw.charCodeAt(i) & 255; pwb[2 * i + 1] = pw.charCodeAt(i) >> 8; }
+    let h = new Uint8Array(await crypto.subtle.digest(alg, new Uint8Array([...salt, ...pwb])));
+    if (sha.spin > 20000) toast('Vérification du mot de passe…');
+    const buf = new Uint8Array(h.length + 4);
+    for (let i = 0; i < sha.spin; i++) { buf.set(h); buf[h.length] = i & 255; buf[h.length + 1] = (i >> 8) & 255; buf[h.length + 2] = (i >> 16) & 255; buf[h.length + 3] = (i >>> 24) & 255; h = new Uint8Array(await crypto.subtle.digest(alg, buf)); }
+    return bytesToB64(h) === sha.hash;
+  } catch { return false; }
+}
+const sheetProt = () => { const cur = state.cur, sh = cur && cur.sheets && cur.sheets[cur.active]; return sh && sh.prot ? sh.prot : null; };
+// Vrai (et message) si la plage touche une case verrouillée d'une feuille protégée. 'all' : action sur toute la feuille.
+function lockedIn(R, quiet) {
+  if (!sheetProt()) return false;
+  let bad = R === 'all';
+  if (!bad) {
+    if ((R.r2 - R.r1 + 1) * (R.c2 - R.c1 + 1) > 50000) bad = true;
+    else outer: for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) { const x = cellOf(r, c); if (!(x && x.f && x.f.unl)) { bad = true; break outer; } }
+  }
+  if (bad && !quiet) toast('Feuille protégée : ces cases sont verrouillées. Données › Ôter la protection de la feuille pour les modifier.', true);
+  return bad;
+}
+function openProtect() {
+  commitEdit(false);
+  const cur = state.cur, sh = cur.sheets[cur.active];
+  SH.dlg = 'prot';
+  if (sh.prot) {
+    if (!sh.prot.h && !sh.prot.sha) { delete sh.prot; scheduleSave(); renderTabs(); renderValues(); return toast('Protection de la feuille ôtée'); }
+    openDlg(dlgHead('Ôter la protection') + `<label class="dlg-f"><span>Mot de passe de la feuille « ${esc(sh.name)} »</span><input id="prPw" type="password" autocomplete="off" autofocus></label><div class="fp-acts"><button class="pbtn" id="prOk">Ôter la protection</button></div>`);
+    const go = async () => { const pw = $('#prPw').value; if (!(sh.prot.sha ? await shaPwOk(pw, sh.prot.sha) : xlPwHash(pw) === sh.prot.h)) return toast('Mot de passe incorrect.', true); delete sh.prot; closeDlg(); scheduleSave(); renderTabs(); renderValues(); toast('Protection de la feuille ôtée'); };
+    $('#prOk').addEventListener('click', go); $('#prPw').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+    return;
+  }
+  openDlg(dlgHead('Protéger la feuille') + `<p class="dlg-note">Les cases de « ${esc(sh.name)} » ne pourront plus être modifiées, sauf celles que vous avez marquées « modifiables malgré la protection » (menu Format). Le mot de passe est facultatif ; Excel le reconnaîtra aussi.</p>
+    <label class="dlg-f"><span>Mot de passe (facultatif)</span><input id="prPw" type="password" autocomplete="new-password"></label>
+    <label class="dlg-f"><span>Confirmer le mot de passe</span><input id="prPw2" type="password" autocomplete="new-password"></label>
+    <p class="dlg-note">Attention : ce n'est pas un chiffrement. Il évite les modifications par erreur, pas la lecture.</p>
+    <div class="fp-acts"><button class="pbtn" id="prOk">Protéger</button></div>`);
+  $('#prOk').addEventListener('click', () => {
+    const a = $('#prPw').value, b = $('#prPw2').value;
+    if (a !== b) return toast('Les deux mots de passe sont différents.', true);
+    sh.prot = { h: a ? xlPwHash(a) : '' }; closeDlg(); scheduleSave(); renderTabs(); renderValues();
+    toast('Feuille protégée' + (a ? ' par mot de passe' : ''));
+  });
+}
+function toggleUnlocked() {
+  commitEdit(false);
+  if (lockedIn('all', true)) return toast('Ôtez d\'abord la protection de la feuille pour choisir les cases modifiables.', true);
+  const f0 = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {}, on = !f0.unl;
+  applyToRange(f => { if (on) f.unl = 1; else delete f.unl; });
+  toast(on ? 'Ces cases resteront modifiables quand la feuille sera protégée.' : 'Ces cases seront verrouillées quand la feuille sera protégée.');
+}
+
+/* --- valeur cible et solveur
+   Le moteur sert de boîte noire : on pose des valeurs dans les cases variables, on lit le résultat,
+   sans toucher au classeur tant que l'utilisateur n'a pas gardé la solution. */
+function refIn(txt) {
+  const t = String(txt || '').trim().replace(/^=/, ''), nm = state.cur.names && state.cur.names[t];
+  if (nm) { if (nm.s !== state.cur.sheets[state.cur.active].name) return null; return rangeObj(nm.ref); }
+  return rangeObj(t);
+}
+const cellsOfRange = R => { const out = []; for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) out.push({ r, c }); return out; };
+function whatIf(vars, xs, outs) {
+  SH.hf.batch(() => vars.forEach((p, i) => SH.hf.setCellContents({ sheet: SH.sid, row: p.r, col: p.c }, [[xs[i]]])));
+  return outs.map(p => { const v = SH.hf.getCellValue({ sheet: SH.sid, row: p.r, col: p.c }); return typeof v === 'number' ? v : typeof v === 'boolean' ? +v : NaN; });
+}
+// Remet les cases variables comme dans le classeur, ou y écrit la solution gardée.
+function whatIfEnd(vars, xs) {
+  if (xs) {
+    pushHist({ r1: Math.min(...vars.map(p => p.r)), r2: Math.max(...vars.map(p => p.r)), c1: Math.min(...vars.map(p => p.c)), c2: Math.max(...vars.map(p => p.c)) });
+    batch(() => vars.forEach((p, i) => applyRaw(p.r, p.c, numToRaw(xs[i]))));
+  } else batch(() => vars.forEach(p => SH.hf.setCellContents({ sheet: SH.sid, row: p.r, col: p.c }, [[hfVal(cellOf(p.r, p.c))]])));
+  SH.muteVals = false; SH.valsDirty = true; afterChange();
+}
+const numOf = (r, c) => { const v = (SH.vals[r] || [])[c]; return typeof v === 'number' ? v : 0; };
+// Valeur cible : sécante, puis recherche d'un encadrement et dichotomie.
+function goalSeekRun(target, goal, v) {
+  const f = x => whatIf([v], [x], [target])[0] - goal;
+  const tol = 1e-9 * Math.max(1, Math.abs(goal));
+  let x0 = numOf(v.r, v.c), f0 = f(x0);
+  if (Math.abs(f0) <= tol) return x0;
+  let x1 = x0 === 0 ? 1 : x0 * 1.01, f1 = f(x1);
+  for (let i = 0; i < 60 && isFinite(f0) && isFinite(f1); i++) {
+    if (Math.abs(f1) <= tol) return x1;
+    if (f1 === f0) break;
+    const x2 = x1 - f1 * (x1 - x0) / (f1 - f0);
+    if (!isFinite(x2)) break;
+    x0 = x1; f0 = f1; x1 = x2; f1 = f(x2);
+  }
+  // encadrement : on s'éloigne du point de départ jusqu'à un changement de signe
+  const s0 = numOf(v.r, v.c), fs = f(s0);
+  let lo = null, hi = null;
+  for (let k = 0; k < 80 && lo == null; k++) {
+    const d = Math.pow(2, k - 10) * Math.max(1, Math.abs(s0));
+    for (const x of [s0 + d, s0 - d]) { const fx = f(x); if (isFinite(fx) && isFinite(fs) && Math.sign(fx) !== Math.sign(fs)) { lo = s0; hi = x; break; } }
+  }
+  if (lo == null) return null;
+  let flo = f(lo);
+  for (let i = 0; i < 200; i++) {
+    const mid = (lo + hi) / 2, fm = f(mid);
+    if (Math.abs(fm) <= tol || Math.abs(hi - lo) < 1e-13 * Math.max(1, Math.abs(mid))) return mid;
+    if (Math.sign(fm) === Math.sign(flo)) { lo = mid; flo = fm; } else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+function openGoalSeek() {
+  commitEdit(false);
+  if (!SH.hf) return toast('Le moteur de calcul n\'est pas chargé.', true);
+  SH.dlg = 'goal';
+  openDlg(dlgHead('Valeur cible') + `<p class="dlg-note">Grimoire cherche la valeur à donner à une case pour qu'une formule atteigne le résultat voulu.</p>
+    <label class="dlg-f"><span>Formule à amener (case)</span><input id="gsT" value="${addr(SH.sel.r, SH.sel.c)}" autocomplete="off" spellcheck="false"></label>
+    <label class="dlg-f"><span>Résultat voulu</span><input id="gsV" inputmode="decimal" autocomplete="off" autofocus></label>
+    <label class="dlg-f"><span>En modifiant la case</span><input id="gsX" autocomplete="off" spellcheck="false" placeholder="ex. B3"></label>
+    <div class="fp-acts"><button class="pbtn" id="gsOk">Chercher</button></div>`);
+  $('#gsOk').addEventListener('click', () => {
+    const T = refIn($('#gsT').value), X = refIn($('#gsX').value), goal = parseNum($('#gsV').value);
+    if (!T || T.r1 !== T.r2 || T.c1 !== T.c2) return toast('Indiquez une seule case pour la formule (ex. D10).', true);
+    if (!X || X.r1 !== X.r2 || X.c1 !== X.c2) return toast('Indiquez une seule case à modifier (ex. B3).', true);
+    if (goal == null) return toast('Indiquez le résultat voulu (un nombre).', true);
+    if (String(rawOf(T.r1, T.c1))[0] !== '=') return toast(`${addr(T.r1, T.c1)} ne contient pas de formule.`, true);
+    if (String(rawOf(X.r1, X.c1))[0] === '=') return toast(`${addr(X.r1, X.c1)} contient une formule : choisissez une case qui contient un nombre.`, true);
+    const v = { r: X.r1, c: X.c1 }, t = { r: T.r1, c: T.c1 };
+    if (lockedIn(X)) return;
+    SH.muteVals = true;
+    let x = null; try { x = goalSeekRun(t, goal, v); } catch (e) { console.warn(e); }
+    closeDlg();
+    if (x == null || !isFinite(x)) { whatIfEnd([v], null); return toast(`Aucune valeur de ${addr(v.r, v.c)} ne donne ${fmtVal.format(goal)} en ${addr(t.r, t.c)}.`, true); }
+    x = +x.toPrecision(12);
+    whatIfEnd([v], [x]);
+    select(v.r, v.c);
+    toast(`Valeur cible atteinte : ${addr(v.r, v.c)} = ${fmtVal.format(x)}, et ${addr(t.r, t.c)} = ${fmtVal.format(goal)}. Ctrl+Z pour revenir.`);
+  });
+}
+
+// Simplexe (deux phases, règle de Bland) : maximise c·x avec des contraintes ≤, ≥, = et x ≥ 0.
+function simplex(c, rows) {
+  const n = c.length;
+  rows = rows.map(r => r.b < 0 ? { a: r.a.map(v => -v), op: r.op === '<=' ? '>=' : r.op === '>=' ? '<=' : '=', b: -r.b } : r);
+  const m = rows.length, nS = rows.filter(r => r.op !== '=').length, nA = rows.filter(r => r.op !== '<=').length, N = n + nS + nA;
+  const T = [], basis = [], art = new Set();
+  let si = n, ai = n + nS;
+  rows.forEach((r, i) => {
+    const row = new Float64Array(N + 1); r.a.forEach((v, j) => { row[j] = v; }); row[N] = r.b;
+    if (r.op === '<=') { row[si] = 1; basis[i] = si++; }
+    else if (r.op === '>=') { row[si++] = -1; row[ai] = 1; basis[i] = ai; art.add(ai++); }
+    else { row[ai] = 1; basis[i] = ai; art.add(ai++); }
+    T.push(row);
+  });
+  const pivot = (pr, pc) => { const P = T[pr], p = P[pc]; for (let j = 0; j <= N; j++) P[j] /= p; for (let i = 0; i < m; i++) { if (i === pr) continue; const f = T[i][pc]; if (f) { const Q = T[i]; for (let j = 0; j <= N; j++) Q[j] -= f * P[j]; } } basis[pr] = pc; };
+  const run = (obj, ok) => {
+    for (let it = 0; it < 20000; it++) {
+      let pc = -1;
+      for (let j = 0; j < N && pc < 0; j++) { if (!ok(j) || basis.includes(j)) continue; let rc = obj[j]; for (let i = 0; i < m; i++) rc -= obj[basis[i]] * T[i][j]; if (rc > 1e-9) pc = j; }
+      if (pc < 0) return 'opt';
+      let pr = -1, best = Infinity;
+      for (let i = 0; i < m; i++) if (T[i][pc] > 1e-9) { const q = T[i][N] / T[i][pc]; if (q < best - 1e-12 || (Math.abs(q - best) <= 1e-12 && basis[i] < basis[pr])) { best = q; pr = i; } }
+      if (pr < 0) return 'unbounded';
+      pivot(pr, pc);
+    }
+    return 'iter';
+  };
+  if (art.size) {
+    const o1 = new Float64Array(N); art.forEach(j => { o1[j] = -1; });
+    run(o1, () => true);
+    let infeas = 0; basis.forEach((j, i) => { if (art.has(j)) infeas += T[i][N]; });
+    if (infeas > 1e-7) return { status: 'infeasible' };
+    basis.forEach((j, i) => { if (art.has(j)) { for (let k = 0; k < n + nS; k++) if (Math.abs(T[i][k]) > 1e-9) { pivot(i, k); break; } } });
+  }
+  const o2 = new Float64Array(N); c.forEach((v, j) => { o2[j] = v; });
+  const st = run(o2, j => !art.has(j));
+  if (st === 'unbounded') return { status: 'unbounded' };
+  const x = new Array(n).fill(0); basis.forEach((j, i) => { if (j < n) x[j] = T[i][N]; });
+  return { status: st === 'opt' ? 'ok' : 'iter', x, z: c.reduce((s, v, j) => s + v * x[j], 0) };
+}
+// Variables entières : séparation et évaluation (au plus quelques milliers de nœuds).
+function milp(c, rows, ints) {
+  if (!ints.length) return simplex(c, rows);
+  let best = null, nodes = 0, sawOk = false, unb = false;
+  const stack = [rows];
+  while (stack.length && nodes++ < 4000) {
+    const R = stack.pop(), res = simplex(c, R);
+    if (res.status === 'unbounded') { unb = true; continue; }
+    if (res.status !== 'ok' && res.status !== 'iter') continue;
+    sawOk = true;
+    if (best && res.z <= best.z + 1e-9) continue;
+    const j = ints.find(k => Math.abs(res.x[k] - Math.round(res.x[k])) > 1e-6);
+    if (j == null) { res.x = res.x.map((v, k) => ints.includes(k) ? Math.round(v) : v); best = res; continue; }
+    const e = c.map((_, k) => k === j ? 1 : 0), v = res.x[j];
+    stack.push([...R, { a: e, op: '>=', b: Math.ceil(v) }], [...R, { a: e, op: '<=', b: Math.floor(v) }]);
+  }
+  return best || { status: unb && !sawOk ? 'unbounded' : 'infeasible' };
+}
+// Nelder-Mead avec pénalités (problèmes non linéaires), plusieurs départs.
+function nelderMead(F, x0, scale, maxEval = 4000) {
+  const n = x0.length; let evals = 0;
+  const f = x => { evals++; const v = F(x); return isFinite(v) ? v : 1e300; };
+  let P = [x0.slice()]; for (let i = 0; i < n; i++) { const p = x0.slice(); p[i] += scale[i] || 1; P.push(p); }
+  let V = P.map(f);
+  while (evals < maxEval) {
+    const o = V.map((v, i) => i).sort((a, b) => V[a] - V[b]); P = o.map(i => P[i]); V = o.map(i => V[i]);
+    if (Math.abs(V[n] - V[0]) <= 1e-12 * (1 + Math.abs(V[0])) && evals > 50 * n) break;
+    const cen = new Array(n).fill(0); for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) cen[j] += P[i][j] / n;
+    const lerp = t => cen.map((cj, j) => cj + t * (P[n][j] - cj));
+    const xr = lerp(-1), fr = f(xr);
+    if (fr < V[0]) { const xe = lerp(-2), fe = f(xe); if (fe < fr) { P[n] = xe; V[n] = fe; } else { P[n] = xr; V[n] = fr; } }
+    else if (fr < V[n - 1]) { P[n] = xr; V[n] = fr; }
+    else { const xc = fr < V[n] ? lerp(-.5) : lerp(.5), fc = f(xc); if (fc < Math.min(fr, V[n])) { P[n] = xc; V[n] = fc; } else { for (let i = 1; i <= n; i++) { P[i] = P[i].map((v, j) => P[0][j] + .5 * (v - P[0][j])); V[i] = f(P[i]); } } }
+  }
+  const k = V.indexOf(Math.min(...V)); return { x: P[k], v: V[k] };
+}
+const SV_OPS = [['<=', '≤'], ['>=', '≥'], ['=', '='], ['int', 'entier'], ['bin', 'binaire (0 ou 1)']];
+// Résout : obj (case), sens ('max', 'min', 'val'), cible, vars (cases), cons [{ L: [cases], op, R: nombre | [cases] }], nonneg
+function solveRun(P) {
+  const { vars } = P, n = vars.length, x0 = vars.map(p => numOf(p.r, p.c));
+  const ints = [], cons = [];
+  P.cons.forEach(k => {
+    if (k.op === 'int' || k.op === 'bin') { k.L.forEach(p => { const j = vars.findIndex(v => v.r === p.r && v.c === p.c); if (j >= 0) { ints.push(j); if (k.op === 'bin') cons.push({ L: p, op: '<=', R: 1 }, { L: p, op: '>=', R: 0 }); } }); return; }
+    k.L.forEach((p, i) => cons.push({ L: p, op: k.op, R: Array.isArray(k.R) ? (k.R.length === 1 ? k.R[0] : k.R[i]) : k.R }));
+  });
+  const outs = [P.obj], idx = new Map(); const ref = p => { const key = p.r + ',' + p.c; if (!idx.has(key)) { idx.set(key, outs.length); outs.push(p); } return idx.get(key); };
+  cons.forEach(k => { k.li = ref(k.L); if (typeof k.R === 'object' && k.R) k.ri = ref(k.R); });
+  const ev = x => whatIf(vars, x, outs);
+  const rhs = (k, y) => k.ri != null ? y[k.ri] : k.R;
+  const sgn = P.goal === 'min' ? -1 : 1;
+  // 1) le problème est-il linéaire ? (pentes mesurées, puis vérifiées en deux points au hasard)
+  const y0 = ev(x0); let lin = y0.every(isFinite);
+  const G = []; // G[j] = variation de chaque sortie pour +1 sur la variable j
+  for (let j = 0; lin && j < n; j++) { const x = x0.slice(); x[j] += 1; const y = ev(x); if (!y.every(isFinite)) lin = false; G.push(y.map((v, i) => v - y0[i])); }
+  for (let t = 0; lin && t < 2; t++) {
+    const x = x0.map(v => v + (Math.random() * 2 - 1) * (Math.abs(v) + 3)), y = ev(x);
+    lin = y.every((v, i) => { const pred = y0[i] + G.reduce((s, g, j) => s + g[i] * (x[j] - x0[j]), 0); return Math.abs(v - pred) <= 1e-7 * (1 + Math.abs(v)); });
+  }
+  if (lin) {
+    // variables libres (si « non négatives » est décoché) : x = x⁺ − x⁻
+    const free = !P.nonneg, NV = free ? 2 * n : n;
+    const coef = i => { const a = new Array(NV).fill(0); for (let j = 0; j < n; j++) { a[j] = G[j][i]; if (free) a[n + j] = -G[j][i]; } return a; };
+    const cst = i => y0[i] - G.reduce((s, g, j) => s + g[i] * x0[j], 0); // valeur de la sortie i quand toutes les variables valent 0
+    const rows = cons.map(k => { let a = coef(k.li), b = -cst(k.li); if (k.ri != null) { const ar = coef(k.ri); a = a.map((v, j) => v - ar[j]); b += cst(k.ri); } else b += k.R; return { a, op: k.op, b }; });
+    let c = coef(0).map(v => v * sgn);
+    if (P.goal === 'val') { rows.push({ a: coef(0), op: '=', b: P.target - cst(0) }); c = c.map(() => 0); }
+    if (free && ints.length) ints.push(...ints.map(j => j + n));
+    const res = milp(c, rows, ints);
+    if (res.status === 'ok' || res.status === 'iter') { const x = res.x.slice(0, n).map((v, j) => free ? v - res.x[n + j] : v); return { x: x.map(v => Math.abs(v) < 1e-10 ? 0 : +v.toPrecision(12)), method: 'linéaire (simplexe)' }; }
+    return { err: res.status === 'unbounded' ? 'L\'objectif peut grandir sans limite : il manque une contrainte.' : 'Aucune solution ne respecte toutes les contraintes.', method: 'linéaire (simplexe)' };
+  }
+  // 2) non linéaire : pénalités + Nelder-Mead, en plusieurs passes
+  const round = x => x.map((v, j) => ints.includes(j) ? Math.round(v) : v);
+  const viol = (x, y) => cons.reduce((s, k) => { const d = y[k.li] - rhs(k, y); return s + (k.op === '<=' ? Math.max(0, d) ** 2 : k.op === '>=' ? Math.max(0, -d) ** 2 : d * d); }, 0) + (P.nonneg ? x.reduce((s, v) => s + Math.min(0, v) ** 2, 0) : 0);
+  let best = x0.slice(), mu = 10;
+  for (let pass = 0; pass < 6; pass++, mu *= 100) {
+    const F = x => { const xr = round(x), y = ev(xr), o = P.goal === 'val' ? -((y[0] - P.target) ** 2) : sgn * y[0]; return -o + mu * viol(xr, y); };
+    const scale = best.map(v => Math.max(1, Math.abs(v) * 0.5));
+    best = nelderMead(F, best, scale, 1500 + 300 * n).x;
+  }
+  best = round(best);
+  const y = ev(best), v = viol(best, y);
+  if (!y.every(isFinite) || v > 1e-6 * (1 + Math.abs(y[0]))) return { err: 'Pas de solution trouvée qui respecte toutes les contraintes (problème non linéaire : essayez d\'autres valeurs de départ).', method: 'non linéaire' };
+  return { x: best.map(v => +v.toPrecision(12)), method: 'non linéaire (approchée)' };
+}
+function openSolver() {
+  commitEdit(false);
+  if (!SH.hf) return toast('Le moteur de calcul n\'est pas chargé.', true);
+  const cur = state.cur, last = cur.solver || {};
+  SH.dlg = 'solver';
+  const conRow = k => `<div class="dlg-row sv-c"><input class="sv-l" value="${esc(k.L || '')}" placeholder="ex. B2:B5" spellcheck="false"><select class="sv-o">${SV_OPS.map(([o, l]) => `<option value="${o}"${o === k.op ? ' selected' : ''}>${l}</option>`).join('')}</select><input class="sv-r" value="${esc(k.R ?? '')}" placeholder="nombre ou case"><button type="button" class="xbtn sv-x" aria-label="Retirer">${ic('close')}</button></div>`;
+  openDlg(dlgHead('Solveur') + `<p class="dlg-note">Trouver les valeurs des cases variables qui donnent le meilleur résultat pour une formule, en respectant des contraintes.</p>
+    <label class="dlg-f"><span>Objectif (case qui contient la formule)</span><input id="svObj" value="${esc(last.obj || addr(SH.sel.r, SH.sel.c))}" spellcheck="false"></label>
+    <div class="dlg-row"><label class="dlg-f"><span>Chercher</span><select id="svGoal"><option value="max">le maximum</option><option value="min">le minimum</option><option value="val">une valeur précise</option></select></label><label class="dlg-f" id="svValW"><span>Valeur</span><input id="svVal" value="${esc(last.target ?? '')}" inputmode="decimal"></label></div>
+    <label class="dlg-f"><span>En modifiant les cases (plages séparées par ;)</span><input id="svVars" value="${esc(last.vars || '')}" placeholder="ex. B2:B5" spellcheck="false"></label>
+    <div class="dlg-f"><span>Contraintes</span><div id="svCons">${(last.cons || []).map(conRow).join('')}</div><button type="button" class="lnk" id="svAdd">+ Ajouter une contrainte</button></div>
+    <label class="pv-chk"><input type="checkbox" id="svNN"${last.nonneg !== false ? ' checked' : ''}> Variables positives ou nulles</label>
+    <div class="fp-acts"><button class="pbtn" id="svOk">Résoudre</button></div>`, 'wide');
+  $('#svGoal').value = last.goal || 'max';
+  const showV = () => { $('#svValW').hidden = $('#svGoal').value !== 'val'; }; showV();
+  $('#svGoal').addEventListener('change', showV);
+  $('#svAdd').addEventListener('click', () => $('#svCons').insertAdjacentHTML('beforeend', conRow({ op: '<=' })));
+  $('#svCons').addEventListener('click', e => { const x = e.target.closest('.sv-x'); if (x) x.closest('.sv-c').remove(); });
+  $('#svOk').addEventListener('click', () => {
+    const O = refIn($('#svObj').value);
+    if (!O || O.r1 !== O.r2 || O.c1 !== O.c2) return toast('Indiquez une seule case pour l\'objectif.', true);
+    if (String(rawOf(O.r1, O.c1))[0] !== '=') return toast(`${addr(O.r1, O.c1)} ne contient pas de formule.`, true);
+    const goal = $('#svGoal').value, target = parseNum($('#svVal').value);
+    if (goal === 'val' && target == null) return toast('Indiquez la valeur à atteindre.', true);
+    const vr = $('#svVars').value.split(/[;,]/).map(t => t.trim()).filter(Boolean).map(refIn);
+    if (!vr.length || vr.some(x => !x)) return toast('Indiquez les cases variables (ex. B2:B5).', true);
+    const vars = []; vr.forEach(R => cellsOfRange(R).forEach(p => { if (!vars.some(q => q.r === p.r && q.c === p.c)) vars.push(p); }));
+    if (vars.length > 200) return toast('200 cases variables au plus.', true);
+    if (vars.some(p => lockedIn({ r1: p.r, r2: p.r, c1: p.c, c2: p.c }, true))) return toast('Feuille protégée : les cases variables doivent être modifiables.', true);
+    const bad = vars.find(p => String(rawOf(p.r, p.c))[0] === '='); if (bad) return toast(`${addr(bad.r, bad.c)} contient une formule : une case variable doit contenir un nombre.`, true);
+    const consTxt = $$('#svCons .sv-c').map(el => ({ L: el.querySelector('.sv-l').value.trim(), op: el.querySelector('.sv-o').value, R: el.querySelector('.sv-r').value.trim() })).filter(k => k.L);
+    const cons = [];
+    for (const k of consTxt) {
+      const L = refIn(k.L); if (!L) return toast(`Contrainte : « ${k.L} » n'est pas une case ou une plage.`, true);
+      let R = null;
+      if (k.op !== 'int' && k.op !== 'bin') { const n = parseNum(k.R); if (n != null) R = n; else { const RR = refIn(k.R); if (!RR) return toast(`Contrainte sur ${k.L} : indiquez un nombre ou une case.`, true); R = cellsOfRange(RR); const nL = cellsOfRange(L).length; if (R.length !== 1 && R.length !== nL) return toast(`Contrainte sur ${k.L} : les deux plages n'ont pas la même taille.`, true); } }
+      cons.push({ L: cellsOfRange(L), op: k.op, R });
+    }
+    cur.solver = { obj: $('#svObj').value.trim(), goal, target: $('#svVal').value, vars: $('#svVars').value.trim(), cons: consTxt, nonneg: $('#svNN').checked };
+    scheduleSave();
+    SH.muteVals = true;
+    let res; const t0 = performance.now();
+    try { res = solveRun({ obj: { r: O.r1, c: O.c1 }, goal, target, vars, cons, nonneg: $('#svNN').checked }); } catch (e) { console.warn(e); res = { err: 'Calcul impossible : ' + (e.message || e) }; }
+    const ms = performance.now() - t0;
+    if (res.err) { whatIfEnd(vars, null); closeDlg(); return toast(res.err, true); }
+    const objV = whatIf(vars, res.x, [{ r: O.r1, c: O.c1 }])[0];
+    SH.dlg = 'solverRes';
+    openDlg(dlgHead('Solution trouvée') + `<p class="dlg-note">Méthode ${res.method}, ${ms < 1000 ? Math.round(ms) + ' ms' : (ms / 1000).toFixed(1) + ' s'}. Objectif ${addr(O.r1, O.c1)} = <b>${esc(fmtVal.format(objV))}</b></p>
+      <div class="sv-res">${vars.slice(0, 40).map((p, i) => `<div><span>${addr(p.r, p.c)}</span><b>${esc(fmtVal.format(res.x[i]))}</b><small>avant : ${esc(fmtVal.format(numOf(p.r, p.c)))}</small></div>`).join('')}${vars.length > 40 ? `<div>… et ${vars.length - 40} autres</div>` : ''}</div>
+      <div class="fp-acts"><button class="pbtn" id="svKeep">Garder la solution</button><button class="pbtn ghost" id="svBack">Revenir aux valeurs d'origine</button></div>`, 'wide');
+    let done = false;
+    const end = keep => { if (done) return; done = true; SH.dlgOnClose = null; whatIfEnd(vars, keep ? res.x : null); closeDlg(); if (keep) toast('Solution écrite dans le classeur. Ctrl+Z pour revenir.'); };
+    SH.dlgOnClose = () => end(false); // fermée autrement (Échap, croix) : on revient aux valeurs d'origine
+    $('#svKeep').addEventListener('click', () => end(true));
+    $('#svBack').addEventListener('click', () => end(false));
   });
 }
 
@@ -4815,6 +5245,7 @@ function shiftSheetObjects(op, at) {
 }
 function structural(op, after) {
   commitEdit(false);
+  if (lockedIn('all')) return;
   if (!SH.hf) return toast('Le moteur de calcul est nécessaire pour insérer ou supprimer des lignes.', true);
   const cur = state.cur, R = rng();
   // autant de lignes (ou colonnes) que la sélection en compte ; au-dessus/à gauche, ou en dessous/à droite
@@ -6327,14 +6758,15 @@ async function htmlToPdfBytes(html, page = {}, title = '', sty = null) {
   return pdfMakeBytes(dd);
 }
 // --- grille de cellules (classeur) → tableau pdfmake ; grid = { name, rows: [[{ t, b, i, u, a, bg, fc, num, cs, rs, skip }]], colW: [px], charts: [dataURL] }
-function gridToPdfContent(grid, maxW) {
-  const n = Math.max(1, ...grid.rows.map(r => r.length));
+function gridToPdfContent(grid, maxW, maxH) {
+  const n = Math.max(1, ...grid.rows.map(r => r.length)), P = printOf(grid);
   let widths = Array.from({ length: n }, (_, c) => (grid.colW[c] || 104) * PT_PX);
   const tot = widths.reduce((s, w) => s + w, 0);
   const room = maxW - n * 6.5; // marges intérieures (3 + 3) et traits de chaque colonne
-  const k = tot > room ? room / tot : 1;
+  let k = P.fit === 'none' ? 1 : tot > room ? room / tot : 1;
+  if (P.fit === 'page' && maxH) k = Math.min(k, (maxH - 30) / Math.max(1, grid.rows.length * 15.5));
   widths = widths.map(w => Math.max(8, w * k));
-  const fs = Math.max(6, Math.min(9.5, 9.5 * Math.max(k, 0.65)));
+  const fs = Math.max(P.fit === 'page' ? 3 : 6, Math.min(9.5, 9.5 * Math.max(k, P.fit === 'page' ? 0.3 : 0.65)));
   const body = grid.rows.map(row => {
     const out = [];
     for (let c = 0; c < n; c++) {
@@ -6349,7 +6781,8 @@ function gridToPdfContent(grid, maxW) {
     return out;
   });
   const out = [{ text: grid.name, fontSize: 13, bold: true, margin: [0, 0, 0, 8] }];
-  if (body.length) out.push({ table: { widths, body, dontBreakRows: true }, layout: { hLineWidth: () => 0.5, vLineWidth: () => 0.5, hLineColor: () => '#D9D2C8', vLineColor: () => '#D9D2C8', paddingLeft: () => 3, paddingRight: () => 3, paddingTop: () => 2, paddingBottom: () => 2 } });
+  const lw = P.grid ? 0.5 : 0;
+  if (body.length) out.push({ table: { widths, body, dontBreakRows: true, headerRows: Math.max(0, Math.min(+P.titles || 0, body.length - 1)) }, layout: { hLineWidth: () => lw, vLineWidth: () => lw, hLineColor: () => '#D9D2C8', vLineColor: () => '#D9D2C8', paddingLeft: () => 3, paddingRight: () => 3, paddingTop: () => 2, paddingBottom: () => 2 } });
   else out.push({ text: '(feuille vide)', color: '#888888' });
   (grid.charts || []).forEach(ch => out.push({ image: ch.src, width: Math.min(maxW, ch.w * PT_PX), margin: [0, 12, 0, 0] }));
   return { content: out, wide: tot * Math.min(1, 1) > 595.28 - 2 * 36 };
@@ -6357,11 +6790,17 @@ function gridToPdfContent(grid, maxW) {
 async function gridsToPdfBytes(grids, title = '') {
   await ensurePdfMake();
   const content = [];
-  // paysage si un tableau est trop large pour une page en portrait
-  const anyWide = grids.some(g => g.colW.slice(0, Math.max(1, ...g.rows.map(r => r.length))).reduce((s, w) => s + (w || 104) * PT_PX, 0) > 595.28 - 72);
-  const W = (anyWide ? 841.89 : 595.28) - 72;
-  grids.forEach((g, i) => { const r = gridToPdfContent(g, W); if (i) r.content[0].pageBreak = 'before'; content.push(...r.content); });
-  return pdfMakeBytes({ pageSize: 'A4', pageOrientation: anyWide ? 'landscape' : 'portrait', pageMargins: [36, 40, 36, 40], info: { title, creator: 'Grimoire' }, defaultStyle: { font: 'Roboto', fontSize: 9.5, color: '#1E1814' }, content, footer: (cur, n) => ({ text: `${cur} / ${n}`, alignment: 'right', fontSize: 8, color: '#888888', margin: [36, 10, 36, 0] }) });
+  // papier et marges : ceux de la première feuille ; orientation : feuille par feuille (paysage si le tableau est trop large)
+  const P0 = printOf(grids[0]), pap = PAPERS[P0.paper] || PAPERS.A4, mar = (MARGINS_MM[P0.margins] || 15) * 72 / 25.4;
+  const pw = pap[0] * 72 / 25.4, ph = pap[1] * 72 / 25.4;
+  const landOf = g => { const P = printOf(g); if (P.orient !== 'auto') return P.orient === 'landscape'; return g.colW.slice(0, Math.max(1, ...g.rows.map(r => r.length))).reduce((s, w) => s + (w || 104) * PT_PX, 0) > pw - 2 * mar; };
+  grids.forEach((g, i) => {
+    const land = landOf(g), r = gridToPdfContent(g, (land ? ph : pw) - 2 * mar, (land ? pw : ph) - 2 * mar - 30);
+    if (i) { r.content[0].pageBreak = 'before'; r.content[0].pageOrientation = land ? 'landscape' : 'portrait'; }
+    content.push(...r.content);
+  });
+  const foot = grids.some(g => printOf(g).foot);
+  return pdfMakeBytes({ pageSize: { width: pw, height: ph }, pageOrientation: landOf(grids[0]) ? 'landscape' : 'portrait', pageMargins: [mar, Math.max(mar, 30), mar, Math.max(mar, 34)], info: { title, creator: 'Grimoire' }, defaultStyle: { font: 'Roboto', fontSize: 9.5, color: '#1E1814' }, content, footer: foot ? (cur, n) => ({ text: `Page ${cur} sur ${n}`, alignment: 'center', fontSize: 8, color: '#888888', margin: [mar, 10, mar, 0] }) : undefined });
 }
 // Classeur Grimoire → grilles (valeurs calculées, mise en forme, fusions, graphiques)
 async function sheetGrids(cur) {
@@ -6370,14 +6809,12 @@ async function sheetGrids(cur) {
   for (let i = 0; i < cur.sheets.length; i++) {
     const sh = cur.sheets[i];
     const vals = SH.hf && SH.ids ? SH.hf.getSheetValues(SH.ids[i]) : [];
-    let maxR = -1, maxC = -1;
-    Object.entries(sh.cells).forEach(([k, x]) => { const p = parseAddr(k); if (!p) return; const v = (vals[p.r] || [])[p.c]; if ((x.v !== '' && x.v != null) || (v != null && v !== '') || (x.f && (x.f.bg || x.f.mg))) { maxR = Math.max(maxR, p.r + ((x.f && x.f.mg && x.f.mg.r) || 1) - 1); maxC = Math.max(maxC, p.c + ((x.f && x.f.mg && x.f.mg.c) || 1) - 1); } });
-    (vals || []).forEach((row, r) => (row || []).forEach((v, c) => { if (v != null && v !== '') { maxR = Math.max(maxR, r); maxC = Math.max(maxC, c); } }));
+    const Z = printZone(sh, vals), minR = Z.r1, minC = Z.c1, maxR = Z.r2, maxC = Z.c2;
     const hidR = new Set((sh.hid && sh.hid.r) || []), hidC = new Set((sh.hid && sh.hid.c) || []);
-    const colIdx = []; for (let c = 0; c <= maxC; c++) if (!hidC.has(c)) colIdx.push(c);
+    const colIdx = []; for (let c = minC; c <= maxC; c++) if (!hidC.has(c)) colIdx.push(c);
     const covered = new Set();
     const rows = [];
-    for (let r = 0; r <= maxR; r++) {
+    for (let r = minR; r <= maxR; r++) {
       if (hidR.has(r)) continue;
       const row = [];
       colIdx.forEach(c => {
@@ -6396,8 +6833,8 @@ async function sheetGrids(cur) {
       rows.push(row);
     }
     const charts = [];
-    for (const ch of (sh.charts || [])) { const src = await chartPng(ch, vals, (r, c) => sh.cells[addr(r, c)]); if (src) charts.push({ src, w: ch.w }); }
-    grids.push({ name: sh.name, rows, colW: colIdx.map(c => sh.colW[c] || 104), charts });
+    if (!printOf(sh).area) for (const ch of (sh.charts || [])) { const src = await chartPng(ch, vals, (r, c) => sh.cells[addr(r, c)]); if (src) charts.push({ src, w: ch.w }); }
+    grids.push({ name: sh.name, rows, colW: colIdx.map(c => sh.colW[c] || 104), charts, print: sh.print });
   }
   return grids;
 }
@@ -7112,6 +7549,7 @@ async function importFile(f) {
           sheets.forEach(sh => {
             const e = extra[sh.src]; if (!e) return;
             sh.cf = e.cf; sh.charts = e.charts;
+            if (e.prot) sh.prot = e.prot; if (e.print) sh.print = e.print;
             Object.entries(e.fmt).forEach(([k, o]) => { const p = parseAddr(k); if (!p || p.r >= sh.rows || p.c >= sh.cols) return; const x = sh.cells[k] || (sh.cells[k] = { v: '', f: {} }); x.f = { ...o, ...(x.f || {}) }; });
             Object.entries(e.dd).forEach(([k, dd]) => { const x = sh.cells[k] || (sh.cells[k] = { v: '', f: {} }); x.f ||= {}; x.f.dd = dd; });
           });
@@ -8090,6 +8528,7 @@ function chartRefs(ch, vals, cellsOf, sheetName) {
     if (D.hasLbl) out.cat = R(ch.r1, c0, ch.r1, ch.c2);
     for (let r = ch.r1 + (D.hasLbl ? 1 : 0); r <= ch.r2; r++) out.series.push({ name: D.hasHdr ? R(r, ch.c1, r, ch.c1) : null, val: R(r, c0, r, ch.c2) });
   }
+  if (ch.type === 'scatter' && !D.hasLbl && out.series.length >= 2) { out.x = out.series[0].val; out.series = out.series.slice(1); }
   out.series = out.series.slice(0, 8);
   return { refs: out, D };
 }
@@ -8109,6 +8548,21 @@ function chartXml(ch, refs, D) {
     const n = D.cats.length;
     const pts = Array.from({ length: Math.min(n, 64) }, (_, i) => `<c:dPt><c:idx val="${i}"/><c:bubble3D val="0"/><c:spPr>${fill(i)}<a:ln w="19050"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln></c:spPr></c:dPt>`).join('');
     plot = `<c:doughnutChart><c:varyColors val="1"/><c:ser><c:idx val="0"/><c:order val="0"/>${tx(s, 0)}${pts}${cat}${val(s)}</c:ser><c:firstSliceAng val="0"/><c:holeSize val="55"/></c:doughnutChart>`;
+  } else if (ch.type === 'area') {
+    plot = `<c:areaChart><c:grouping val="standard"/><c:varyColors val="0"/>` + refs.series.map((s, k) => `<c:ser><c:idx val="${k}"/><c:order val="${k}"/>${tx(s, k)}<c:spPr><a:solidFill><a:srgbClr val="${XL_PAL[k % 8]}"><a:alpha val="45000"/></a:srgbClr></a:solidFill><a:ln w="19050">${fill(k)}</a:ln></c:spPr>${cat}${val(s)}</c:ser>`).join('')
+      + `<c:axId val="500"/><c:axId val="501"/></c:areaChart>` + axes(false);
+  } else if (ch.type === 'scatter') {
+    const xv = refs.x ? `<c:xVal><c:numRef><c:f>${xmlE(refs.x)}</c:f></c:numRef></c:xVal>` : '';
+    plot = `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>` + refs.series.map((s, k) => `<c:ser><c:idx val="${k}"/><c:order val="${k}"/>${tx(s, k)}<c:spPr><a:ln w="19050"><a:noFill/></a:ln></c:spPr><c:marker><c:symbol val="circle"/><c:size val="6"/><c:spPr>${fill(k)}</c:spPr></c:marker>${xv}<c:yVal><c:numRef><c:f>${xmlE(s.val)}</c:f></c:numRef></c:yVal><c:smooth val="0"/></c:ser>`).join('')
+      + `<c:axId val="500"/><c:axId val="501"/></c:scatterChart>`
+      + `<c:valAx><c:axId val="500"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="501"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/></c:valAx>`
+      + `<c:valAx><c:axId val="501"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:majorGridlines><c:spPr><a:ln w="9525"><a:solidFill><a:srgbClr val="E5E5E5"/></a:solidFill></a:ln></c:spPr></c:majorGridlines><c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr><c:crossAx val="500"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/></c:valAx>`;
+  } else if (ch.type === 'combo') {
+    const two = comboAxis2(D), lineAx = two ? '<c:axId val="502"/><c:axId val="503"/>' : '<c:axId val="500"/><c:axId val="501"/>';
+    plot = `<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/>` + refs.series.slice(0, 1).map((s, k) => `<c:ser><c:idx val="${k}"/><c:order val="${k}"/>${tx(s, k)}<c:spPr>${fill(k)}</c:spPr><c:invertIfNegative val="0"/>${cat}${val(s)}</c:ser>`).join('') + `<c:gapWidth val="80"/><c:axId val="500"/><c:axId val="501"/></c:barChart>`
+      + (refs.series.length > 1 ? `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>` + refs.series.slice(1).map((s, j) => { const k = j + 1; return `<c:ser><c:idx val="${k}"/><c:order val="${k}"/>${tx(s, k)}<c:spPr><a:ln w="28575" cap="rnd">${fill(k)}<a:round/></a:ln></c:spPr><c:marker><c:symbol val="circle"/><c:size val="5"/><c:spPr>${fill(k)}</c:spPr></c:marker>${cat}${val(s)}<c:smooth val="0"/></c:ser>`; }).join('') + `<c:marker val="1"/>${lineAx}</c:lineChart>` : '')
+      + axes(false)
+      + (two ? `<c:catAx><c:axId val="502"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="1"/><c:axPos val="b"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="503"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx><c:valAx><c:axId val="503"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="r"/><c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr><c:crossAx val="502"/><c:crosses val="max"/><c:crossBetween val="between"/></c:valAx>` : '');
   } else if (ch.type === 'line') {
     plot = `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>` + refs.series.map((s, k) => `<c:ser><c:idx val="${k}"/><c:order val="${k}"/>${tx(s, k)}<c:spPr><a:ln w="28575" cap="rnd">${fill(k)}<a:round/></a:ln></c:spPr><c:marker><c:symbol val="circle"/><c:size val="6"/><c:spPr>${fill(k)}<a:ln w="9525"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln></c:spPr></c:marker>${cat}${val(s)}<c:smooth val="0"/></c:ser>`).join('')
       + `<c:marker val="1"/><c:axId val="500"/><c:axId val="501"/></c:lineChart>` + axes(false);
@@ -8149,7 +8603,7 @@ function dxfXml(st) {
 }
 // Complète le fichier écrit par la bibliothèque : graphiques, règles, listes déroulantes.
 async function xlsxExtras(buf, cur) {
-  const hasExtra = cur.sheets.some(sh => (sh.charts || []).length || (sh.cf || []).length || Object.values(sh.cells).some(x => x.f && x.f.dd));
+  const hasExtra = cur.sheets.some(sh => (sh.charts || []).length || (sh.cf || []).length || sh.prot || sh.print || Object.values(sh.cells).some(x => x.f && (x.f.dd || x.f.unl)));
   if (!hasExtra) return buf;
   await loadScript(LIB.jszip);
   const zip = await window.JSZip.loadAsync(buf);
@@ -8158,6 +8612,17 @@ async function xlsxExtras(buf, cur) {
   let styles = await zip.file('xl/styles.xml').async('string');
   const dxfs = [];
   let chartN = 0, drawN = 0;
+  // style « déverrouillé » : copie du style d'origine avec <protection locked="0"/>
+  const xfList = ((/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(styles) || [])[1] || '').match(/<xf\b[^>]*\/>|<xf\b[^>]*>[\s\S]*?<\/xf>/g) || [];
+  const xfAdd = [], xfMap = new Map(), xfBase = xfList.length;
+  const unlockedXf = sid => {
+    if (xfMap.has(sid)) return xfMap.get(sid);
+    const src = xfList[sid] || '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>';
+    const open = src.replace(/^<xf\b([^>]*?)\/?>[\s\S]*$/, '<xf$1>').replace(/ applyProtection="[^"]*"/, '').replace(/^<xf/, '<xf applyProtection="1"');
+    const inner = /<xf\b[^>]*\/>$/.test(src) ? '' : src.replace(/^<xf\b[^>]*>/, '').replace(/<\/xf>$/, '').replace(/<protection[^>]*\/>/, '');
+    xfAdd.push(`${open}${inner}<protection locked="0"/></xf>`);
+    const id = xfBase + xfAdd.length - 1; xfMap.set(sid, id); return id;
+  };
   for (let i = 0; i < cur.sheets.length; i++) {
     const sh = cur.sheets[i], path = `xl/worksheets/sheet${i + 1}.xml`;
     const f = zip.file(path); if (!f) continue;
@@ -8212,7 +8677,35 @@ async function xlsxExtras(buf, cur) {
       const li = xml.indexOf('<legacyDrawing');
       xml = li >= 0 ? xml.slice(0, li) + tag + xml.slice(li) : xml.replace('</worksheet>', tag + '</worksheet>');
     }
+    // protection de la feuille, cases déverrouillées
+    if (sh.prot) {
+      const at = xml.indexOf('</sheetData>') + '</sheetData>'.length;
+      const sha = sh.prot.sha ? `algorithmName="${xmlE(sh.prot.sha.alg || 'SHA-512')}" hashValue="${xmlE(sh.prot.sha.hash)}" saltValue="${xmlE(sh.prot.sha.salt || '')}" spinCount="${sh.prot.sha.spin || 100000}" ` : '';
+      xml = xml.slice(0, at) + `<sheetProtection ${sh.prot.h && !sha ? `password="${sh.prot.h}" ` : ''}${sha}sheet="1" objects="1" scenarios="1"/>` + xml.slice(at);
+    }
+    const unl = new Set(Object.entries(sh.cells).filter(([, x]) => x.f && x.f.unl).map(([k]) => k));
+    if (unl.size) xml = xml.replace(/<c r="([A-Z]+\d+)"( s="(\d+)")?/g, (m, ref, _, sid) => unl.has(ref) ? `<c r="${ref}" s="${unlockedXf(+(sid || 0))}"` : m);
+    // mise en page de l'impression
+    if (sh.print) {
+      const P = printOf(sh), mi = { normal: [0.7, 0.75], narrow: [0.25, 0.75], wide: [1, 1] }[P.margins] || [0.7, 0.75];
+      xml = xml.replace(/<pageMargins[^>]*\/>/, '').replace(/<pageSetup[^>]*\/>/, '').replace(/<printOptions[^>]*\/>/, '');
+      const land = P.orient === 'landscape';
+      const blk = (P.grid ? '<printOptions gridLines="1"/>' : '') + `<pageMargins left="${mi[0]}" right="${mi[0]}" top="${mi[1]}" bottom="${mi[1]}" header="0.3" footer="0.3"/>`
+        + `<pageSetup paperSize="${(PAPERS[P.paper] || PAPERS.A4)[2]}"${P.orient !== 'auto' ? ` orientation="${land ? 'landscape' : 'portrait'}"` : ''}${P.fit !== 'none' ? ` fitToWidth="1" fitToHeight="${P.fit === 'page' ? 1 : 0}"` : ''}/>`
+        + (P.foot ? '<headerFooter><oddFooter>&amp;CPage &amp;P sur &amp;N</oddFooter></headerFooter>' : '');
+      const cands = ['<drawing', '<legacyDrawing', '</worksheet>'].map(t => xml.indexOf(t)).filter(n => n >= 0);
+      const at = Math.min(...cands); xml = xml.slice(0, at) + blk + xml.slice(at);
+      if (P.fit !== 'none') {
+        if (/<sheetPr\b[^>]*\/>/.test(xml)) xml = xml.replace(/<sheetPr\b([^>]*)\/>/, '<sheetPr$1><pageSetUpPr fitToPage="1"/></sheetPr>');
+        else if (/<sheetPr\b/.test(xml)) xml = xml.replace(/<sheetPr\b([^>]*)>/, '<sheetPr$1><pageSetUpPr fitToPage="1"/>');
+        else xml = xml.replace(/(<worksheet\b[^>]*>)/, '$1<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>');
+      }
+    }
     zip.file(path, xml);
+  }
+  if (xfAdd.length) {
+    styles = styles.replace(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/, (m, n, body) => `<cellXfs count="${+n + xfAdd.length}">${body}${xfAdd.join('')}</cellXfs>`);
+    zip.file('xl/styles.xml', styles);
   }
   if (dxfs.length) {
     const block = `<dxfs count="${dxfs.length}">${dxfs.join('')}</dxfs>`;
@@ -8275,16 +8768,48 @@ async function xlsxReadExtras(buf, sheetNames) {
       Object.assign(o, bd);
       const al = kids(xf, 'alignment')[0];
       if (al) { const h = al.getAttribute('horizontal'); if (h === 'center' || h === 'centerContinuous') o.a = 'ac'; else if (h === 'right') o.a = 'ar'; else if (h === 'left') o.a = 'al'; if (al.getAttribute('wrapText') === '1' || al.getAttribute('wrapText') === 'true') o.w = 1; }
+      const pr = kids(xf, 'protection')[0]; if (pr && /^(0|false)$/.test(pr.getAttribute('locked') || '')) o.unl = 1;
       XF.push(o);
     });
   }
   const out = {};
+  // zones d'impression et lignes de titres (noms réservés d'Excel), par numéro de feuille
+  const printNames = {};
+  all(wb.documentElement, 'definedName').forEach(dn => {
+    const n = dn.getAttribute('name'), li = dn.getAttribute('localSheetId'); if (li == null) return;
+    const ref = String(dn.textContent || '').replace(/^.*!/, '').replace(/\$/g, '');
+    const o = printNames[+li] ||= {};
+    if (n === '_xlnm.Print_Area' && rangeObj(ref.split(',')[0])) o.area = ref.split(',')[0];
+    if (n === '_xlnm.Print_Titles') { const m = /(?:^|,)(\d+):(\d+)(?:,|$)/.exec(ref); if (m && +m[1] === 1) o.titles = Math.min(3, +m[2]); }
+  });
+  let sheetIdx = -1;
   const sheets = all(wb.documentElement, 'sheet');
   for (const s of sheets) {
+    sheetIdx++;
     const name = s.getAttribute('name'); if (!sheetNames.includes(name)) continue;
     const rid = s.getAttribute('r:id') || s.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id');
     const path = resolve('xl/workbook.xml', wbRels[rid] || ''); const x = P(await get(path)); if (!x) continue;
     const res = { cf: [], dd: {}, charts: [], fmt: {} };
+    // protection de la feuille (mot de passe ancien format, ou empreinte SHA moderne)
+    const sp = all(x.documentElement, 'sheetProtection')[0];
+    if (sp && /^(1|true)$/.test(sp.getAttribute('sheet') || '')) {
+      res.prot = { h: sp.getAttribute('password') || '' };
+      if (sp.getAttribute('hashValue')) res.prot.sha = { alg: sp.getAttribute('algorithmName'), hash: sp.getAttribute('hashValue'), salt: sp.getAttribute('saltValue'), spin: +sp.getAttribute('spinCount') || 0 };
+    }
+    // mise en page de l'impression
+    {
+      const ps = all(x.documentElement, 'pageSetup')[0], po = all(x.documentElement, 'printOptions')[0], pm = all(x.documentElement, 'pageMargins')[0], spr = all(x.documentElement, 'pageSetUpPr')[0], ft = all(x.documentElement, 'oddFooter')[0];
+      const pr = { ...(printNames[sheetIdx] || {}) };
+      if (ps) {
+        const o = ps.getAttribute('orientation'); if (o === 'landscape' || o === 'portrait') pr.orient = o;
+        const pz = +ps.getAttribute('paperSize'); const pk = Object.keys(PAPERS).find(k => PAPERS[k][2] === pz); if (pk && pk !== 'A4') pr.paper = pk;
+        if (spr && /^(1|true)$/.test(spr.getAttribute('fitToPage') || '')) pr.fit = ps.getAttribute('fitToHeight') === '0' ? 'width' : 'page';
+      }
+      if (po && /^(1|true)$/.test(po.getAttribute('gridLines') || '')) pr.grid = true; else if (Object.keys(pr).length) pr.grid = false;
+      if (pm) { const l = +pm.getAttribute('left'); if (l && l < 0.4) pr.margins = 'narrow'; else if (l >= 0.95) pr.margins = 'wide'; }
+      if (ft && /&P/.test(ft.textContent || '')) pr.foot = true;
+      if (Object.keys(pr).length) res.print = pr;
+    }
     if (XF.length) all(x.documentElement, 'c').forEach(c => { const si = +c.getAttribute('s') || 0; const o = XF[si]; if (si && o && Object.keys(o).length) res.fmt[c.getAttribute('r')] = o; });
     // règles
     all(x.documentElement, 'conditionalFormatting').forEach(cf => {
@@ -8337,12 +8862,15 @@ async function xlsxReadExtras(buf, sheetNames) {
         if (ext) { w = Math.round(+ext.getAttribute('cx') / 9525); h = Math.round(+ext.getAttribute('cy') / 9525); }
         else if (to) { w = Math.max(240, (num(to, 'col') - at.c) * 100); h = Math.max(180, (num(to, 'row') - at.r) * 21); }
         const plot = all(cx.documentElement, 'plotArea')[0]; if (!plot) continue;
-        const kind = [...plot.children].find(c => /Chart$/.test(c.localName)); if (!kind) continue;
+        const kinds = [...plot.children].filter(c => /Chart$/.test(c.localName)), kind = kinds[0]; if (!kind) continue;
         let type = 'col';
         if (/^(pie|doughnut|pie3D)Chart$/.test(kind.localName)) type = 'pie';
-        else if (/^line/.test(kind.localName) || kind.localName === 'areaChart' || kind.localName === 'scatterChart') type = 'line';
+        else if (kinds.some(k => /^bar/.test(k.localName)) && kinds.some(k => /^line/.test(k.localName))) type = 'combo';
+        else if (/^area/.test(kind.localName)) type = 'area';
+        else if (kind.localName === 'scatterChart') type = 'scatter';
+        else if (/^line/.test(kind.localName)) type = 'line';
         else if (/^bar/.test(kind.localName)) { const dir = (kids(kind, 'barDir')[0] || { getAttribute: () => 'col' }).getAttribute('val'); const grp = (kids(kind, 'grouping')[0] || { getAttribute: () => '' }).getAttribute('val'); type = /stacked/i.test(grp || '') && dir !== 'bar' ? 'stack' : dir === 'bar' ? 'bar' : 'col'; }
-        const refs = all(kind, 'f').map(f => f.textContent);
+        const refs = kinds.flatMap(k => all(k, 'f')).map(f => f.textContent);
         let box = null, sheetOk = true;
         refs.forEach(f => {
           const m = /^(?:'?(.+?)'?!)?(.+)$/.exec(f.trim()); if (!m) return;
@@ -8439,7 +8967,7 @@ async function exportXlsx(macro) {
     Object.entries(sh.cells).forEach(([k, x]) => {
       const p = parseAddr(k); if (!p) return;
       const f = x.f || {}, st = xlStyle(f);
-      if ((x.v === '' || x.v == null) && !st && !f.note) return;
+      if ((x.v === '' || x.v == null) && !st && !f.note && !f.unl) return;
       maxR = Math.max(maxR, p.r); maxC = Math.max(maxC, p.c);
       const v = (vals[p.r] || [])[p.c];
       let cell;
@@ -8469,6 +8997,12 @@ async function exportXlsx(macro) {
     X.utils.book_append_sheet(wb, ws, sh.name.slice(0, 31));
   });
   const names = Object.entries(cur.names || {}).filter(([, nm]) => cur.sheets.some(s => s.name === nm.s) && rangeObj(nm.ref)).map(([n, nm]) => ({ Name: n, Ref: `'${nm.s.replace(/'/g, "''")}'!${absRef(rangeObj(nm.ref))}` }));
+  // zone d'impression et lignes de titres répétées
+  cur.sheets.forEach((sh, i) => {
+    const P = sh.print || {}, q = `'${sh.name.slice(0, 31).replace(/'/g, "''")}'!`, o = P.area && rangeObj(P.area);
+    if (o) names.push({ Name: '_xlnm.Print_Area', Ref: q + absRef(o), Sheet: i });
+    if (+P.titles > 0) names.push({ Name: '_xlnm.Print_Titles', Ref: `${q}$1:$${+P.titles}`, Sheet: i });
+  });
   if (names.length) wb.Workbook = { Names: names };
   let buf = X.write(wb, { type: 'array', bookType: 'xlsx' });
   try { buf = await xlsxExtras(buf, cur); } catch (e) { console.warn('Compléments Excel ignorés', e); toast('Graphiques ou règles non exportés : le reste du classeur est bien là.', true); }
@@ -8494,32 +9028,73 @@ function exportCsv() {
 }
 
 /* --- impression */
+// Réglages d'impression d'une feuille (Fichier › Mise en page de l'impression)
+const PRINT_DEF = { orient: 'auto', paper: 'A4', fit: 'width', area: '', titles: 0, grid: true, margins: 'normal', foot: true };
+const PAPERS = { A4: [210, 297, 9], A3: [297, 420, 8], Letter: [215.9, 279.4, 1], Legal: [215.9, 355.6, 5] };
+const MARGINS_MM = { normal: 15, narrow: 7, wide: 25 };
+const printOf = sh => ({ ...PRINT_DEF, ...((sh && sh.print) || {}) });
+// Zone imprimée : la zone d'impression si elle est définie, sinon jusqu'à la dernière case remplie.
+function printZone(sh, vals) {
+  const P = printOf(sh), o = P.area && rangeObj(P.area);
+  if (o) return o;
+  let maxR = -1, maxC = -1;
+  Object.entries(sh.cells).forEach(([k, x]) => { if (x.v !== '' && x.v != null || (x.f && (x.f.bg || x.f.mg))) { const p = parseAddr(k), m = x.f && x.f.mg; if (p) { maxR = Math.max(maxR, p.r + (m ? (m.r || 1) - 1 : 0)); maxC = Math.max(maxC, p.c + (m ? (m.c || 1) - 1 : 0)); } } });
+  (vals || []).forEach((row, r) => (row || []).forEach((v, c) => { if (v != null && v !== '') { if (r > maxR) maxR = r; if (c > maxC) maxC = c; } }));
+  return { r1: 0, c1: 0, r2: maxR, c2: maxC };
+}
 function buildPrint() {
   if (state.view !== 'sheet' || !state.cur) { $('#printArea').innerHTML = ''; return; }
   commitEdit(false);
-  const cur = state.cur; let maxR = -1, maxC = -1;
-  Object.entries(cur.cells).forEach(([k, x]) => { if (x.v !== '') { const p = parseAddr(k); if (p) { maxR = Math.max(maxR, p.r); maxC = Math.max(maxC, p.c); } } });
-  const hidden = { has: r => typeof rowHidden === 'function' && rowHidden(r) };
+  const cur = state.cur, sh = cur.sheets[cur.active], P = printOf(sh), Z = printZone(sh, SH.vals);
+  const hidC = new Set((cur.hid && cur.hid.c) || []);
+  const cols = []; for (let c = Z.c1; c <= Z.c2; c++) if (!hidC.has(c)) cols.push(c);
+  const rows = []; for (let r = Z.r1; r <= Z.r2; r++) if (!rowHidden(r)) rows.push(r);
   const colPx = c => (cur.colW && cur.colW[c]) || 100;
-  let totalW = 0; for (let c = 0; c <= maxC; c++) totalW += colPx(c);
+  const totalW = cols.reduce((s, c) => s + colPx(c), 0);
   const sheetName = cur.sheets && cur.sheets.length > 1 && cur.sheets[cur.active] ? ' · ' + cur.sheets[cur.active].name : '';
-  let h = `<h1 class="print-title">${esc((cur.title || '') + sheetName)}</h1><table class="print-grid"><colgroup>`;
-  for (let c = 0; c <= maxC; c++) h += `<col style="width:${colPx(c)}px">`;
+  const pap = PAPERS[P.paper] || PAPERS.A4, land = P.orient === 'landscape' || (P.orient === 'auto' && totalW > 700);
+  const mm = MARGINS_MM[P.margins] || 15, pageWpx = ((land ? pap[1] : pap[0]) - 2 * mm) * 96 / 25.4;
+  const zoom = P.fit === 'none' ? 1 : P.fit === 'page' ? Math.min(1, pageWpx / Math.max(1, totalW), (((land ? pap[0] : pap[1]) - 2 * mm - 20) * 96 / 25.4) / Math.max(1, rows.length * 22 + 50)) : Math.min(1, pageWpx / Math.max(1, totalW));
+  computeCF(rows, cols); // couleurs conditionnelles de toute la zone imprimée
+  let h = `<h1 class="print-title">${esc((cur.title || '') + sheetName)}</h1><table class="print-grid${P.grid ? '' : ' nogrid'}" style="zoom:${zoom.toFixed(3)}"><colgroup>`;
+  cols.forEach(c => { h += `<col style="width:${colPx(c)}px">`; });
   h += '</colgroup>';
-  for (let r = 0; r <= maxR; r++) {
-    if (hidden.has(r)) continue;
-    h += '<tr>';
-    for (let c = 0; c <= maxC; c++) {
-      const d = display(r, c);
-      const st = [d.bg && 'background:' + d.bg, d.fc && 'color:' + d.fc, d.bd && 'box-shadow:' + d.bd].filter(Boolean).join(';');
-      h += `<td class="${d.cls}"${st ? ` style="${st}"` : ''}>${esc(d.txt)}</td>`;
-    }
-    h += '</tr>';
-  }
-  const charts = (cur.charts || []).map(ch => `<div class="chart static" style="width:${ch.w}px;height:${ch.h}px">${chartHTML(ch, SH.vals, cellOf)}</div>`).join('');
+  const T = Math.max(0, Math.min(+P.titles || 0, rows.length));
+  const rowHtml = r => '<tr>' + cols.map(c => {
+    const d = display(r, c);
+    const st = [d.bg && 'background:' + d.bg, d.fc && 'color:' + d.fc, d.bd && 'box-shadow:' + d.bd].filter(Boolean).join(';');
+    return `<td class="${d.cls}"${st ? ` style="${st}"` : ''}>${esc(d.txt)}</td>`;
+  }).join('') + '</tr>';
+  // les lignes de titres se répètent en haut de chaque page (en-tête de tableau)
+  if (T) h += '<thead>' + rows.slice(0, T).map(rowHtml).join('') + '</thead>';
+  h += '<tbody>' + rows.slice(T).map(rowHtml).join('') + '</tbody>';
+  computeCF();
+  const charts = P.area ? '' : (cur.charts || []).map(ch => `<div class="chart static" style="width:${ch.w}px;height:${ch.h}px">${chartHTML(ch, SH.vals, cellOf)}</div>`).join('');
   $('#printArea').innerHTML = h + '</table>' + (charts ? `<div class="print-charts">${charts}</div>` : '');
-  // tableau large : impression en paysage
-  $('#pageCss').textContent = `@page{size:A4 ${totalW > 700 ? 'landscape' : 'portrait'};margin:12mm}`;
+  $('#pageCss').textContent = `@page{size:${P.paper === 'A4' || P.paper === 'A3' ? P.paper : P.paper.toLowerCase()} ${land ? 'landscape' : 'portrait'};margin:${mm}mm${P.foot ? ';@bottom-center{content:"Page " counter(page) " sur " counter(pages);font:9pt sans-serif;color:#666}' : ''}}`;
+}
+function openPrintSetup() {
+  commitEdit(false);
+  const cur = state.cur, sh = cur.sheets[cur.active], P = printOf(sh), R = rng();
+  SH.dlg = 'print';
+  const sel = (id, opts, v) => `<select id="${id}">${opts.map(([k, l]) => `<option value="${k}"${String(k) === String(v) ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+  openDlg(dlgHead('Mise en page de l\'impression') + `<p class="dlg-note">Pour la feuille « ${esc(sh.name)} » : impression, PDF et copie Excel.</p>
+    <div class="dlg-row"><label class="dlg-f"><span>Orientation</span>${sel('ppO', [['auto', 'Automatique'], ['portrait', 'Portrait'], ['landscape', 'Paysage']], P.orient)}</label><label class="dlg-f"><span>Papier</span>${sel('ppP', [['A4', 'A4'], ['A3', 'A3'], ['Letter', 'Lettre US'], ['Legal', 'Légal US']], P.paper)}</label></div>
+    <div class="dlg-row"><label class="dlg-f"><span>Ajuster</span>${sel('ppF', [['width', 'À la largeur de la page'], ['page', 'Sur une seule page'], ['none', 'Taille réelle']], P.fit)}</label><label class="dlg-f"><span>Marges</span>${sel('ppM', [['normal', 'Normales'], ['narrow', 'Étroites'], ['wide', 'Larges']], P.margins)}</label></div>
+    <div class="dlg-row"><label class="dlg-f"><span>Zone d'impression (vide : toute la feuille)</span><input id="ppA" value="${esc(P.area || '')}" placeholder="ex. A1:F40" spellcheck="false"></label><button type="button" class="lnk" id="ppSel">Prendre la sélection (${rngRef(R)})</button></div>
+    <label class="dlg-f"><span>Lignes de titres répétées en haut de chaque page</span>${sel('ppT', [[0, 'Aucune'], [1, 'La 1re ligne'], [2, 'Les 2 premières'], [3, 'Les 3 premières']], P.titles)}</label>
+    <label class="pv-chk"><input type="checkbox" id="ppG"${P.grid ? ' checked' : ''}> Imprimer le quadrillage</label>
+    <label class="pv-chk"><input type="checkbox" id="ppN"${P.foot ? ' checked' : ''}> Numéros de page en bas</label>
+    <div class="fp-acts"><button class="pbtn" id="ppOk">Enregistrer</button><button class="pbtn ghost" id="ppPrint">Enregistrer et imprimer</button></div>`, 'wide');
+  $('#ppSel').addEventListener('click', () => { $('#ppA').value = rngRef(R); });
+  const save = () => {
+    const area = $('#ppA').value.trim().toUpperCase().replace(/\$/g, '');
+    if (area && !rangeObj(area)) { toast('Zone d\'impression : indiquez une plage comme A1:F40.', true); return false; }
+    sh.print = { orient: $('#ppO').value, paper: $('#ppP').value, fit: $('#ppF').value, margins: $('#ppM').value, area, titles: +$('#ppT').value, grid: $('#ppG').checked, foot: $('#ppN').checked };
+    scheduleSave(); closeDlg(); return true;
+  };
+  $('#ppOk').addEventListener('click', () => { if (save()) toast('Mise en page enregistrée'); });
+  $('#ppPrint').addEventListener('click', () => { if (save()) printDoc(); });
 }
 window.addEventListener('beforeprint', buildPrint);
 function printDoc() {
@@ -9282,6 +9857,7 @@ function applyBuild(plan) {
     maxR = Math.max(maxR, pos.r + 14); maxC = Math.max(maxC, pos.c + 6);
   });
   o.rows = Math.max(o.rows || 60, Math.min(2000, maxR + 21)); o.cols = Math.max(o.cols || 12, Math.min(60, maxC + 3));
+  if (lockedIn('all')) return;
   pushHist(); restore(JSON.stringify(o)); renderCharts();
   if (plan.titre && /sans titre/i.test(state.cur.title || '')) { state.cur.title = String(plan.titre).slice(0, 80); $('#titleIn').value = state.cur.title; scheduleSave(); }
   const errors = [];
@@ -9463,6 +10039,11 @@ function commands() {
     add('Données', 'Rechercher dans le classeur', 'search', () => openSFind(false), 'Ctrl F');
     add('Données', 'Rechercher et remplacer', 'search', () => openSFind(true), 'Ctrl H');
     add('Données', 'Plages nommées', 'tag', openNames);
+    add('Données', 'Valeur cible…', 'target', openGoalSeek);
+    add('Données', 'Solveur…', 'sliders', openSolver);
+    add('Données', sheetProt() ? 'Ôter la protection de la feuille…' : 'Protéger la feuille…', sheetProt() ? 'unlock' : 'lock', openProtect);
+    add('Cellules', 'Cases modifiables malgré la protection', 'unlock', toggleUnlocked);
+    add('Fichier', 'Mise en page de l\'impression…', 'printer', openPrintSetup);
     add('Cellules', 'Fusionner ou séparer les cellules', 'merge', toggleMerge);
     add('Cellules', 'Ajouter une décimale', 'grid', () => stepDecimals(1));
     add('Cellules', 'Réduire les décimales', 'grid', () => stepDecimals(-1));
@@ -9586,7 +10167,7 @@ function menuModel() {
     '-', pick('Ouvrir un fichier Word, Excel, CSV ou PDF', 'Ouvrir un PDF, ou fusionner des PDF et des photos'),
     sub('Ouvrir un document récent', recents, 'doc'),
     '-', pick('Enregistrer', 'Enregistrer sous…', 'Renommer'),
-    doc ? sub('Exporter', pick('Exporter:'), 'download') : null, imprimer,
+    doc ? sub('Exporter', pick('Exporter:'), 'download') : null, imprimer, pick('Mise en page de l\'impression…'),
     '-', pick('Sauvegarder tous mes documents', 'Réglages'),
     doc ? ['-', pick('Retour à l\'accueil').map(c => ({ ...c, label: 'Fermer le document' }))] : null
   ]; };
@@ -9623,7 +10204,7 @@ function menuModel() {
       pick('Ajouter une décimale', 'Réduire les décimales'), '-',
       pick('Retour à la ligne automatique', 'Fusionner ou séparer les cellules'), '-',
       pick('Couleur de fond', 'Couleur du texte'), sub('Bordures', pick(/bordure/i), 'borders'), '-', pick('Mise en forme conditionnelle'), pick('Cellules:'));
-    menu('Données', pick('Trier de A à Z', 'Trier de Z à A', '-', 'Filtrer la colonne', 'Retirer tous les filtres', '-', 'Plages nommées'), pick('Données:', 'Structure:', 'Feuilles:'));
+    menu('Données', pick('Trier de A à Z', 'Trier de Z à A', '-', 'Filtrer la colonne', 'Retirer tous les filtres', '-', 'Valeur cible…', 'Solveur…', '-', 'Plages nommées', '-', /protection de la feuille|Protéger la feuille/), pick('Données:', 'Structure:', 'Feuilles:'));
     menu('Outils', outils());
   } else {
     menu('Fichier', fichier());

@@ -473,6 +473,7 @@ body.m-phone .plume{width:100%}
   .print-grid td{border:1px solid #ccc;padding:3pt 6pt;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .print-grid td.wr{white-space:normal}.print-grid td.i{font-style:italic}.print-grid td.u{text-decoration:underline}
   .print-grid tr{break-inside:avoid}
+  .print-grid.nogrid td{border-color:transparent}
   .page img[data-wrap]{break-inside:avoid}
   .page{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .print-grid td.num,.print-grid td.ar{text-align:right}.print-grid td.ac{text-align:center}.print-grid td.b{font-weight:600}
@@ -548,7 +549,7 @@ body.m-phone #printBtn{display:none!important}
 .nm-n{font-family:var(--f-mono);font-size:13px;font-weight:500}
 .nm-go{margin-left:auto;font-family:var(--f-mono);font-size:11.5px}
 .cf-prev{border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:13px;font-variant-numeric:tabular-nums;text-align:right}
-.ch-types{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+.ch-types{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 .ch-types button{display:flex;flex-direction:column;align-items:center;gap:4px;border:1px solid var(--line);background:var(--paper);border-radius:9px;padding:8px 4px;font-size:11.5px;line-height:1.2;text-align:center}
 .ch-types button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
 .ch-types svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
@@ -919,3 +920,11 @@ body:not(.m-phone) .bar{border-bottom-color:transparent}
 /* Plume : la zone de saisie reste visible en bas, la conversation défile au-dessus */
 .plume-b>.ask{position:sticky;bottom:-16px;margin-top:auto;margin-bottom:-16px;padding:10px 0 16px;background:var(--paper);border-top:1px solid var(--line);z-index:1}
 .plume-b>.ask textarea{min-height:64px}
+
+.tab .tab-lock .ic{width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:.7}
+.sv-res{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;margin:6px 0 10px;max-height:260px;overflow:auto}
+.sv-res div{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+.sv-res span{font-family:var(--f-mono);font-size:11.5px;color:var(--muted)}
+.sv-res small{color:var(--muted);font-size:11px}
+.sv-c input.sv-l,.sv-c input.sv-r{min-width:0;flex:1}
+.dlg-row>select{border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:8px 6px;font-size:14px}
