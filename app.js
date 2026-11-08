@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.19.0';
+const APP_VERSION = '1.20.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -109,6 +109,7 @@ const IC = {
   cursor: '<path d="M5 3l14 7-6 2-2 6z"/>',
   square: '<rect x="4" y="5" width="16" height="14" rx="1.5"/>',
   whiteout: '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 12h10" stroke-dasharray="2 2"/>',
+  redact: '<rect x="3" y="8" width="18" height="8" rx="1" fill="currentColor"/><path d="M3 4h12M3 20h8"/>',
   sign: '<path d="M3 17c3-1 4-9 6-9s0 8 2 8 3-4 4-4 1 3 3 3 2-1 3-1"/><path d="M3 21h18"/>',
   rotL: '<path d="M3 4v6h6"/><path d="M3.5 10A8.5 8.5 0 1 1 6 16.5"/>',
   rotR: '<path d="M21 4v6h-6"/><path d="M20.5 10A8.5 8.5 0 1 0 18 16.5"/>',
@@ -181,6 +182,65 @@ window.addEventListener('resize', debounce(() => { if (MODE === 'auto') applyMod
    ========================================================= */
 const state = { docs: new Map(), loaded: false, view: 'home', cur: null, filter: 'tous', q: '' };
 
+// Grandes feuilles : rangées en colonnes compactes (adresses, valeurs, formats), par paquets de
+// PACK_CH cases avec une pause entre deux paquets : l'enregistrement ne fige plus l'écran, et
+// l'écriture comme la relecture sont dix fois plus rapides qu'avec un objet par case.
+const PACK_MIN = 3000, PACK_CH = 40000;
+const yieldUI = () => new Promise(r => setTimeout(r, 0));
+// Nombre de cases d'une feuille, sans recompter à chaque enregistrement (compter un million de clés
+// prend un quart de seconde) : la feuille ouverte est comptée par applyMerges, les autres une fois.
+const NCELLS = new WeakMap();
+function cellCount(cells) {
+  if (!cells) return 0;
+  if (cells === SH.mgCells) return SH.nc || 0;
+  let n = NCELLS.get(cells); if (n == null) NCELLS.set(cells, n = Object.keys(cells).length);
+  return n;
+}
+async function packCells(cells) {
+  const keys = Object.keys(cells), k = [], v = [], fi = [], fs = [], fmap = new Map();
+  for (let i = 0; i < keys.length; i += PACK_CH) {
+    if (i) await yieldUI();
+    const ks = keys.slice(i, i + PACK_CH), vs = new Array(ks.length), is = new Array(ks.length);
+    for (let j = 0; j < ks.length; j++) {
+      const x = cells[ks[j]];
+      if (!x) { vs[j] = ''; is[j] = 0; continue; } // effacée pendant l'enregistrement : le suivant s'en chargera
+      vs[j] = x.v == null ? '' : x.v;
+      let id = 0;
+      if (x.f) for (const _ in x.f) { const js = JSON.stringify(x.f); id = fmap.get(js); if (!id) { fs.push(js); id = fs.length; fmap.set(js, id); } break; }
+      is[j] = id;
+    }
+    k.push(ks.join('\n')); v.push(JSON.stringify(vs)); fi.push(is.join(','));
+  }
+  return { k, v, fi, fs };
+}
+function unpackCells(pk) {
+  const cells = {}, fs = (pk.fs || []).map(x => JSON.parse(x));
+  (pk.k || []).forEach((kc, ch) => {
+    if (!kc) return;
+    const ks = kc.split('\n'), vs = JSON.parse(pk.v[ch] || '[]'), is = String((pk.fi || [])[ch] || '').split(',');
+    for (let j = 0; j < ks.length; j++) {
+      const id = +is[j] || 0, f = id ? Object.assign({}, fs[id - 1]) : {};
+      if (id) for (const p in f) if (f[p] && typeof f[p] === 'object') f[p] = JSON.parse(JSON.stringify(f[p]));
+      cells[ks[j]] = { v: vs[j] == null ? '' : vs[j], f };
+    }
+  });
+  return cells;
+}
+async function packDoc(data) {
+  if (!Array.isArray(data.sheets)) return clone(data);
+  const { sheets, ...rest } = data, out = clone(rest);
+  out.sheets = [];
+  for (const sh of sheets) {
+    const { cells, ...o } = sh, so = clone(o);
+    if (cellCount(cells) < PACK_MIN) so.cells = clone(cells || {}); else so.pk = await packCells(cells);
+    out.sheets.push(so);
+  }
+  return out;
+}
+function unpackDoc(d) {
+  if (d && Array.isArray(d.sheets)) d.sheets.forEach(sh => { if (sh && sh.pk) { sh.cells = unpackCells(sh.pk); delete sh.pk; } });
+  return d;
+}
 const Store = {
   mode: 'idb', db: null,
   req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
@@ -201,7 +261,7 @@ const Store = {
     if (!ls.set('grim.docs', all)) throw { code: 'local_full' };
   },
   async init() {
-    try { await this.open(); const all = await this.req(this.tx('readonly').getAll()); state.docs = new Map(all.map(d => [d.id, d])); }
+    try { await this.open(); const all = await this.req(this.tx('readonly').getAll()); state.docs = new Map(all.map(d => [d.id, unpackDoc(d)])); }
     catch { this.mode = 'local'; const all = ls.get('grim.docs', {}); state.docs = new Map(Object.entries(all).map(([k, v]) => [k, { ...v, id: k }])); }
     if (!state.docs.size && !ls.get('grim.seeded', false)) {
       ls.set('grim.seeded', true);
@@ -214,14 +274,14 @@ const Store = {
     doc.updatedAt = Date.now();
     state.docs.set(doc.id, doc);
     const { _saved, ...data } = doc;
-    if (this.mode === 'idb') await this.req(this.tx('readwrite').put(clone(data)));
+    if (this.mode === 'idb') { const packed = await packDoc(data); await this.req(this.tx('readwrite').put(packed)); }
     else this.writeLocal();
     doc._saved = true;
     if (typeof scheduleSync === 'function') scheduleSync();
   },
   async putRaw(doc) {
     state.docs.set(doc.id, doc);
-    if (this.mode === 'idb') await this.req(this.tx('readwrite').put(clone(doc)));
+    if (this.mode === 'idb') { const packed = await packDoc(doc); await this.req(this.tx('readwrite').put(packed)); }
     else this.writeLocal();
   },
   // Fichiers lourds (PDF) : rangés à part, pour que les documents restent légers à enregistrer
@@ -248,7 +308,7 @@ const Store = {
   }
 };
 
-let saveTimer = null, saving = false, pendingSave = false;
+let saveTimer = null, saving = false, saveRun = null, saveNext = null;
 function setSaveState(s) {
   const el = $('#saveSt'); el.dataset.s = s;
   el.textContent = s === 'ok' ? 'Enregistré' : s === 'dirty' ? 'Modifications…' : 'Non enregistré';
@@ -256,23 +316,29 @@ function setSaveState(s) {
 function scheduleSave() {
   if (!state.cur) return;
   setSaveState('dirty'); if (typeof markFileDirty === 'function') markFileDirty();
-  clearTimeout(saveTimer); saveTimer = setTimeout(flushSave, 900);
+  clearTimeout(saveTimer); saveTimer = setTimeout(flushSave, state.view === 'sheet' && (SH.nc || 0) > 20000 ? 2500 : 900);
 }
-async function flushSave() {
+// Enregistre le document ouvert. Si un enregistrement est déjà en cours, un second est prévu juste
+// après (il reprendra les dernières modifications) et c'est lui qu'on attend.
+function flushSave() {
   clearTimeout(saveTimer); saveTimer = null;
-  if (!state.cur) return;
-  if (saving) { pendingSave = true; return; }
+  const doc = state.cur; if (!doc) return Promise.resolve();
+  if (saveRun) return saveNext ||= saveRun.then(() => { saveNext = null; return storeDoc(doc); });
+  return storeDoc(doc);
+}
+function storeDoc(doc) {
   saving = true;
-  try { await Store.save(state.cur); setSaveState('ok'); }
-  catch (e) {
-    setSaveState('err');
-    const code = e && e.code;
-    if (e && e.name === 'QuotaExceededError') toast('Espace de stockage plein. Supprimez quelques documents ou images pour continuer à enregistrer.', true);
-    else if (code === 'local_full') toast('Stockage du navigateur plein : ce document n\'a pas pu être enregistré.', true);
-    else toast('Enregistrement impossible pour le moment. Nouvel essai à la prochaine modification.', true);
-  }
-  saving = false;
-  if (pendingSave) { pendingSave = false; flushSave(); }
+  saveRun = (async () => {
+    try { await Store.save(doc); if (state.cur === doc && !saveTimer && !saveNext) setSaveState('ok'); }
+    catch (e) {
+      setSaveState('err');
+      const code = e && e.code;
+      if (e && e.name === 'QuotaExceededError') toast('Espace de stockage plein. Supprimez quelques documents ou images pour continuer à enregistrer.', true);
+      else if (code === 'local_full') toast('Stockage du navigateur plein : ce document n\'a pas pu être enregistré.', true);
+      else toast('Enregistrement impossible pour le moment. Nouvel essai à la prochaine modification.', true);
+    } finally { saving = false; saveRun = null; }
+  })();
+  return saveRun;
 }
 window.addEventListener('beforeunload', () => { if (saveTimer) flushSave(); });
 // Appelé par l'appli de bureau avant de fermer la fenêtre : rien de tapé ne se perd
@@ -294,7 +360,7 @@ const WELCOME = () => ({
 <p><strong>Recopier :</strong> faites glisser le petit carré en bas à droite de la sélection pour recopier une formule ou prolonger une série (1, 2, 3… ou des dates). <strong>Ctrl D</strong> recopie vers le bas. <strong>Dates :</strong> tapez 22/10/2026 ou 22/10, et =B1-A1 donne le nombre de jours. <strong>Trier et filtrer :</strong> boutons flèches et entonnoir, dans la colonne voulue.</p>
 <p><strong>Sur téléphone :</strong> touchez une cellule pour la sélectionner, puis touchez-la à nouveau pour écrire. Une rangée de touches (=, SOMME, ;, parenthèses…) apparaît sous la barre de formule.</p>
 <h2>Les PDF</h2>
-<p>La carte <strong>PDF</strong> ouvre un PDF, ou fusionne plusieurs PDF et photos en un seul. <strong>Lire</strong> : recherche, texte copiable, champs de formulaire à remplir. <strong>Annoter</strong> : texte, surlignage, dessin, cadre, bloc blanc pour cacher, signature, image. <strong>Pages</strong> : faire pivoter, supprimer, dupliquer, déplacer (glisser, ou appui long au doigt), extraire, diviser, ajouter des pages. <strong>Exporter</strong> enregistre le PDF modifié.</p>
+<p>La carte <strong>PDF</strong> ouvre un PDF, ou fusionne plusieurs PDF et photos en un seul. <strong>Lire</strong> : recherche, texte copiable, champs de formulaire à remplir. <strong>Annoter</strong> : texte, surlignage, dessin, cadre, bloc blanc pour cacher, <strong>caviardage</strong> (le texte sous le bloc noir est supprimé du fichier enregistré), signature, image. <strong>Pages</strong> : faire pivoter, supprimer, dupliquer, déplacer (glisser, ou appui long au doigt), extraire, diviser, ajouter des pages. <strong>Exporter</strong> enregistre le PDF modifié.</p>
 <h2>Vos données</h2>
 <p>Tout est enregistré automatiquement sur cet appareil, et Grimoire fonctionne hors connexion. Pour passer vos documents sur un autre appareil : <strong>Réglages → Sauvegarder tout</strong>, puis <strong>Restaurer</strong> de l'autre côté.</p>
 <h2>Plume, l'assistant (facultatif)</h2>
@@ -376,9 +442,18 @@ async function goHome() {
   if (state.view === 'pdfv') { closePdfFind(); if (PDFV.src) { try { PDFV.src.destroy(); } catch {} } PDFV.src = PDFV.doc = null; PDFV.pages = []; PDFV.srcPages = []; PDFV.bytes = null; PDFV.thumbC.forEach(u => { if (u) URL.revokeObjectURL(u); }); PDFV.thumbC = new Map(); PDFV.hist = []; PDFV.fut = []; PDFV.gen++; RQ.list = []; TQ.hi = []; TQ.lo = []; }
   state.cur = null; show('home'); renderHome(); applyDocStyles();
 }
+// Copie de travail d'un document. Les cases d'une grande feuille ne sont pas recopiées une à une
+// (plus d'une seconde pour un million de cases) : la copie de travail les reprend telles quelles.
+function openCopy(d) {
+  const big = cells => cellCount(cells) >= PACK_MIN;
+  if (!Array.isArray(d.sheets) || !d.sheets.some(sh => sh && big(sh.cells))) return clone(d);
+  const { sheets, ...rest } = d, out = clone(rest);
+  out.sheets = sheets.map(sh => { const { cells, ...o } = sh, so = clone(o); so.cells = big(cells) ? cells : clone(cells || {}); return so; });
+  return out;
+}
 function openDoc(id) {
   const d = state.docs.get(id); if (!d) return;
-  state.cur = clone(d); state.cur.id = id; state.cur._saved = true;
+  state.cur = openCopy(d); state.cur.id = id; state.cur._saved = true;
   if (d.type === 'feuille') openSheet(); else if (d.type === 'pdf') openPdf(); else openWriter();
 }
 async function createDoc(type, base) {
@@ -1720,9 +1795,17 @@ const frToExcel = f => outsideStrings(frNamesToEn(f), p => p.replace(/(\d),(\d)/
 const xlF = f => outsideStrings(frToExcel(f), p => p.replace(/\b(TRUE|FALSE)\(\)/g, '$1'));
 const excelToFr = f => enNamesToFr(outsideStrings(f, p => p.replace(/,/g, ';').replace(/(\d)\.(\d)/g, '$1,$2')));
 
-const COLN = c => { let s = ''; c++; while (c > 0) { const m = (c - 1) % 26; s = String.fromCharCode(65 + m) + s; c = Math.floor((c - 1) / 26); } return s; };
+const COLN_ = [];
+const COLN = c => { if (COLN_[c] !== undefined) return COLN_[c]; let s = '', n = c + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } if (c >= 0 && c < 20000) COLN_[c] = s; return s; };
 const addr = (r, c) => COLN(c) + (r + 1);
-const parseAddr = a => { const m = /^([A-Z]+)(\d+)$/.exec(a); if (!m) return null; let c = 0; for (const ch of m[1]) c = c * 26 + ch.charCodeAt(0) - 64; return { r: +m[2] - 1, c: c - 1 }; };
+// Lecture d'une adresse « B12 » sans expression régulière : appelée des millions de fois sur un gros classeur.
+const parseAddr = a => {
+  let c = 0, i = 0; const n = a.length;
+  for (; i < n; i++) { const k = a.charCodeAt(i); if (k < 65 || k > 90) break; c = c * 26 + k - 64; }
+  if (!i || i === n) return null;
+  let r = 0; for (let j = i; j < n; j++) { const k = a.charCodeAt(j); if (k < 48 || k > 57) return null; r = r * 10 + k - 48; }
+  return { r: r - 1, c: c - 1 };
+};
 function parseNum(s) {
   let t = String(s).trim().replace(/[\s  ]/g, '');
   let pct = false;
@@ -2033,10 +2116,11 @@ async function ensureHF() {
   const HFm = window.HyperFormula;
   registerExtraFunctions(HFm);
   try {
-    SH.hf = HFm.buildEmpty({ licenseKey: 'gpl-v3', decimalSeparator: ',', thousandSeparator: '', functionArgSeparator: ';', arrayColumnSeparator: ';', arrayRowSeparator: '|' });
+    SH.hf = HFm.buildEmpty({ licenseKey: 'gpl-v3', decimalSeparator: ',', thousandSeparator: '', functionArgSeparator: ';', arrayColumnSeparator: ';', arrayRowSeparator: '|', maxRows: MAX_ROWS, maxColumns: MAX_COLS });
     SH.fr = true;
-  } catch { SH.hf = HFm.buildEmpty({ licenseKey: 'gpl-v3' }); SH.fr = false; }
+  } catch { SH.hf = HFm.buildEmpty({ licenseKey: 'gpl-v3', maxRows: MAX_ROWS, maxColumns: MAX_COLS }); SH.fr = false; }
   SH.sid = SH.hf.getSheetId(SH.hf.addSheet('Feuille1'));
+  try { SH.hf.on('valuesUpdated', onHFValues); } catch { SH.noEvents = true; }
   return true;
 }
 // Une cellule au format Texte garde exactement ce qui est tapé (« 0612… », « 10045822 »).
@@ -2058,6 +2142,7 @@ const rawOf = (r, c) => { const x = cellOf(r, c); return x ? x.v : ''; };
 // Un classeur contient plusieurs feuilles ; cells, rows, cols… désignent toujours la feuille active.
 const SHEET_KEYS = ['cells', 'rows', 'cols', 'colW', 'filter', 'frz', 'hid', 'cf', 'charts', 'pivot'];
 function ensureSheets(doc) {
+  unpackDoc(doc);
   if (!Array.isArray(doc.sheets) || !doc.sheets.length) {
     doc.sheets = [{ id: uid(), name: 'Feuille1', cells: doc.cells || {}, rows: doc.rows || 60, cols: doc.cols || 12, colW: doc.colW || {}, filter: doc.filter, frz: doc.frz }];
     doc.active = 0;
@@ -2073,9 +2158,15 @@ function ensureSheets(doc) {
   });
 }
 const refName = n => /^[A-Za-zÀ-ÿ_][A-Za-z0-9À-ÿ_.]*$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`;
+// Contenu d'une feuille pour le moteur : seulement jusqu'à la dernière case remplie.
 function sheetData(sh) {
-  const data = [];
-  for (let r = 0; r < sh.rows; r++) { const row = []; for (let c = 0; c < sh.cols; c++) { const x = sh.cells[addr(r, c)]; row.push(x ? hfVal(x) : null); } data.push(row); }
+  const data = [], cells = sh.cells;
+  for (const k in cells) {
+    const x = cells[k]; if (x.v === '' || x.v == null) continue;
+    const p = parseAddr(k); if (!p || p.r >= sh.rows || p.c >= sh.cols) continue;
+    (data[p.r] ||= [])[p.c] = hfVal(x);
+  }
+  for (let r = 0; r < data.length; r++) { const row = data[r] ||= []; for (let c = 0; c < row.length; c++) if (row[c] === undefined) row[c] = null; }
   return data;
 }
 function serToRaw(v) {
@@ -2089,6 +2180,7 @@ function fixDates(cells) {
   return cells;
 }
 function markDates(sh) {
+  if (sh.dm) return; sh.dm = 1;
   Object.values(sh.cells).forEach(x => { const v = String(x.v || ''); if (v && v[0] !== '=' && !(x.f && x.f.n) && parseNum(v) == null && parseDate(v) != null) (x.f ||= {}).n = 'date'; });
 }
 function cellsFromHF(id, old, fmts) {
@@ -2106,7 +2198,8 @@ async function openSheet() {
   ensureSheets(cur);
   cur.sheets.forEach(markDates);
   SH.hist = []; SH.fut = []; SH.sel = { r: 0, c: 0 }; SH.anc = { r: 0, c: 0 }; SH.editing = null;
-  show('sheet');
+  SH.vals = []; SH.valsDirty = true; SH.hidR = new Uint8Array(0); SH.mgSig = null;
+  show('sheet'); gw.scrollTop = 0; gw.scrollLeft = 0;
   buildGrid(); renderTabs();
   $('#sStatus').textContent = 'Chargement du moteur de calcul…';
   try { await ensureHF(); }
@@ -2118,30 +2211,197 @@ async function openSheet() {
 function loadHF() {
   if (!SH.hf) return;
   const cur = state.cur, hf = SH.hf;
-  hf.getSheetNames().forEach(n => hf.removeSheet(hf.getSheetId(n)));
-  SH.ids = cur.sheets.map(sh => hf.getSheetId(hf.addSheet(sh.name)));
-  loadNames();
-  hf.batch(() => cur.sheets.forEach((sh, i) => hf.setSheetContent(SH.ids[i], sheetData(sh))));
-  SH.sid = SH.ids[cur.active];
+  SH.muteVals = true;
+  try {
+    hf.getSheetNames().forEach(n => hf.removeSheet(hf.getSheetId(n)));
+    SH.ids = cur.sheets.map(sh => hf.getSheetId(hf.addSheet(sh.name)));
+    loadNames();
+    hf.batch(() => cur.sheets.forEach((sh, i) => hf.setSheetContent(SH.ids[i], sheetData(sh))));
+  } finally { SH.muteVals = false; }
+  SH.sid = SH.ids[cur.active]; SH.valsDirty = true;
 }
+/* --- grille virtuelle
+   Seules les lignes et colonnes à l'écran (plus une marge) existent dans la page : une feuille
+   d'un million de lignes s'affiche aussi vite qu'une feuille de vingt.
+   V.Y[r] = haut de la ligne r et V.X[c] = gauche de la colonne c, en pixels réels (ligne masquée : 0).
+   Au-delà de VMAX pixels de haut, les zones hors écran sont comprimées (facteur V.k) pour rester
+   sous la hauteur maximale que les navigateurs savent afficher. */
+const VMAX = 8e6, VMR = 30, VMC = 4, MAX_ROWS = 1048576, MAX_COLS = 16384;
+const V = SH.v = { ok: false, Y: new Float64Array(1), X: new Float64Array(1), k: 1, H: 26, hh: 26, r0: 0, r1: -1, c0: 0, c1: -1, fr: 0, fc: 0, rh: new Map(), hidC: new Set(), list: [], rhOf: new WeakMap() };
+SH.cell = []; SH.rowTh = []; SH.colTh = []; SH.hidR = new Uint8Array(0);
+const rowHidden = r => !!SH.hidR[r];
+const clampR = r => Math.max(0, Math.min(r, state.cur.rows));
+function vMetrics() {
+  const cur = state.cur, n = cur.rows, m = cur.cols, H = V.H;
+  const sh = cur.sheets ? cur.sheets[cur.active] : cur;
+  if (!V.rhOf.has(sh)) V.rhOf.set(sh, new Map());
+  V.rh = V.rhOf.get(sh);
+  if (SH.hidR.length !== n) { const a = new Uint8Array(n); a.set(SH.hidR.subarray(0, Math.min(n, SH.hidR.length))); SH.hidR = a; }
+  const Y = new Float64Array(n + 1), hr = SH.hidR, rh = V.rh;
+  let y = 0;
+  for (let r = 0; r < n; r++) { Y[r] = y; if (!hr[r]) y += H; }
+  Y[n] = y;
+  if (rh.size) { // hauteurs mesurées (texte renvoyé à la ligne, grande police) : on décale la suite
+    const ks = [...rh.keys()].filter(r => r < n && !hr[r]).sort((a, b) => a - b);
+    let acc = 0, j = 0;
+    for (let r = 0; r <= n; r++) { while (j < ks.length && ks[j] < r) { acc += rh.get(ks[j]) - H; j++; } if (acc) Y[r] += acc; if (j >= ks.length && !acc) break; }
+  }
+  const hc = new Set((cur.hid && cur.hid.c) || []), X = new Float64Array(m + 1);
+  let x = 0;
+  for (let c = 0; c < m; c++) { X[c] = x; x += hc.has(c) ? 6 : cur.colW[c] || 104; }
+  X[m] = x;
+  V.Y = Y; V.X = X; V.hidC = hc;
+  V.k = Math.min(1, VMAX / Math.max(1, Y[n]));
+  const F = cur.frz || {};
+  V.fr = Math.max(0, Math.min(F.r || 0, n - 1)); V.fc = Math.max(0, Math.min(F.c || 0, m - 1));
+}
+// Position (en pixels, depuis le haut du tableau) d'une hauteur « réelle » ty.
+function domY(ty) {
+  const Y = V.Y, base = V.hh + Y[V.fr];
+  if (ty <= Y[V.fr]) return V.hh + ty;
+  if (V.r1 < V.r0 || ty < Y[V.r0]) return base + (ty - Y[V.fr]) * V.k;
+  const s0 = (Y[V.r0] - Y[V.fr]) * V.k, top1 = Y[V.r1 + 1];
+  if (ty <= top1) return base + s0 + (ty - Y[V.r0]);
+  return base + s0 + (top1 - Y[V.r0]) + (ty - top1) * V.k;
+}
+function trueY(d) {
+  const Y = V.Y, base = V.hh + Y[V.fr];
+  if (d < base) return Math.max(0, d - V.hh);
+  const e = d - base;
+  if (V.r1 < V.r0) return Y[V.fr] + e / V.k;
+  const s0 = (Y[V.r0] - Y[V.fr]) * V.k, w = Y[V.r1 + 1] - Y[V.r0];
+  if (e < s0) return Y[V.fr] + e / V.k;
+  if (e < s0 + w) return Y[V.r0] + (e - s0);
+  return Y[V.r1 + 1] + (e - s0 - w) / V.k;
+}
+const rowTop = r => domY(V.Y[clampR(r)]);
+const colLeft = c => 46 + V.X[Math.max(0, Math.min(c, state.cur.cols))];
+function rowAtY(ty) { const Y = V.Y; let lo = 0, hi = state.cur.rows - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (Y[mid] <= ty) lo = mid; else hi = mid - 1; } return lo; }
+function colAtX(x) { const X = V.X, t = x - 46; let lo = 0, hi = state.cur.cols - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (X[mid] <= t) lo = mid; else hi = mid - 1; } return lo; }
+// Lignes et colonnes visibles d'après la position de défilement.
+function vWant() {
+  const t = $('#grid'), st = gw.scrollTop - t.offsetTop, sl = gw.scrollLeft - t.offsetLeft;
+  const hgt = gw.clientHeight || 800, wid = gw.clientWidth || 1200;
+  const a = rowAtY(trueY(st + V.hh + V.Y[V.fr])), b = rowAtY(trueY(st + hgt));
+  const ca = colAtX(sl + 46 + V.X[V.fc]), cb = colAtX(sl + wid);
+  return { a: Math.max(a, V.fr), b: Math.max(a, b), ca: Math.max(ca, V.fc), cb: Math.max(ca, cb) };
+}
+function mergeOf(r, c) { const cv = SH.cover[r + ',' + c]; return SH.mgAt[cv ? cv.r + ',' + cv.c : r + ',' + c] || null; }
+function vRender(w, keep = true) {
+  const cur = state.cur; if (!cur || !V.ok) return;
+  const n = cur.rows, m = cur.cols, t = $('#grid');
+  // repère : la ligne en haut de l'écran reste en place malgré le nouveau découpage
+  const ay = gw.scrollTop - t.offsetTop + V.hh + V.Y[V.fr], ar = rowAtY(trueY(ay)), aoff = trueY(ay) - V.Y[ar];
+  w ||= vWant();
+  let r0 = Math.max(V.fr, Math.min(w.a, n - 1) - VMR), r1 = Math.min(n - 1, w.b + VMR);
+  let c0 = Math.max(V.fc, Math.min(w.ca, m - 1) - VMC), c1 = Math.min(m - 1, w.cb + VMC);
+  for (let changed = true; changed;) { // une fusion est toujours affichée en entier
+    changed = false;
+    for (const q of SH.merges) {
+      if (q.r2 < r0 || q.r1 > r1 || q.c2 < c0 || q.c1 > c1 || q.r1 < V.fr || q.c1 < V.fc) continue;
+      if (q.r1 < r0) { r0 = q.r1; changed = true; } if (q.r2 > r1) { r1 = q.r2; changed = true; }
+      if (q.c1 < c0) { c0 = q.c1; changed = true; } if (q.c2 > c1) { c1 = q.c2; changed = true; }
+    }
+  }
+  V.r0 = r0; V.r1 = r1; V.c0 = c0; V.c1 = c1;
+  vBuild(); computeCF(); paintAll(); vMeasure(true);
+  if (keep) { const d = domY(V.Y[ar] + Math.min(aoff, V.Y[ar + 1] - V.Y[ar])) - ay; if (Math.abs(d) >= 0.5) gw.scrollTop += d; }
+  drawSel(); positionCharts();
+}
+function vBuild() {
+  const cur = state.cur, t = $('#grid'), hc = V.hidC, hr = SH.hidR;
+  const F = cur.filter, fcols = F ? new Set(Object.keys(F.cols || {}).map(Number)) : null;
+  const cols = []; for (let c = 0; c < V.fc; c++) cols.push(c);
+  const lsp = V.c0 - V.fc; for (let c = V.c0; c <= V.c1; c++) cols.push(c);
+  const spacer = (tag, n) => { let s = ''; for (; n > 0; n -= 1000) s += `<${tag} class="vs" colspan="${Math.min(n, 1000)}"></${tag}>`; return s; };
+  let h = '<tr><th class="corner" scope="col"><span class="sr">Lignes et colonnes</span></th>';
+  cols.forEach((c, i) => {
+    if (i === V.fc && lsp > 0) h += spacer('th', lsp);
+    const fz = c < V.fc ? ` fzc" style="left:${46 + V.X[c]}px` : '';
+    h += hc.has(c) ? `<th class="ch hc${fz}" scope="col" data-c="${c}" title="Colonne ${COLN(c)} masquée : double-cliquez pour l'afficher"></th>`
+      : `<th class="ch${fcols && fcols.has(c) ? ' flt' : ''}${fz}" scope="col" data-c="${c}">${COLN(c)}<span class="rz" data-c="${c}"></span></th>`;
+  });
+  t.tHead.innerHTML = h + '</tr>';
+  const rowHtml = r => {
+    const fz = r < V.fr ? ` style="top:${V.hh + V.Y[r]}px"` : '';
+    let s = `<tr data-r="${r}"><th scope="row" data-r="${r}" class="${r > 0 && hr[r - 1] ? 'hrb' : ''}${r < V.fr ? ' fz' : ''}"${fz}>${r + 1}</th>`;
+    cols.forEach((c, i) => {
+      if (i === V.fc && lsp > 0) s += spacer('td', lsp);
+      let cls = hc.has(c) ? 'hc' : '', st = '';
+      if (SH.cover[r + ',' + c]) cls += ' mgh';
+      if (r < V.fr) { cls += ' fz' + (r === V.fr - 1 ? ' fzl' : ''); st += `top:${V.hh + V.Y[r]}px;`; }
+      if (c < V.fc) { cls += ' fzc' + (c === V.fc - 1 ? ' fzr' : ''); st += `left:${46 + V.X[c]}px;`; }
+      const q = SH.mgAt[r + ',' + c];
+      let span = '';
+      if (q) { let rs = 0; for (let rr = q.r1; rr <= q.r2; rr++) if (!hr[rr]) rs++; span = ` colspan="${q.c2 - q.c1 + 1}" rowspan="${Math.max(1, rs)}"`; }
+      s += `<td data-r="${r}" data-c="${c}"${cls ? ` class="${cls.trim()}"` : ''}${st ? ` style="${st}"` : ''}${span}></td>`;
+    });
+    return s + '</tr>';
+  };
+  let b = '';
+  V.list = [];
+  for (let r = 0; r < V.fr; r++) if (!hr[r]) { b += rowHtml(r); V.list.push(r); }
+  b += '<tr class="vs" aria-hidden="true"><td class="vs" id="vsTop"></td></tr>';
+  for (let r = V.r0; r <= V.r1; r++) if (!hr[r]) { b += rowHtml(r); V.list.push(r); }
+  b += '<tr class="vs" aria-hidden="true"><td class="vs" id="vsBot"></td></tr>';
+  t.tBodies[0].innerHTML = b;
+  SH.cell = []; SH.rowTh = []; SH.colTh = [];
+  for (const tr of t.tBodies[0].rows) {
+    const r = tr.dataset.r; if (r == null) continue;
+    const row = SH.cell[+r] = [];
+    for (const td of tr.cells) if (td.dataset.c != null) row[+td.dataset.c] = td;
+    SH.rowTh[+r] = tr.cells[0];
+  }
+  for (const th of t.tHead.rows[0].cells) if (th.dataset.c != null) SH.colTh[+th.dataset.c] = th;
+  vSpacers();
+}
+function vSpacers() {
+  const Y = V.Y, n = state.cur.rows, top = $('#vsTop'), bot = $('#vsBot'); if (!top) return;
+  top.style.height = Math.max(0, (Y[V.r0] - Y[V.fr]) * V.k) + 'px';
+  bot.style.height = Math.max(0, (Y[n] - Y[V.r1 + 1]) * V.k) + 'px';
+  top.parentElement.hidden = Y[V.r0] === Y[V.fr]; bot.parentElement.hidden = Y[n] === Y[V.r1 + 1];
+}
+// Mesure les lignes affichées : une ligne plus haute (texte renvoyé à la ligne…) décale la suite.
+function vMeasure(quiet) {
+  const t = $('#grid'); if (!t.tHead || !t.tHead.rows[0]) return;
+  const hh = t.tHead.rows[0].offsetHeight || V.hh;
+  let changed = hh !== V.hh; V.hh = hh;
+  for (const r of V.list) {
+    const tr = SH.rowTh[r] && SH.rowTh[r].parentElement; if (!tr) continue;
+    const h = tr.offsetHeight, want = V.Y[r + 1] - V.Y[r];
+    if (!h || h === want) continue;
+    if (h === V.H) V.rh.delete(r); else V.rh.set(r, h);
+    changed = true;
+  }
+  if (!changed) return false;
+  vMetrics(); vSpacers();
+  if (!quiet) { drawSel(); positionCharts(); }
+  return true;
+}
+let vRaf = 0;
+function vCheck() {
+  if (state.view !== 'sheet' || !state.cur || !V.ok) return;
+  const w = vWant(), n = state.cur.rows, m = state.cur.cols;
+  const okR = w.a >= V.r0 && (w.a - V.r0 >= 8 || V.r0 <= V.fr) && w.b <= V.r1 && (V.r1 - w.b >= 8 || V.r1 >= n - 1);
+  const okC = w.ca >= V.c0 && (w.ca - V.c0 >= 2 || V.c0 <= V.fc) && w.cb <= V.c1 && (V.c1 - w.cb >= 2 || V.c1 >= m - 1);
+  if (!okR || !okC) vRender(w);
+}
+gw.addEventListener('scroll', () => { if (!vRaf) vRaf = requestAnimationFrame(() => { vRaf = 0; vCheck(); }); }, { passive: true });
+window.addEventListener('resize', () => { if (state.view === 'sheet' && V.ok) vCheck(); });
 function buildGrid() {
-  const cur = state.cur;
-  let h = '<colgroup><col class="rh">';
-  let total = 46;
+  const cur = state.cur, t = $('#grid');
+  let h = '<colgroup><col class="rh">', total = 46;
   const hc = new Set((cur.hid && cur.hid.c) || []);
   for (let c = 0; c < cur.cols; c++) { const w = hc.has(c) ? 6 : cur.colW[c] || 104; total += w; h += `<col style="width:${w}px">`; }
-  h += '</colgroup><thead><tr><th class="corner" scope="col"><span class="sr">Lignes et colonnes</span></th>';
-  for (let c = 0; c < cur.cols; c++) h += hc.has(c) ? `<th class="ch hc" scope="col" data-c="${c}" title="Colonne ${COLN(c)} masquée : double-cliquez pour l'afficher"></th>` : `<th class="ch" scope="col" data-c="${c}">${COLN(c)}<span class="rz" data-c="${c}"></span></th>`;
-  h += '</tr></thead><tbody>';
-  for (let r = 0; r < cur.rows; r++) {
-    h += `<tr><th scope="row" data-r="${r}">${r + 1}</th>`;
-    for (let c = 0; c < cur.cols; c++) h += hc.has(c) ? `<td data-r="${r}" data-c="${c}" class="hc"></td>` : `<td data-r="${r}" data-c="${c}"></td>`;
-    h += '</tr>';
-  }
-  const t = $('#grid'); t.innerHTML = h + '</tbody>'; t.style.width = total + 'px';
-  SH.cell = []; $$('tbody tr', t).forEach((tr, r) => { SH.cell[r] = [...tr.children].slice(1); });
-  SH.colTh = $$('thead th.ch', t); SH.rowTh = $$('tbody th', t); SH.hl = { r: [], c: [] };
-  SH.mgSig = null; applyMerges();
+  t.innerHTML = h + '</colgroup><thead></thead><tbody></tbody>'; t.style.width = total + 'px';
+  const hr = new Uint8Array(cur.rows), old = SH.hidR;
+  ((cur.hid && cur.hid.r) || []).forEach(r => { if (r < cur.rows) hr[r] = 1; });
+  if (cur.filter && old.length === cur.rows) for (let r = 0; r < cur.rows; r++) if (old[r] === 2) hr[r] = 2;
+  SH.hidR = hr;
+  V.H = isPhone() ? 34 : 26; V.hh = V.H;
+  SH.mgDirty ||= true; applyMerges();
+  V.ok = true; vMetrics(); V.r0 = V.fr; V.r1 = V.fr - 1; V.c0 = V.fc; V.c1 = V.fc - 1;
+  vRender(null, false);
 }
 const ERR_FR = { '#NAME?': '#NOM?', '#VALUE!': '#VALEUR!', '#NUM!': '#NOMBRE!', '#SPILL!': '#PROPAGATION!', '#ERROR!': '#ERREUR!', '#DIV/0!': '#DIV/0!', '#N/A': '#N/A', '#REF!': '#REF!', '#CYCLE!': '#CYCLE!' };
 const ERR_WHY = { NAME: 'nom de fonction ou de plage inconnu', VALUE: 'type de valeur incorrect (texte à la place d\'un nombre ?)', NUM: 'nombre impossible', SPILL: 'le résultat déborde sur des cellules déjà remplies', DIV_BY_ZERO: 'division par zéro', NA: 'valeur introuvable', REF: 'référence vers une cellule supprimée', CYCLE: 'la formule fait référence à elle-même', ERROR: 'formule incorrecte' };
@@ -2188,76 +2448,98 @@ function display(r, c) {
   const fc = cf && cf.fc ? cf.fc : f.fc ? `var(--fc-${f.fc})` : '';
   return { txt, cls: cls.trim(), v, bg, fc, bd: sh.join(','), ff: f.ff && FONT_STACK[f.ff] ? FONT_STACK[f.ff] : '', fs: f.fs ? f.fs + 'pt' : '' };
 }
-function renderValues() {
-  if (!state.cur || state.view !== 'sheet') return;
-  SH.vals = SH.hf ? SH.hf.getSheetValues(SH.sid) : [];
-  const cur = state.cur;
-  computeCF();
-  applyMerges();
-  for (let r = 0; r < cur.rows; r++) for (let c = 0; c < cur.cols; c++) {
-    const td = SH.cell[r][c], d = display(r, c);
-    if (td.textContent !== d.txt) td.textContent = d.txt;
-    const keep = [...td.classList].filter(k => /^(fz|hc$|mgh$)/.test(k)).join(' ');
-    const want = (d.cls + (keep ? ' ' + keep : '')).trim();
-    if (td.className !== want) td.className = want;
-    const st = d.bg + '|' + d.fc + '|' + d.bd + '|' + d.ff + '|' + d.fs;
-    if (td._st !== st) { td._st = st; td.style.backgroundColor = d.bg; td.style.color = d.fc; td.style.boxShadow = d.bd; td.style.fontFamily = d.ff; td.style.fontSize = d.fs; }
-    const x = cellOf(r, c), note = x && x.f && x.f.note;
-    const tip = note ? 'Note : ' + note + (d.txt.length > 12 ? '\n' + d.txt : '') : d.txt.length > 12 ? d.txt : '';
-    if (tip) { if (td.title !== tip) td.title = tip; } else if (td.title) td.removeAttribute('title');
+// Valeurs calculées de la feuille active : lues en entier une fois, puis tenues à jour
+// cellule par cellule grâce aux changements que signale le moteur.
+function syncVals() {
+  if (!SH.hf) { SH.vals = []; return; }
+  if (SH.vals && !SH.valsDirty && SH.valsSid === SH.sid) return;
+  SH.vals = SH.hf.getSheetValues(SH.sid); SH.valsSid = SH.sid; SH.valsDirty = false; SH.vver = (SH.vver || 0) + 1;
+}
+function onHFValues(changes) {
+  if (SH.muteVals || SH.valsDirty || !SH.vals || SH.valsSid !== SH.sid) return;
+  for (const ch of changes) {
+    const a = ch.address; if (!a || a.sheet !== SH.sid) continue;
+    (SH.vals[a.row] ||= [])[a.col] = ch.newValue;
   }
-  if (cur.frz) applyFreeze();
+  SH.vver = (SH.vver || 0) + 1;
+}
+function paintCell(td, r, c) {
+  const d = display(r, c);
+  if (td.textContent !== d.txt) td.textContent = d.txt;
+  const keep = td.className.split(' ').filter(k => /^(fz|hc$|mgh$)/.test(k)).join(' ');
+  const want = (d.cls + (keep ? ' ' + keep : '')).trim();
+  if (td.className !== want) td.className = want;
+  const st = d.bg + '|' + d.fc + '|' + d.bd + '|' + d.ff + '|' + d.fs;
+  if (td._st !== st) { td._st = st; td.style.backgroundColor = d.bg; td.style.color = d.fc; td.style.boxShadow = d.bd; td.style.fontFamily = d.ff; td.style.fontSize = d.fs; }
+  const x = cellOf(r, c), note = x && x.f && x.f.note;
+  const tip = note ? 'Note : ' + note + (d.txt.length > 12 ? '\n' + d.txt : '') : d.txt.length > 12 ? d.txt : '';
+  if (tip) { if (td.title !== tip) td.title = tip; } else if (td.title) td.removeAttribute('title');
+}
+function paintAll() { for (const r of V.list) { const row = SH.cell[r]; if (row) for (const c in row) paintCell(row[c], r, +c); } }
+function renderValues() {
+  if (!state.cur || state.view !== 'sheet' || !V.ok) return;
+  syncVals();
+  if (SH.mgDirty && applyMerges()) { vRender(); renderCharts(); return; }
+  computeCF(); paintAll(); vMeasure();
   renderCharts();
 }
 function applyFreeze() {
-  if (!state.cur || state.view !== 'sheet') return;
-  const F = state.cur.frz || { r: 0, c: 0 }, t = $('#grid');
-  $$('#grid .fz, #grid .fzc').forEach(el => { el.classList.remove('fz', 'fzc', 'fzl', 'fzr'); el.style.top = ''; el.style.left = ''; });
-  let top = t.tHead.offsetHeight;
-  for (let r = 0; r < Math.min(F.r || 0, state.cur.rows); r++) {
-    const tr = SH.cell[r][0].parentElement, th = tr.firstElementChild;
-    th.classList.add('fz'); th.style.top = top + 'px';
-    SH.cell[r].forEach(td => { td.classList.add('fz'); td.style.top = top + 'px'; if (r === F.r - 1) td.classList.add('fzl'); });
-    top += tr.offsetHeight;
-  }
-  let left = 46;
-  for (let c = 0; c < Math.min(F.c || 0, state.cur.cols); c++) {
-    const w = state.cur.colW[c] || 104;
-    SH.cell.forEach(row => { const td = row[c]; td.classList.add('fzc'); td.style.left = left + 'px'; if (c === F.c - 1) td.classList.add('fzr'); });
-    SH.colTh[c].classList.add('fzc'); SH.colTh[c].style.left = left + 'px';
-    left += w;
-  }
+  if (!state.cur || state.view !== 'sheet' || !V.ok) return;
+  const F = state.cur.frz || {}, fr = Math.min(F.r || 0, state.cur.rows - 1), fc = Math.min(F.c || 0, state.cur.cols - 1);
+  if (fr === V.fr && fc === V.fc) return;
+  vMetrics(); vRender();
 }
 const rng = () => ({ r1: Math.min(SH.anc.r, SH.sel.r), r2: Math.max(SH.anc.r, SH.sel.r), c1: Math.min(SH.anc.c, SH.sel.c), c2: Math.max(SH.anc.c, SH.sel.c) });
 const rngRef = R => R.r1 === R.r2 && R.c1 === R.c2 ? addr(R.r1, R.c1) : addr(R.r1, R.c1) + ':' + addr(R.r2, R.c2);
-function box(el, a, b) {
-  const t = $('#grid');
-  const l = t.offsetLeft + a.offsetLeft, tp = t.offsetTop + a.offsetTop;
-  el.style.left = (l - 1) + 'px'; el.style.top = (tp - 1) + 'px';
-  el.style.width = (b.offsetLeft + b.offsetWidth - a.offsetLeft + 1) + 'px';
-  el.style.height = (b.offsetTop + b.offsetHeight - a.offsetTop + 1) + 'px';
+// Rectangle d'une plage, calculé (la plage peut être en partie hors de la page).
+function box(el, R) {
+  const t = $('#grid'), x1 = colLeft(R.c1), x2 = colLeft(R.c2 + 1), y1 = rowTop(R.r1), y2 = rowTop(R.r2 + 1);
+  el.style.left = (t.offsetLeft + x1 - 1) + 'px'; el.style.top = (t.offsetTop + y1 - 1) + 'px';
+  el.style.width = (x2 - x1 + 1) + 'px'; el.style.height = (y2 - y1 + 1) + 'px';
+}
+function cellRect(r, c) {
+  const q = mergeOf(r, c) || { r1: r, r2: r, c1: c, c2: c }, t = $('#grid');
+  const x = colLeft(q.c1), y = rowTop(q.r1);
+  return { x: t.offsetLeft + x, y: t.offsetTop + y, w: colLeft(q.c2 + 1) - x, h: rowTop(q.r2 + 1) - y };
+}
+function cellBCR(r, c) {
+  const q = cellRect(r, c), g = gw.getBoundingClientRect();
+  const left = g.left + gw.clientLeft + q.x - gw.scrollLeft, top = g.top + gw.clientTop + q.y - gw.scrollTop;
+  return { left, top, width: q.w, height: q.h, right: left + q.w, bottom: top + q.h };
 }
 function drawSel() {
+  if (!state.cur || !V.ok) return;
   const R = expandMerged(rng());
   const one = SH.merges.find(m => m.r1 === R.r1 && m.c1 === R.c1 && m.r2 === R.r2 && m.c2 === R.c2);
-  box($('#selBox'), tdOf(R.r1, R.c1), tdOf(R.r2, R.c2));
+  box($('#selBox'), R);
   $('#selBox').style.display = (R.r1 === R.r2 && R.c1 === R.c2) || one ? 'none' : '';
-  box($('#actBox'), tdOf(SH.sel.r, SH.sel.c), tdOf(SH.sel.r, SH.sel.c));
-  SH.hl.r.forEach(e => e.classList.remove('hl')); SH.hl.c.forEach(e => e.classList.remove('hl'));
-  SH.hl.r = SH.rowTh.slice(R.r1, R.r2 + 1); SH.hl.c = SH.colTh.slice(R.c1, R.c2 + 1);
-  SH.hl.r.forEach(e => e.classList.add('hl')); SH.hl.c.forEach(e => e.classList.add('hl'));
-  const brc = tdOf(R.r2, R.c2), tb = $('#grid'), half = isPhone() ? 10 : 5;
-  fillH.style.left = (tb.offsetLeft + brc.offsetLeft + brc.offsetWidth - half) + 'px';
-  fillH.style.top = (tb.offsetTop + brc.offsetTop + brc.offsetHeight - half) + 'px';
+  box($('#actBox'), mergeOf(SH.sel.r, SH.sel.c) || { r1: SH.sel.r, r2: SH.sel.r, c1: SH.sel.c, c2: SH.sel.c });
+  $$('#grid th.hl').forEach(e => e.classList.remove('hl'));
+  for (const r of V.list) if (r >= R.r1 && r <= R.r2) SH.rowTh[r].classList.add('hl');
+  for (const c in SH.colTh) if (+c >= R.c1 && +c <= R.c2) SH.colTh[c].classList.add('hl');
+  const tb = $('#grid'), half = isPhone() ? 10 : 5;
+  fillH.style.left = (tb.offsetLeft + colLeft(R.c2 + 1) - half) + 'px';
+  fillH.style.top = (tb.offsetTop + rowTop(R.r2 + 1) - half) + 'px';
 }
 function scrollToCell(r, c) {
-  const td = tdOf(r, c), t = $('#grid');
-  const top = t.offsetTop + td.offsetTop, left = t.offsetLeft + td.offsetLeft;
-  const hh = t.tHead.offsetHeight, rw = 46;
-  if (top - hh < gw.scrollTop) gw.scrollTop = top - hh;
-  else if (top + td.offsetHeight > gw.scrollTop + gw.clientHeight) gw.scrollTop = top + td.offsetHeight - gw.clientHeight;
-  if (left - rw < gw.scrollLeft) gw.scrollLeft = left - rw;
-  else if (left + td.offsetWidth > gw.scrollLeft + gw.clientWidth) gw.scrollLeft = left + td.offsetWidth - gw.clientWidth;
+  if (!V.ok) return;
+  const needR = r >= V.fr && (r < V.r0 || r > V.r1), needC = c >= V.fc && (c < V.c0 || c > V.c1);
+  if (needR || needC) { // case hors de la page : on l'affiche d'abord, puis on y va
+    const w = vWant();
+    if (needR) { const span = Math.max(10, w.b - w.a); if (r < V.r0) { w.a = r; w.b = r + span; } else { w.b = r; w.a = Math.max(V.fr, r - span); } }
+    if (needC) { const span = Math.max(2, w.cb - w.ca); if (c < V.c0) { w.ca = c; w.cb = c + span; } else { w.cb = c; w.ca = Math.max(V.fc, c - span); } }
+    vRender(w, false);
+  }
+  const q = cellRect(r, c), fzH = V.hh + V.Y[V.fr], fzW = 46 + V.X[V.fc];
+  if (r >= V.fr) {
+    if (q.y - fzH < gw.scrollTop) gw.scrollTop = q.y - fzH;
+    else if (q.y + q.h > gw.scrollTop + gw.clientHeight) gw.scrollTop = q.y + q.h - gw.clientHeight;
+  }
+  if (c >= V.fc) {
+    if (q.x - fzW < gw.scrollLeft) gw.scrollLeft = q.x - fzW;
+    else if (q.x + q.w > gw.scrollLeft + gw.clientWidth) gw.scrollLeft = q.x + q.w - gw.clientWidth;
+  }
+  vCheck();
 }
 function select(r, c, extend) {
   const cur = state.cur;
@@ -2277,10 +2559,13 @@ function updateFx() {
 }
 function updateSelStatus() {
   const R = rng(); let n = 0, sum = 0, cnt = 0;
-  for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
-    const v = (SH.vals[r] || [])[c];
-    if (v != null && v !== '') cnt++;
-    if (typeof v === 'number') { n++; sum += v; }
+  for (let r = R.r1; r <= Math.min(R.r2, SH.vals.length - 1); r++) {
+    const row = SH.vals[r]; if (!row) continue;
+    for (let c = R.c1; c <= Math.min(R.c2, row.length - 1); c++) {
+      const v = row[c];
+      if (v != null && v !== '') cnt++;
+      if (typeof v === 'number') { n++; sum += v; }
+    }
   }
   const multi = R.r1 !== R.r2 || R.c1 !== R.c2;
   const raw = rawOf(SH.sel.r, SH.sel.c);
@@ -2308,29 +2593,42 @@ function updateSheetTools() {
 
 /* --- fusion, lignes et colonnes masquées, mise en forme conditionnelle */
 const colHidden = c => !!(state.cur.hid && state.cur.hid.c.includes(c));
-SH.merges = []; SH.cover = {};
-function tdOf(r, c) { const cv = SH.cover[r + ',' + c]; return cv ? SH.cell[cv.r][cv.c] : SH.cell[r][c]; }
+SH.merges = []; SH.cover = {}; SH.mgAt = {};
+// Case affichée (ou null si elle est hors de la page) ; une case fusionnée renvoie la case d'ancrage.
+function tdOf(r, c) { const cv = SH.cover[r + ',' + c]; if (cv) { r = cv.r; c = cv.c; } return (SH.cell[r] && SH.cell[r][c]) || null; }
+// Liste des fusions : relue seulement quand elle a pu changer (SH.mgDirty). Renvoie vrai si elle a changé.
+// SH.mgKeys garde les adresses des cases d'ancrage : la relecture complète de la feuille n'a lieu qu'à
+// l'ouverture, après une annulation complète ou un changement de structure (SH.mgDirty = 'full').
 function applyMerges() {
-  const cur = state.cur; if (!cur || !SH.cell.length) return;
+  const cur = state.cur; if (!cur) return false;
+  const sheet = cur.sheets ? cur.sheets[cur.active] : cur, cells = cur.cells;
+  const full = SH.mgDirty === 'full' || !SH.mgKeys || SH.mgSheet !== sheet || SH.mgCells !== cells;
+  SH.mgDirty = false;
+  if (full) {
+    let n = 0; const ks = new Set();
+    for (const k in cells) { n++; const x = cells[k]; if (x.f && x.f.mg) ks.add(k); }
+    SH.nc = n; SH.mgKeys = ks; SH.mgSheet = sheet; SH.mgCells = cells;
+  }
   const list = [];
-  Object.entries(cur.cells).forEach(([k, x]) => {
-    const m = x.f && x.f.mg; if (!m) return;
-    const p = parseAddr(k); if (!p || p.r >= cur.rows || p.c >= cur.cols) return;
+  for (const k of SH.mgKeys) {
+    const x = cells[k], m = x && x.f && x.f.mg; if (!m) { SH.mgKeys.delete(k); continue; }
+    const p = parseAddr(k); if (!p || p.r >= cur.rows || p.c >= cur.cols) continue;
     const r2 = Math.min(cur.rows - 1, p.r + (m.r || 1) - 1), c2 = Math.min(cur.cols - 1, p.c + (m.c || 1) - 1);
-    if (r2 === p.r && c2 === p.c) return;
+    if (r2 === p.r && c2 === p.c) continue;
     list.push({ r1: p.r, c1: p.c, r2, c2 });
-  });
+  }
+  list.sort((a, b) => a.r1 - b.r1 || a.c1 - b.c1);
   const sig = JSON.stringify(list);
-  if (sig === SH.mgSig) return;
-  SH.mgSig = sig; SH.merges = list; SH.cover = {};
-  $$('#grid td.mgh').forEach(td => td.classList.remove('mgh'));
-  $$('#grid td[colspan], #grid td[rowspan]').forEach(td => { td.removeAttribute('colspan'); td.removeAttribute('rowspan'); });
+  if (sig === SH.mgSig) return false;
+  SH.mgSig = sig; SH.merges = list; SH.cover = {}; SH.mgAt = {};
   list.forEach(m => {
-    const a = SH.cell[m.r1][m.c1];
-    a.colSpan = m.c2 - m.c1 + 1; a.rowSpan = m.r2 - m.r1 + 1;
-    for (let r = m.r1; r <= m.r2; r++) for (let c = m.c1; c <= m.c2; c++) if (r !== m.r1 || c !== m.c1) { SH.cover[r + ',' + c] = { r: m.r1, c: m.c1 }; SH.cell[r][c].classList.add('mgh'); }
+    SH.mgAt[m.r1 + ',' + m.c1] = m;
+    if ((m.r2 - m.r1 + 1) * (m.c2 - m.c1 + 1) > 200000) return;
+    for (let r = m.r1; r <= m.r2; r++) for (let c = m.c1; c <= m.c2; c++) if (r !== m.r1 || c !== m.c1) SH.cover[r + ',' + c] = { r: m.r1, c: m.c1 };
   });
+  return true;
 }
+const mgNote = k => { if (SH.mgKeys) SH.mgKeys.add(k); SH.mgDirty ||= true; };
 function expandMerged(R) {
   R = { ...R };
   for (let changed = true; changed;) {
@@ -2347,7 +2645,7 @@ function toggleMerge() {
   commitEdit(false);
   const R = expandMerged(rng());
   const one = SH.merges.find(m => m.r1 === R.r1 && m.c1 === R.c1 && m.r2 === R.r2 && m.c2 === R.c2);
-  pushHist();
+  pushHist(R); SH.mgDirty ||= true;
   const cells = state.cur.cells;
   if (one) { const x = cells[addr(R.r1, R.c1)]; if (x && x.f) delete x.f.mg; afterChange(); drawSel(); return toast('Cellules séparées'); }
   if (R.r1 === R.r2 && R.c1 === R.c2) { SH.hist.pop(); return toast('Sélectionnez plusieurs cellules à fusionner.'); }
@@ -2358,7 +2656,7 @@ function toggleMerge() {
     if ((r !== R.r1 || c !== R.c1) && x.v !== '' && x.v != null) { lost = true; applyRaw(r, c, ''); }
   } });
   const k = addr(R.r1, R.c1), a = cells[k] || (cells[k] = { v: '', f: {} }); a.f ||= {};
-  a.f.mg = { r: R.r2 - R.r1 + 1, c: R.c2 - R.c1 + 1 };
+  a.f.mg = { r: R.r2 - R.r1 + 1, c: R.c2 - R.c1 + 1 }; mgNote(k);
   if (!a.f.a && R.c2 > R.c1) a.f.a = 'ac';
   SH.anc = { r: R.r1, c: R.c1 }; SH.sel = { r: R.r1, c: R.c1 };
   afterChange(); drawSel();
@@ -2366,7 +2664,7 @@ function toggleMerge() {
 }
 function setHidden(kind, on) {
   commitEdit(false);
-  const cur = state.cur, R = rng(); pushHist();
+  const cur = state.cur, R = rng(); pushHist('meta');
   cur.hid ||= { r: [], c: [] };
   if (kind === 'r') {
     if (on) { const set = new Set(cur.hid.r); for (let r = R.r1; r <= R.r2; r++) set.add(r); if (set.size >= cur.rows) { SH.hist.pop(); return toast('Impossible de masquer toutes les lignes.'); } cur.hid.r = [...set].sort((a, b) => a - b); }
@@ -2382,9 +2680,9 @@ function setHidden(kind, on) {
   scheduleSave();
   toast(on ? (kind === 'r' ? 'Lignes masquées' : 'Colonnes masquées') : (kind === 'r' ? 'Toutes les lignes sont affichées' : 'Toutes les colonnes sont affichées'));
 }
-function unhideCol(c) { const cur = state.cur; pushHist(); cur.hid.c = cur.hid.c.filter(x => x !== c); buildGrid(); renderValues(); applyFilters(); applyFreeze(); select(SH.sel.r, c); scheduleSave(); }
+function unhideCol(c) { const cur = state.cur; pushHist('meta'); cur.hid.c = cur.hid.c.filter(x => x !== c); buildGrid(); renderValues(); applyFilters(); applyFreeze(); select(SH.sel.r, c); scheduleSave(); }
 function stepDecimals(delta) {
-  commitEdit(false); pushHist();
+  commitEdit(false); pushHist(rng());
   const first = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
   const v = (SH.vals[SH.sel.r] || [])[SH.sel.c];
   let base = first.d;
@@ -2442,25 +2740,46 @@ function cfMatch(rule, v, txt, ctx, r, c) {
   }
   return false;
 }
+// Les statistiques d'une règle (moyenne, doublons, mini et maxi) portent sur toute sa plage ;
+// la mise en couleur, elle, ne concerne que les cases affichées.
+function cfCtx(rule, r2, c2) {
+  const key = JSON.stringify(rule) + '|' + r2 + '|' + c2;
+  SH.cfCache ||= new Map();
+  const hit = SH.cfCache.get(key); if (hit && hit.ver === SH.vver && hit.sid === SH.sid) return hit.ctx;
+  const ctx = {}, V2 = SH.vals || [];
+  if (rule.t === 'dup') {
+    ctx.count = new Map();
+    for (let r = rule.r1; r <= Math.min(r2, V2.length - 1); r++) { const row = V2[r]; if (!row) continue; for (let c = rule.c1; c <= Math.min(c2, row.length - 1); c++) { const t = cfTxt(r, c, row[c]); if (t !== '') { const k = t.toLowerCase(); ctx.count.set(k, (ctx.count.get(k) || 0) + 1); } } }
+  }
+  if (rule.t === 'above' || rule.t === 'below' || rule.t === 'scale') {
+    let n = 0, sum = 0, mn = Infinity, mx = -Infinity;
+    for (let r = rule.r1; r <= Math.min(r2, V2.length - 1); r++) { const row = V2[r]; if (!row) continue; for (let c = rule.c1; c <= Math.min(c2, row.length - 1); c++) { const v = row[c]; if (typeof v === 'number') { n++; sum += v; if (v < mn) mn = v; if (v > mx) mx = v; } } }
+    ctx.avg = n ? sum / n : null; ctx.min = mn; ctx.max = mx;
+  }
+  if (SH.cfCache.size > 50) SH.cfCache.clear();
+  SH.cfCache.set(key, { ver: SH.vver, sid: SH.sid, ctx });
+  return ctx;
+}
+function cfTxt(r, c, v) {
+  if (v == null || v === '' || typeof v === 'object') return '';
+  if (typeof v === 'number') { const x = cellOf(r, c); return x && x.f && x.f.n === 'date' ? fmtDate(v) : String(v); }
+  return typeof v === 'boolean' ? (v ? 'VRAI' : 'FAUX') : String(v);
+}
 function computeCF() {
   const cur = state.cur; SH.cfMap = {};
-  const rules = cur.cf || []; if (!rules.length) return;
+  const rules = cur.cf || []; if (!rules.length || !V.ok) return;
+  const rowsShown = V.list, colsShown = Object.keys(SH.colTh).map(Number);
   rules.forEach(rule => {
     const r2 = Math.min(rule.r2, cur.rows - 1), c2 = Math.min(rule.c2, cur.cols - 1);
-    if ((r2 - rule.r1 + 1) * (c2 - rule.c1 + 1) > 20000) return;
-    const ctx = {};
+    const ctx = cfCtx(rule, r2, c2);
     const cells = [];
-    for (let r = rule.r1; r <= r2; r++) for (let c = rule.c1; c <= c2; c++) {
-      const v = (SH.vals[r] || [])[c];
-      const x = cellOf(r, c), f = (x && x.f) || {};
-      const txt = v == null || v === '' ? '' : typeof v === 'number' ? (f.n === 'date' ? fmtDate(v) : String(v)) : typeof v === 'object' ? '' : typeof v === 'boolean' ? (v ? 'VRAI' : 'FAUX') : String(v);
-      cells.push({ r, c, v, txt });
-    }
-    if (rule.t === 'dup') { ctx.count = new Map(); cells.forEach(q => { if (q.txt !== '') { const k = q.txt.toLowerCase(); ctx.count.set(k, (ctx.count.get(k) || 0) + 1); } }); }
-    if (rule.t === 'above' || rule.t === 'below' || rule.t === 'scale') {
-      const nums = cells.map(q => q.v).filter(v => typeof v === 'number');
-      ctx.avg = nums.length ? nums.reduce((s, x) => s + x, 0) / nums.length : null;
-      ctx.min = Math.min(...nums); ctx.max = Math.max(...nums);
+    for (const r of rowsShown) {
+      if (r < rule.r1 || r > r2) continue;
+      for (const c of colsShown) {
+        if (c < rule.c1 || c > c2) continue;
+        const v = (SH.vals[r] || [])[c];
+        cells.push({ r, c, v, txt: cfTxt(r, c, v) });
+      }
     }
     if (rule.t === 'scale') {
       const paper = cssVar('--paper'), lo = rule.lo ? cssVar('--bg-' + rule.lo) : paper, hi = cssVar('--bg-' + (rule.hi || 'vert'));
@@ -2485,24 +2804,68 @@ function computeCF() {
   });
 }
 
-/* --- historique */
-const snap = () => JSON.stringify({ cells: state.cur.cells, rows: state.cur.rows, cols: state.cur.cols, colW: state.cur.colW, hid: state.cur.hid, cf: state.cur.cf, charts: state.cur.charts });
-function pushHist() { SH.hist.push(snap()); if (SH.hist.length > 80) SH.hist.shift(); SH.fut = []; }
-function restore(s) {
-  const o = JSON.parse(s); const dims = o.rows !== state.cur.rows || o.cols !== state.cur.cols || JSON.stringify(o.colW) !== JSON.stringify(state.cur.colW) || JSON.stringify(o.hid) !== JSON.stringify(state.cur.hid);
+/* --- historique
+   Petite feuille : chaque étape garde une copie complète (comme avant).
+   Grande feuille (plus de BIG cases) : une étape ne garde que la plage touchée (R) ou seulement
+   la structure ('meta'), et au plus trois copies complètes, pour rester rapide et sobre en mémoire. */
+const BIG = 20000;
+const bigSheet = () => (SH.nc || 0) > BIG;
+const metaOf = () => JSON.stringify({ rows: state.cur.rows, cols: state.cur.cols, colW: state.cur.colW, hid: state.cur.hid, cf: state.cur.cf, charts: state.cur.charts });
+function regionKeys(R) {
+  const cells = state.cur.cells, out = [], area = (R.r2 - R.r1 + 1) * (R.c2 - R.c1 + 1);
+  if (area <= (SH.nc || 0) + 5000) { for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) { const k = addr(r, c); if (k in cells) out.push(k); } }
+  else for (const k in cells) { const p = parseAddr(k); if (p && p.r >= R.r1 && p.r <= R.r2 && p.c >= R.c1 && p.c <= R.c2) out.push(k); }
+  return out;
+}
+function snap(R) {
+  const cur = state.cur;
+  if (R == null || !bigSheet()) return JSON.stringify({ cells: cur.cells, rows: cur.rows, cols: cur.cols, colW: cur.colW, hid: cur.hid, cf: cur.cf, charts: cur.charts });
+  if (R === 'meta') return { meta: metaOf() };
+  R = { r1: Math.max(0, R.r1), r2: Math.max(R.r1, R.r2), c1: Math.max(0, R.c1), c2: Math.max(R.c1, R.c2) };
+  const part = {}; regionKeys(R).forEach(k => { part[k] = cur.cells[k]; });
+  return { R, cells: JSON.stringify(part), meta: metaOf() };
+}
+function pushHist(R) {
+  SH.hist.push(snap(R)); if (SH.hist.length > 80) SH.hist.shift(); SH.fut = [];
+  if (bigSheet()) { let full = 0; for (let i = SH.hist.length - 1; i >= 0; i--) if (typeof SH.hist[i] === 'string' && ++full > 3) { SH.hist.splice(0, i + 1); break; } }
+}
+function applyMeta(o) {
+  const dims = o.rows !== state.cur.rows || o.cols !== state.cur.cols || JSON.stringify(o.colW) !== JSON.stringify(state.cur.colW) || JSON.stringify(o.hid) !== JSON.stringify(state.cur.hid);
   if (!o.hid) delete o.hid; if (!o.cf) delete o.cf; if (!o.charts) delete o.charts;
   Object.assign(state.cur, o);
+  return dims;
+}
+function restore(s) {
+  if (typeof s !== 'string') return restorePart(s);
+  const o = JSON.parse(s), dims = applyMeta(o);
+  SH.mgDirty = 'full';
   if (dims) buildGrid();
   loadHF(); afterChange(); applyFilters(); applyFreeze(); select(Math.min(SH.sel.r, state.cur.rows - 1), Math.min(SH.sel.c, state.cur.cols - 1));
 }
-function undo() { if (!SH.hist.length) return; SH.fut.push(snap()); restore(SH.hist.pop()); }
-function redo() { if (!SH.fut.length) return; SH.hist.push(snap()); restore(SH.fut.pop()); }
+function restorePart(e) {
+  const cur = state.cur, keys = new Set(e.R ? regionKeys(e.R) : []);
+  if (e.R) {
+    keys.forEach(k => { delete cur.cells[k]; });
+    const part = JSON.parse(e.cells); Object.keys(part).forEach(k => { keys.add(k); cur.cells[k] = part[k]; if (part[k] && part[k].f && part[k].f.mg) mgNote(k); });
+  }
+  const dims = applyMeta(JSON.parse(e.meta));
+  SH.mgDirty ||= true;
+  if (dims) buildGrid();
+  if (SH.hf && keys.size) {
+    if (keys.size > 50000) loadHF();
+    else batch(() => keys.forEach(k => { const p = parseAddr(k); if (p) SH.hf.setCellContents({ sheet: SH.sid, row: p.r, col: p.c }, [[hfVal(cur.cells[k])]]); }));
+  }
+  afterChange(); applyFilters(); applyFreeze(); select(Math.min(SH.sel.r, cur.rows - 1), Math.min(SH.sel.c, cur.cols - 1));
+}
+const snapLike = e => typeof e === 'string' ? snap() : snap(e.R || 'meta');
+function undo() { if (!SH.hist.length) return; const e = SH.hist.pop(); SH.fut.push(snapLike(e)); restore(e); }
+function redo() { if (!SH.fut.length) return; const e = SH.fut.pop(); SH.hist.push(snapLike(e)); restore(e); }
 
 /* --- écriture des cellules */
 function ensureSize(r, c) {
   const cur = state.cur; let grow = false;
-  if (r >= cur.rows) { cur.rows = Math.min(r + 20, 2000); grow = true; }
-  if (c >= cur.cols) { cur.cols = Math.min(c + 2, 60); grow = true; }
+  if (r >= cur.rows) { cur.rows = Math.min(r + 20, MAX_ROWS); grow = true; }
+  if (c >= cur.cols) { cur.cols = Math.min(c + 2, MAX_COLS); grow = true; }
   if (grow) { buildGrid(); }
   return grow;
 }
@@ -2527,14 +2890,24 @@ function applyRaw(r, c, raw) {
   }
   if (SH.hf) SH.hf.setCellContents({ sheet: SH.sid, row: r, col: c }, [[hfVal(cells[k] || { v: raw })]]);
 }
-function afterChange() { renderValues(); updateFx(); updateSelStatus(); updateSheetTools(); scheduleSave(); }
-function setRaw(r, c, raw) { pushHist(); applyRaw(r, c, raw); afterChange(); }
+function afterChange() { SH.vver = (SH.vver || 0) + 1; if (SH.noEvents) SH.valsDirty = true; renderValues(); updateFx(); updateSelStatus(); updateSheetTools(); scheduleSave(); }
+function setRaw(r, c, raw) { pushHist({ r1: r, r2: r, c1: c, c2: c }); applyRaw(r, c, raw); afterChange(); }
 function batch(fn) { if (SH.hf) SH.hf.batch(fn); else fn(); }
-function eachInRange(fn) { const R = rng(); for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) fn(r, c); }
+// Très grande sélection (plus d'un million de cases, par exemple Ctrl+A sur un gros classeur) :
+// on ne parcourt que les cases remplies, au lieu de créer des millions de cases vides.
+function eachInRange(fn, quiet) {
+  const R = rng(), area = (R.r2 - R.r1 + 1) * (R.c2 - R.c1 + 1);
+  if (area > 1e6) {
+    regionKeys(R).forEach(k => { const p = parseAddr(k); if (p) fn(p.r, p.c); });
+    if (!quiet) setTimeout(() => toast('Sélection immense : seules les cases remplies ont été modifiées.'), 0);
+    return;
+  }
+  for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) fn(r, c);
+}
 
-function clearRange() { pushHist(); batch(() => eachInRange((r, c) => applyRaw(r, c, ''))); afterChange(); }
+function clearRange() { pushHist(rng()); batch(() => eachInRange((r, c) => applyRaw(r, c, ''), true)); afterChange(); }
 function setFmt(key, val) {
-  commitEdit(false); pushHist();
+  commitEdit(false); pushHist(rng());
   const first = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
   if (['b', 'i', 'u', 'w'].includes(key)) val = first[key] ? 0 : 1;
   if (key === 'a' && first.a === val) val = '';
@@ -2555,11 +2928,11 @@ const isFormulaMode = () => {
   return /[=(;+\-*/&<>:^ ]$/.test(before) || !!SH.refIns;
 };
 function placeEditor() {
-  const td = tdOf(SH.sel.r, SH.sel.c), t = $('#grid');
-  cellEd.style.left = (t.offsetLeft + td.offsetLeft - 1) + 'px';
-  cellEd.style.top = (t.offsetTop + td.offsetTop - 1) + 'px';
-  cellEd.style.minWidth = (td.offsetWidth + 2) + 'px';
-  cellEd.style.height = (td.offsetHeight + 2) + 'px';
+  const q = cellRect(SH.sel.r, SH.sel.c);
+  cellEd.style.left = (q.x - 1) + 'px';
+  cellEd.style.top = (q.y - 1) + 'px';
+  cellEd.style.minWidth = (q.w + 2) + 'px';
+  cellEd.style.height = (q.h + 2) + 'px';
   growEditor();
 }
 function growEditor() {
@@ -2844,7 +3217,7 @@ $('#fxBtn').addEventListener('click', () => {
 });
 
 /* --- souris */
-const tdAt = e => { const td = e.target.closest && e.target.closest('td'); return td && gw.contains(td) ? { r: +td.dataset.r, c: +td.dataset.c } : null; };
+const tdAt = e => { const td = e.target.closest && e.target.closest('td'); return td && td.dataset.c != null && gw.contains(td) ? { r: +td.dataset.r, c: +td.dataset.c } : null; };
 gw.addEventListener('mousedown', e => {
   if (e.target === fillH) return;
   if (e.target.classList.contains('rz')) return startResize(e);
@@ -2863,7 +3236,7 @@ gw.addEventListener('mousedown', e => {
   if (SH.editing) commitEdit(false);
   const pf = (cellOf(p.r, p.c) || {}).f || {};
   if (pf.chk && !e.shiftKey) { select(p.r, p.c); toggleCheck(p.r, p.c); gw.focus({ preventScroll: true }); return; }
-  if (pf.dd && !e.shiftKey) { const td = tdOf(p.r, p.c), rc = td.getBoundingClientRect(); if (e.clientX > rc.right - 22 || (isPhone() && SH.sel.r === p.r && SH.sel.c === p.c)) { select(p.r, p.c); openDdPick(p.r, p.c); return; } }
+  if (pf.dd && !e.shiftKey) { const rc = cellBCR(p.r, p.c); if (e.clientX > rc.right - 22 || (isPhone() && SH.sel.r === p.r && SH.sel.c === p.c)) { select(p.r, p.c); openDdPick(p.r, p.c); return; } }
   const R0 = rng();
   SH.tapAgain = isPhone() && R0.r1 === R0.r2 && R0.c1 === R0.c2 && SH.sel.r === p.r && SH.sel.c === p.c;
   select(p.r, p.c, e.shiftKey); SH.drag = { mode: 'sel' };
@@ -2890,8 +3263,8 @@ gw.addEventListener('dblclick', e => {
 
 function startResize(e) {
   e.preventDefault(); e.stopPropagation();
-  const c = +e.target.dataset.c, startX = e.clientX, col = $$('#grid col')[c + 1], w0 = col.getBoundingClientRect().width || 104;
-  const before = snap();
+  const c = +e.target.dataset.c, startX = e.clientX, col = $('#grid colgroup').children[c + 1], w0 = col.getBoundingClientRect().width || 104;
+  const before = snap('meta');
   const mv = ev => { const w = Math.max(40, Math.round(w0 + ev.clientX - startX)); col.style.width = w + 'px'; state.cur.colW[c] = w; };
   const up = () => {
     document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
@@ -2908,7 +3281,7 @@ gw.addEventListener('keydown', e => {
   if (mv) {
     e.preventDefault();
     let { r, c } = SH.sel;
-    if (mod) { r = mv[0] > 0 ? state.cur.rows - 1 : mv[0] < 0 ? 0 : r; c = mv[1] > 0 ? state.cur.cols - 1 : mv[1] < 0 ? 0 : c; }
+    if (mod) ({ r, c } = edgeJump(r, c, mv[0], mv[1]));
     else {
       const m = SH.merges.find(q => q.r1 <= r && r <= q.r2 && q.c1 <= c && c <= q.c2);
       if (m && mv[0] > 0) r = m.r2; if (m && mv[1] > 0) c = m.c2;
@@ -2925,6 +3298,13 @@ gw.addEventListener('keydown', e => {
   if (mod && (k === 'h' || k === 'H')) { e.preventDefault(); return openSFind(true); }
   if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); return clearRange(); }
   if (k === 'Home') { e.preventDefault(); return select(mod ? 0 : SH.sel.r, 0, e.shiftKey); }
+  if (k === 'End' && mod) { e.preventDefault(); const L = lastUsed(); return select(L.r, L.c, e.shiftKey); }
+  if (!mod && (k === 'PageDown' || k === 'PageUp')) {
+    e.preventDefault();
+    const w = vWant(), step = Math.max(1, w.b - w.a), d = k === 'PageDown' ? 1 : -1;
+    gw.scrollTop += d * Math.max(40, gw.clientHeight - V.hh - V.Y[V.fr]);
+    return select(SH.sel.r + d * step, SH.sel.c, e.shiftKey);
+  }
   if (mod && (k === 'z' || k === 'Z')) { e.preventDefault(); return e.shiftKey ? redo() : undo(); }
   if (mod && (k === 'y' || k === 'Y')) { e.preventDefault(); return redo(); }
   if (mod && (k === 'b' || k === 'B')) { e.preventDefault(); return setFmt('b'); }
@@ -2938,9 +3318,32 @@ gw.addEventListener('keydown', e => {
   if (!mod && !e.altKey && k.length === 1) { e.preventDefault(); startEdit(k); }
 });
 
+// Ctrl+flèche, comme dans Excel et LibreOffice : bout du bloc de données, ou prochaine case remplie.
+function filledAt(r, c) { const v = (SH.vals[r] || [])[c]; if (v != null && v !== '') return true; const x = cellOf(r, c); return !!(x && x.v !== '' && x.v != null); }
+function edgeJump(r, c, dr, dc) {
+  const cur = state.cur, inb = (rr, cc) => rr >= 0 && cc >= 0 && rr < cur.rows && cc < cur.cols;
+  const edge = () => ({ r: dr ? (dr > 0 ? cur.rows - 1 : 0) : r, c: dc ? (dc > 0 ? cur.cols - 1 : 0) : c });
+  let nr = r + dr, nc = c + dc;
+  if (!inb(nr, nc)) return { r, c };
+  if (filledAt(r, c) && filledAt(nr, nc)) { while (inb(nr + dr, nc + dc) && filledAt(nr + dr, nc + dc)) { nr += dr; nc += dc; } return { r: nr, c: nc }; }
+  while (inb(nr, nc) && !filledAt(nr, nc)) {
+    if ((dr > 0 && nr >= SH.vals.length) || (dc > 0 && nc >= ((SH.vals[nr] || []).length))) return edge();
+    nr += dr; nc += dc;
+  }
+  return inb(nr, nc) ? { r: nr, c: nc } : edge();
+}
+// Ctrl+Fin : dernière case utilisée.
+function lastUsed() {
+  let r = 0, c = 0;
+  SH.vals.forEach((row, i) => { if (!row) return; for (let j = row.length - 1; j >= 0; j--) if (row[j] != null && row[j] !== '') { r = i; if (j > c) c = j; break; } });
+  return { r, c };
+}
+
 /* --- copier / coller */
+// Copier toute une feuille : on s'arrête à la dernière case remplie.
+function usedRng() { const R = rng(); if ((R.r2 - R.r1 + 1) * (R.c2 - R.c1 + 1) <= 1e5) return R; const L = lastUsed(); return { r1: R.r1, c1: R.c1, r2: Math.max(R.r1, Math.min(R.r2, L.r)), c2: Math.max(R.c1, Math.min(R.c2, L.c)) }; }
 function rangeTSV() {
-  const R = rng(), lines = [];
+  const R = usedRng(), lines = [];
   for (let r = R.r1; r <= R.r2; r++) {
     const row = [];
     for (let c = R.c1; c <= R.c2; c++) { const v = (SH.vals[r] || [])[c]; row.push(v == null ? '' : typeof v === 'number' ? (((cellOf(r, c) || {}).f || {}).n === 'date' ? fmtDate(v) : numToRaw(v)) : typeof v === 'object' ? (v.value || '') : String(v)); }
@@ -2949,7 +3352,7 @@ function rangeTSV() {
   return lines.join('\n');
 }
 function keepClip(cut) {
-  const R = rng(), cells = [];
+  const R = usedRng(), cells = [];
   for (let r = R.r1; r <= R.r2; r++) { const row = []; for (let c = R.c1; c <= R.c2; c++) row.push(cellCopy(r, c)); cells.push(row); }
   SH.clip = { R, cells, tsv: rangeTSV(), cut };
   return SH.clip.tsv;
@@ -2961,10 +3364,10 @@ document.addEventListener('paste', e => {
   e.preventDefault();
   const txt = (e.clipboardData.getData('text/plain') || '').replace(/\r/g, '');
   const rows = txt.split('\n'); if (rows.length > 1 && rows[rows.length - 1] === '') rows.pop();
-  const R = rng();
-  pushHist();
-  const grew = ensureSize(R.r1 + rows.length - 1, R.c1 + Math.max(...rows.map(l => l.split('\t').length)) - 1);
-  if (grew) loadHF();
+  const R = rng(), wide = rows.reduce((m, l) => Math.max(m, l.split('\t').length), 0);
+  pushHist({ r1: R.r1, r2: R.r1 + rows.length - 1, c1: R.c1, c2: R.c1 + wide - 1 });
+  ensureSize(R.r1 + rows.length - 1, R.c1 + wide - 1);
+  SH.nc = (SH.nc || 0) + rows.length * wide;
   const clip = SH.clip && SH.clip.tsv === txt ? SH.clip : null;
   if (clip) {
     const dr = clip.cut ? 0 : R.r1 - clip.R.r1, dc = clip.cut ? 0 : R.c1 - clip.R.c1;
@@ -2990,6 +3393,7 @@ function shiftFormula(f, dr, dc) {
 }
 function putCell(r, c, src, dr, dc) {
   const k = addr(r, c), cells = state.cur.cells;
+  if (src && src.f && src.f.mg) mgNote(k); else if (cells[k] && cells[k].f && cells[k].f.mg) SH.mgDirty ||= true;
   if (!src) { delete cells[k]; applyRaw(r, c, ''); return; }
   let raw = String(src.v == null ? '' : src.v);
   if (raw[0] === '=') raw = '=' + shiftFormula(raw.slice(1), dr, dc);
@@ -3007,8 +3411,8 @@ function seriesOf(src) {
   return { a: nums[0], step, date: isDate };
 }
 function doFill(S, T, plain) {
+  pushHist({ r1: Math.min(S.r1, T.r1), r2: Math.max(S.r2, T.r2), c1: Math.min(S.c1, T.c1), c2: Math.max(S.c2, T.c2) });
   ensureSize(T.r2, T.c2);
-  pushHist();
   const vertical = T.c1 === S.c1 && T.c2 === S.c2;
   batch(() => {
     if (vertical) {
@@ -3065,14 +3469,14 @@ fillH.addEventListener('pointermove', e => {
   const rect = gw.getBoundingClientRect();
   if (e.clientY > rect.bottom - 24) gw.scrollTop += 24; else if (e.clientY < rect.top + 40) gw.scrollTop -= 24;
   if (e.clientX > rect.right - 24) gw.scrollLeft += 24;
-  if (!td || !gw.contains(td)) return;
+  if (!td || td.dataset.c == null || !gw.contains(td)) return;
   const r = +td.dataset.r, c = +td.dataset.c, S = fd.S;
   const down = r - S.r2, up = S.r1 - r, right = c - S.c2, left = S.c1 - c;
   const v = Math.max(down, up), h = Math.max(right, left);
   let T = null;
   if (v > 0 || h > 0) T = v >= h ? (down > 0 ? { ...S, r2: r } : { ...S, r1: r }) : (right > 0 ? { ...S, c2: c } : { ...S, c1: c });
   fd.T = T;
-  if (T) { fillBox.hidden = false; box(fillBox, SH.cell[T.r1][T.c1], SH.cell[T.r2][T.c2]); } else fillBox.hidden = true;
+  if (T) { fillBox.hidden = false; box(fillBox, T); } else fillBox.hidden = true;
 });
 function endFill() {
   const fd = SH.fillDrag; SH.fillDrag = null; fillBox.hidden = true;
@@ -3085,7 +3489,6 @@ fillH.addEventListener('pointerup', endFill);
 fillH.addEventListener('pointercancel', () => { SH.fillDrag = null; fillBox.hidden = true; });
 
 /* --- tri et filtre */
-const rowHidden = r => !!(SH.cell[r] && SH.cell[r][0] && SH.cell[r][0].parentElement.hidden);
 const hasVal = (r, c) => r >= 0 && c >= 0 && r < state.cur.rows && c < state.cur.cols && String(rawOf(r, c)) !== '';
 function currentRegion(r, c) {
   const R = { r1: r, r2: r, c1: c, c2: c };
@@ -3138,30 +3541,31 @@ function sortZone(desc) {
     if (!d) d = ra === 0 ? a.v - b.v : ra === 1 ? String(a.v).localeCompare(String(b.v), 'fr', { numeric: true, sensitivity: 'base' }) : 0;
     return desc ? -d : d;
   });
-  pushHist();
+  pushHist(Z);
   batch(() => rows.forEach((row, i) => { const to = Z.r1 + i; row.cells.forEach((x, j) => putCell(to, Z.c1 + j, x, to - row.from, 0)); }));
   afterChange(); applyFilters();
   toast(`Trié par la colonne ${COLN(col)}, ${desc ? 'de Z à A' : 'de A à Z'}` + (Z.hdr >= 0 ? ' (ligne d\'en-tête conservée)' : ''));
 }
 const fkey = (r, c) => display(r, c).txt || '(vides)';
 function applyFilters() {
-  if (state.view !== 'sheet' || !state.cur) return;
-  const F = state.cur.filter;
+  if (state.view !== 'sheet' || !state.cur || !V.ok) return;
+  const cur = state.cur, F = cur.filter, n = cur.rows;
+  const h = new Uint8Array(n);
+  ((cur.hid && cur.hid.r) || []).forEach(r => { if (r < n) h[r] = 1; });
   let hidden = 0;
-  const hr = new Set((state.cur.hid && state.cur.hid.r) || []);
-  SH.cell.forEach((row, r) => { if (row[0]) row[0].parentElement.hidden = hr.has(r); });
-  SH.rowTh.forEach((th, r) => th.classList.toggle('hrb', r > 0 && hr.has(r - 1) && !hr.has(r)));
-  SH.colTh.forEach(th => th.classList.remove('flt'));
   if (F) {
-    const cols = Object.keys(F.cols || {}).map(Number);
-    cols.forEach(c => SH.colTh[c] && SH.colTh[c].classList.add('flt'));
-    for (let r = F.r1; r <= Math.min(F.r2, state.cur.rows - 1); r++) {
-      if (hr.has(r)) continue;
-      const hide = cols.some(c => !F.cols[c].includes(fkey(r, c)));
-      if (hide) { SH.cell[r][0].parentElement.hidden = true; hidden++; }
+    const cols = Object.keys(F.cols || {}).map(Number).map(c => [c, new Set(F.cols[c])]);
+    if (cols.length) for (let r = F.r1; r <= Math.min(F.r2, n - 1); r++) {
+      if (h[r]) continue;
+      if (cols.some(([c, ok]) => !ok.has(fkey(r, c)))) { h[r] = 2; hidden++; }
     }
   }
   SH.hiddenRows = hidden;
+  const old = SH.hidR; let same = old.length === n;
+  if (same) for (let r = 0; r < n; r++) if (old[r] !== h[r]) { same = false; break; }
+  SH.hidR = h;
+  if (!same) vMetrics();
+  vRender();
   if (rowHidden(SH.sel.r)) { SH.anc = { ...SH.sel }; select(SH.sel.r, SH.sel.c); } else drawSel();
   updateSelStatus();
 }
@@ -3342,8 +3746,8 @@ function openFmt(kind) {
   placePop(p, anchor);
 }
 function setBorders(mode) {
-  commitEdit(false); pushHist();
-  const R = rng();
+  commitEdit(false);
+  const R = rng(); pushHist(R);
   eachInRange((r, c) => {
     const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
     const set = (side, on) => { if (on) x.f[side] = 1; else delete x.f[side]; };
@@ -3437,7 +3841,7 @@ function openDdEditor() {
   const del = $('#ddDel'); if (del) del.addEventListener('click', () => { applyToRange(f2 => { delete f2.dd; }); closeDlg(); toast('Liste retirée'); });
 }
 function applyToRange(fn) {
-  pushHist();
+  pushHist(rng());
   eachInRange((r, c) => { const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {}; fn(x.f, r, c, x); if (!x.v && !Object.keys(x.f).length) delete state.cur.cells[k]; });
   afterChange();
 }
@@ -3445,7 +3849,7 @@ function toggleCheckboxFmt() {
   commitEdit(false);
   const f = (cellOf(SH.sel.r, SH.sel.c) || {}).f || {};
   const on = !f.chk;
-  pushHist();
+  pushHist(rng());
   batch(() => eachInRange((r, c) => {
     const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
     if (on) { x.f.chk = 1; delete x.f.dd; const v = String(x.v || '').trim(); if (!/^(VRAI|FAUX)$/i.test(v)) applyRaw(r, c, 'FAUX'); }
@@ -3468,7 +3872,7 @@ function openDdPick(r, c) {
   const p = $('#ddPop');
   p.innerHTML = (vals.length ? vals.map(v => `<button data-v="${esc(v)}" aria-pressed="${v === cur}">${esc(v)}</button>`).join('') : '<div class="mp-t">Liste vide</div>') + (cur ? `<hr><button data-v="" class="muted">Effacer</button>` : '');
   p.hidden = false;
-  const td = tdOf(r, c), host = $('#sheet').getBoundingClientRect(), a = td.getBoundingClientRect();
+  const host = $('#sheet').getBoundingClientRect(), a = cellBCR(r, c);
   p.style.minWidth = Math.max(160, a.width) + 'px';
   p.style.left = Math.max(8, Math.min(a.left - host.left, host.width - p.offsetWidth - 8)) + 'px';
   const below = a.bottom - host.top + 2;
@@ -3502,7 +3906,7 @@ function openNoteEditor() {
     <div class="fp-acts"><button class="pbtn" id="noteOk">Enregistrer</button>${f.note ? '<button class="pbtn ghost" id="noteDel">Supprimer la note</button>' : ''}</div>`);
   $('#noteOk').addEventListener('click', () => {
     const t = $('#noteTx').value.trim();
-    pushHist();
+    pushHist({ r1: r, r2: r, c1: c, c2: c });
     const k = addr(r, c), x = state.cur.cells[k] || (state.cur.cells[k] = { v: '', f: {} }); x.f ||= {};
     if (t) x.f.note = t.slice(0, 2000); else delete x.f.note;
     if (!x.v && !Object.keys(x.f).length) delete state.cur.cells[k];
@@ -3558,7 +3962,7 @@ function openCF(editId) {
     const s1 = e.target.closest('.swatches[data-k] .sw'); if (s1) { S2[s1.parentElement.dataset.k] = s1.dataset.col; refresh(); return; }
     const sc = e.target.closest('[data-sc]'); if (sc) { S2.sc = sc.dataset.sc; refresh(); return; }
     const ed = e.target.closest('[data-cfe]'); if (ed) { openCF(ed.dataset.cfe); return; }
-    const dl = e.target.closest('[data-cfd]'); if (dl) { pushHist(); cur.cf = cur.cf.filter(x => x.id !== dl.dataset.cfd); afterChange(); openCF(); return; }
+    const dl = e.target.closest('[data-cfd]'); if (dl) { pushHist('meta'); cur.cf = cur.cf.filter(x => x.id !== dl.dataset.cfd); afterChange(); openCF(); return; }
   });
   refresh();
   const nw = $('#cfNew'); if (nw) nw.addEventListener('click', () => openCF());
@@ -3575,7 +3979,7 @@ function openCF(editId) {
       nr.st = {}; if (S2.bg) nr.st.bg = S2.bg; if (S2.fc) nr.st.fc = S2.fc; if ($('#cfBold').checked) nr.st.b = 1;
       if (!Object.keys(nr.st).length) return toast('Choisissez au moins une couleur ou le gras.', true);
     }
-    pushHist();
+    pushHist('meta');
     if (rule) cur.cf[cur.cf.findIndex(x => x.id === rule.id)] = nr; else cur.cf.push(nr);
     afterChange(); toast(rule ? 'Règle modifiée' : 'Règle ajoutée'); openCF();
   });
@@ -3950,8 +4354,8 @@ function chartHTML(ch, vals, cellsOf, forPrint) {
 }
 function chartPos(ch) {
   const r = Math.min(ch.at.r, state.cur.rows - 1), c = Math.min(ch.at.c, state.cur.cols - 1);
-  const td = tdOf(r, c), t = $('#grid');
-  return { x: t.offsetLeft + td.offsetLeft + (ch.dx || 0), y: t.offsetTop + td.offsetTop + (ch.dy || 0) };
+  const t = $('#grid');
+  return { x: t.offsetLeft + colLeft(c) + (ch.dx || 0), y: t.offsetTop + rowTop(r) + (ch.dy || 0) };
 }
 function renderCharts() {
   if (!chartLayer) return;
@@ -3970,14 +4374,17 @@ function renderCharts() {
   });
   [...chartLayer.children].forEach(el => { if (!keep.has(el.dataset.id)) el.remove(); });
 }
+// Après un défilement, seule la position des graphiques change.
+function positionCharts() {
+  if (!chartLayer || !state.cur || !(state.cur.charts || []).length) return;
+  state.cur.charts.forEach(ch => { const el = chartLayer.querySelector(`[data-id="${ch.id}"]`); if (!el) return; const p = chartPos(ch); el.style.left = p.x + 'px'; el.style.top = p.y + 'px'; });
+}
 function selectChart(id) { CH.sel = id; renderCharts(); }
 function findChart(id) { return (state.cur.charts || []).find(c => c.id === id); }
 function anchorAt(x, y) {
-  const t = $('#grid'), cur = state.cur;
-  let c = 0; for (let j = 0; j < cur.cols; j++) { const td = SH.cell[0][j]; if (t.offsetLeft + td.offsetLeft <= x) c = j; else break; }
-  let r = 0; for (let i = 0; i < cur.rows; i++) { const tr = SH.cell[i][0].parentElement; if (tr.hidden) continue; if (t.offsetTop + tr.offsetTop <= y) r = i; else break; }
-  const td = SH.cell[r][c];
-  return { at: { r, c }, dx: Math.round(x - t.offsetLeft - td.offsetLeft), dy: Math.round(y - t.offsetTop - td.offsetTop) };
+  const t = $('#grid');
+  const c = colAtX(x - t.offsetLeft), r = rowAtY(trueY(y - t.offsetTop));
+  return { at: { r, c }, dx: Math.round(x - t.offsetLeft - colLeft(c)), dy: Math.round(y - t.offsetTop - rowTop(r)) };
 }
 chartLayer.addEventListener('pointerdown', e => {
   const el = e.target.closest('.chart'); if (!el) return;
@@ -3987,7 +4394,7 @@ chartLayer.addEventListener('pointerdown', e => {
   const ch = findChart(el.dataset.id); if (!ch) return;
   if (CH.sel !== ch.id) selectChart(ch.id);
   const p = chartPos(ch);
-  CH.drag = { id: ch.id, mode: e.target.classList.contains('ch-rz') ? 'size' : 'move', sx: e.clientX, sy: e.clientY, x: p.x, y: p.y, w: ch.w, h: ch.h, moved: false, before: snap() };
+  CH.drag = { id: ch.id, mode: e.target.classList.contains('ch-rz') ? 'size' : 'move', sx: e.clientX, sy: e.clientY, x: p.x, y: p.y, w: ch.w, h: ch.h, moved: false, before: snap('meta') };
   try { el.setPointerCapture(e.pointerId); } catch {}
 });
 chartLayer.addEventListener('pointermove', e => {
@@ -4017,7 +4424,7 @@ chartLayer.addEventListener('click', e => {
   if (b.dataset.ca === 'edit') openChartEditor(id);
   else deleteChart(id);
 });
-function deleteChart(id) { pushHist(); state.cur.charts = state.cur.charts.filter(c => c.id !== id); CH.sel = null; renderCharts(); scheduleSave(); toast('Graphique supprimé'); }
+function deleteChart(id) { pushHist('meta'); state.cur.charts = state.cur.charts.filter(c => c.id !== id); CH.sel = null; renderCharts(); scheduleSave(); toast('Graphique supprimé'); }
 gw.addEventListener('mousedown', e => { if (CH.sel && !e.target.closest('.chart')) { CH.sel = null; renderCharts(); } }, true);
 document.addEventListener('keydown', e => {
   if (!CH.sel || state.view !== 'sheet' || SH.editing || e.target.closest('input,textarea,select')) return;
@@ -4055,7 +4462,7 @@ function openChartEditor(id) {
     if (!o) return toast('Plage incorrecte (exemple : A1:C12).', true);
     const D = chartData({ ...o, byRow: $('#chByRow').checked }, SH.vals, cellOf);
     if (!D.series.length) return toast('Cette plage ne contient pas de nombres à représenter.', true);
-    pushHist();
+    pushHist('meta');
     const data = { ...o, type: draft.type, title: $('#chTitle').value.trim(), byRow: $('#chByRow').checked };
     if (ex) Object.assign(ex, data);
     else {
@@ -4439,7 +4846,8 @@ function structural(op, after) {
   Object.entries(nf).forEach(([k, f]) => { (cells[k] ||= { v: '', f: {} }).f = f; });
   cur.cells = fixDates(cells);
   cur.sheets.forEach((sh, i) => { if (i !== cur.active) sh.cells = cellsFromHF(SH.ids[i], sh.cells); });
-  buildGrid(); afterChange(); select(Math.min(r, cur.rows - 1), Math.min(c, cur.cols - 1));
+  if (isR) V.rh.clear();
+  SH.valsDirty = true; SH.mgDirty = 'full'; buildGrid(); afterChange(); select(Math.min(r, cur.rows - 1), Math.min(c, cur.cols - 1));
   if (n > 1) toast(`${n} ${isR ? 'lignes' : 'colonnes'} ${/Ins/.test(op) ? 'insérées' : 'supprimées'}. Ctrl+Z pour annuler.`);
 }
 const S = {
@@ -4720,7 +5128,7 @@ function setPdfTool(t) {
 function updatePdfToolOpts() {
   const t = PDFV.sel ? annById(PDFV.sel)?.t : PDFV.tool;
   const box = $('#pdfOpts');
-  if (PDFV.mode !== 'annot' || !t || t === 'select' || t === 'white' || t === 'img' || t === 'sign' || t === 'image') { box.innerHTML = PDFV.sel ? `<button class="tb" data-po="del" title="Supprimer (Suppr)">${ic('trash')}</button>` : ''; return; }
+  if (PDFV.mode !== 'annot' || !t || t === 'select' || t === 'white' || t === 'redact' || t === 'img' || t === 'sign' || t === 'image') { box.innerHTML = PDFV.sel ? `<button class="tb" data-po="del" title="Supprimer (Suppr)">${ic('trash')}</button>` : ''; return; }
   const key = t === 'hl' ? 'hl' : t === 'rect' ? 'rect' : t === 'ink' ? 'ink' : 'text';
   const a = PDFV.sel ? annById(PDFV.sel) : null;
   const curCol = a ? a.color : PDFV.color[key];
@@ -4783,6 +5191,7 @@ function drawAnns(i) {
     } else if (a.t === 'hl') el.style.background = a.color;
     else if (a.t === 'rect') el.style.border = `${Math.max(1, a.lw * S)}px solid ${a.color}`;
     else if (a.t === 'white') el.style.background = '#fff';
+    else if (a.t === 'redact') el.style.background = '#000';
     else if (a.t === 'img') el.innerHTML = `<img src="${a.src}" alt="" draggable="false">`;
     else if (a.t === 'ink') {
       const d = a.pts.map((p, k) => (k ? 'L' : 'M') + ((p[0] - b.x) * S).toFixed(1) + ',' + ((p[1] - b.y) * S).toFixed(1)).join('');
@@ -4848,7 +5257,7 @@ $('#pdfPages').addEventListener('pointerdown', e => {
     setTimeout(() => editTextAnn(a), 0);
     return;
   }
-  if (['hl', 'rect', 'white', 'ink'].includes(tool)) {
+  if (['hl', 'rect', 'white', 'redact', 'ink'].includes(tool)) {
     e.preventDefault();
     try { pa.setPointerCapture(e.pointerId); } catch {}
     PD.op = { kind: 'draw', tool, i, start: pt, pts: [pt], pa };
@@ -4870,7 +5279,7 @@ $('#pdfPages').addEventListener('pointermove', e => {
       g.innerHTML = `<svg width="${W}" height="${H}"><path d="${op.pts.map((p, k) => (k ? 'L' : 'M') + (p[0] * S).toFixed(1) + ',' + (p[1] * S).toFixed(1)).join('')}" fill="none" stroke="${PDFV.color.ink}" stroke-width="${Math.max(1, PDFV.lw * S)}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     } else {
       const x = Math.min(op.start[0], pt[0]), y = Math.min(op.start[1], pt[1]), w = Math.abs(pt[0] - op.start[0]), h = Math.abs(pt[1] - op.start[1]);
-      g.style.cssText = `left:${x * S}px;top:${y * S}px;width:${w * S}px;height:${h * S}px;` + (op.tool === 'hl' ? `background:${PDFV.color.hl}` : op.tool === 'rect' ? `border:${Math.max(1, PDFV.lw * S)}px solid ${PDFV.color.rect}` : 'background:#fff;outline:1px dashed var(--selline)');
+      g.style.cssText = `left:${x * S}px;top:${y * S}px;width:${w * S}px;height:${h * S}px;` + (op.tool === 'hl' ? `background:${PDFV.color.hl}` : op.tool === 'rect' ? `border:${Math.max(1, PDFV.lw * S)}px solid ${PDFV.color.rect}` : op.tool === 'redact' ? 'background:#000;outline:1px dashed var(--selline)' : 'background:#fff;outline:1px dashed var(--selline)');
       op.box = { x, y, w, h };
     }
     return;
@@ -4896,6 +5305,7 @@ function endPdfPointer() {
     if (op.tool === 'ink') { if (op.pts.length > 1) a = { id: uid(), t: 'ink', p: op.i, pts: op.pts.map(p => [+p[0].toFixed(2), +p[1].toFixed(2)]), color: PDFV.color.ink, lw: PDFV.lw }; }
     else if (op.box && op.box.w > 3 && op.box.h > 3) a = { id: uid(), t: op.tool, p: op.i, ...op.box, color: op.tool === 'hl' ? PDFV.color.hl : PDFV.color.rect, lw: PDFV.lw };
     if (a) { pdfHist(); state.cur.ann.push(a); drawAnns(op.i); pdfChanged(); }
+    if (a && a.t === 'redact' && !ls.get('grim.redactTip', false)) { ls.set('grim.redactTip', true); toast('Caviardage : à l\'enregistrement du PDF, la zone noire et tout ce qu\'elle couvre sont supprimés pour de bon (cette page devient une image).'); }
     return;
   }
   if (op.moved) pdfChanged();
@@ -5368,6 +5778,7 @@ async function pdfExportBytes(opts = {}) {
       try {
         if (a.t === 'hl') pg.drawRectangle({ ...box(), color: hexRgbPdf(PDFLib, a.color), opacity: 0.38, blendMode: PDFLib.BlendMode.Multiply });
         else if (a.t === 'white') pg.drawRectangle({ ...box(), color: PDFLib.rgb(1, 1, 1) });
+        else if (a.t === 'redact') pg.drawRectangle({ ...box(), color: PDFLib.rgb(0, 0, 0) });
         else if (a.t === 'rect') pg.drawRectangle({ ...box(), borderColor: hexRgbPdf(PDFLib, a.color), borderWidth: a.lw || 2 });
         else if (a.t === 'ink') {
           const c = hexRgbPdf(PDFLib, a.color);
@@ -5399,7 +5810,48 @@ async function pdfExportBytes(opts = {}) {
     out = await pdf.save({ useObjectStreams: true, updateFieldAppearances: false });
   }
   if (Object.keys(vals).length && !opts.flattenForm) await pdfVerifyForm(out, vals);
-  return out;
+  return await pdfRedact(out, PDFLib);
+}
+// Caviardage : chaque page qui porte un bloc « caviarder » est refaite en image (bloc noir compris).
+// Le texte, les images et les champs cachés dessous disparaissent réellement du fichier ; le reste
+// du document garde son texte. (Le bloc blanc, lui, ne fait que recouvrir.)
+async function pdfRedact(bytes, PDFLib) {
+  const red = (state.cur.ann || []).filter(a => a.t === 'redact' && PDFV.pages[a.p]);
+  if (!red.length) return bytes;
+  const byPage = new Map(); red.forEach(a => { if (!byPage.has(a.p)) byPage.set(a.p, []); byPage.get(a.p).push(a); });
+  const src = await pdfjsOpen(bytes.slice());
+  const pdf = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+  let form = null; try { form = pdf.getForm(); } catch {}
+  try {
+    for (const [p, list] of [...byPage].sort((a, b) => a[0] - b[0])) {
+      const old = pdf.getPage(p), page = await src.getPage(p + 1);
+      const base = page.getViewport({ scale: 1, rotation: 0 }), k = Math.min(200 / 72, 8000 / Math.max(base.width, base.height));
+      const vp0 = page.getViewport({ scale: k, rotation: 0 }), vp1 = vpOf(PDFV.pages[p], 1);
+      const cv = document.createElement('canvas'); cv.width = Math.ceil(vp0.width); cv.height = Math.ceil(vp0.height);
+      const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+      await page.render({ canvasContext: ctx, viewport: vp0 }).promise;
+      ctx.fillStyle = '#000';
+      list.forEach(a => {
+        const [x1, y1] = vp1.convertToPdfPoint(a.x, a.y), [x2, y2] = vp1.convertToPdfPoint(a.x + a.w, a.y + a.h);
+        const [u1, v1] = vp0.convertToViewportPoint(x1, y1), [u2, v2] = vp0.convertToViewportPoint(x2, y2);
+        ctx.fillRect(Math.min(u1, u2) - 1, Math.min(v1, v2) - 1, Math.abs(u2 - u1) + 2, Math.abs(v2 - v1) + 2);
+      });
+      const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9)); cv.width = cv.height = 0;
+      const img = await pdf.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+      // champs de formulaire de l'ancienne page : retirés (ce qu'ils affichaient est dans l'image)
+      if (form) {
+        const annots = new Set(); try { const arr = old.node.Annots(); if (arr) for (let i = 0; i < arr.size(); i++) annots.add(arr.lookup(i)); } catch {}
+        if (annots.size) for (const f of form.getFields()) { try { if (f.acroField.getWidgets().some(w => annots.has(w.dict))) form.removeField(f); } catch {} }
+      }
+      const mb = old.getMediaBox(), cb = old.getCropBox(), view = page.view;
+      const np = pdf.insertPage(p, [mb.width, mb.height]);
+      np.setMediaBox(mb.x, mb.y, mb.width, mb.height); np.setCropBox(cb.x, cb.y, cb.width, cb.height);
+      np.drawImage(img, { x: view[0], y: view[1], width: view[2] - view[0], height: view[3] - view[1] });
+      np.setRotation(old.getRotation());
+      pdf.removePage(p + 1);
+    }
+  } finally { try { src.destroy(); } catch {} }
+  return pdf.save({ useObjectStreams: true });
 }
 /* --- formulaires : écriture sûre */
 function pdfWidgetsByName() {
@@ -6530,6 +6982,8 @@ function xlCur(z) {
   const s2 = sym.trim(), hit = CURRENCIES.find(([c, , y]) => y === s2 || c === s2.toUpperCase());
   return hit && hit[0] !== 'EUR' ? hit[0] : s2 === '$' ? 'USD' : null;
 }
+// Fichier plus grand qu'une feuille : on prévient, et le classeur n'est jamais relié à l'original.
+function alertTrunc(title, more) { toast(`« ${title} » dépasse la taille d'une feuille (1 048 576 lignes, 16 384 colonnes)${more || ''} : seule la partie qui tient a été importée. Ce classeur n'est pas relié au fichier d'origine, pour ne jamais l'écraser.`, true); }
 async function importFile(f) {
   if (state.cur) { if (state.view === 'sheet') commitEdit(false); await flushSave(); }
   const ext = (f.name.split('.').pop() || '').toLowerCase();
@@ -6557,22 +7011,26 @@ async function importFile(f) {
       const X = window.XLSX;
       const wb = ext === 'csv' ? X.read(await f.text(), { type: 'string', FS: guessSep(await f.text()) }) : X.read(await f.arrayBuffer(), { cellFormula: true, cellStyles: true });
       let cut = false;
-      const sheets = wb.SheetNames.slice(0, 20).map(name => {
+      const sheets = wb.SheetNames.slice(0, 255).map(name => {
       const ws = wb.Sheets[name];
-      const ref = X.utils.decode_range(ws['!ref'] || 'A1');
-      if (ref.e.r > 999 || ref.e.c > 51) cut = true;
-      const maxR = Math.min(ref.e.r, 999), maxC = Math.min(ref.e.c, 51);
       const cells = {};
-      for (let r = 0; r <= maxR; r++) for (let c = 0; c <= maxC; c++) {
-        const cl = ws[X.utils.encode_cell({ r, c })]; if (!cl) continue;
+      let maxR = 0, maxC = 0;
+      // Parcours des seules cases présentes (un fichier d'un million de lignes reste rapide à lire).
+      for (const key in ws) {
+        if (key[0] === '!') continue;
+        const cl = ws[key]; if (!cl || typeof cl !== 'object') continue;
+        const pa = parseAddr(key); if (!pa) continue;
+        const { r, c } = pa;
+        if (r >= MAX_ROWS || c >= MAX_COLS) { cut = true; continue; }
         let v, fm = {};
         if (cl.f) v = '=' + excelToFr(cl.f);
         else if (cl.t === 'n' && cl.z && X.SSF.is_date(cl.z)) { v = fmtDate(cl.v); fm.n = 'date'; }
         else if (cl.t === 'n') { v = numToRaw(cl.v); const z = String(cl.z || ''); if (z.includes('%')) fm.n = 'pct'; else if (z.includes('€')) fm.n = 'eur'; else if (xlCur(z)) fm.n = 'cur:' + xlCur(z); else if (/0\.00/.test(z)) fm.n = 'dec2'; }
-        if (cl.t === 's' && String(cl.z || '') === '@') fm.n = 'txt';
         else if (cl.t === 'b') v = cl.v ? 'VRAI' : 'FAUX';
         else if (cl.t === 'd') v = cl.w || String(cl.v);
         else v = cl.v == null ? '' : String(cl.v);
+        // (format Texte à part : glissé dans la chaîne ci-dessus, il écrasait formules et nombres par leur valeur brute)
+        if (cl.t === 's' && String(cl.z || '') === '@') fm.n = 'txt';
         if (cl.f && cl.z) { const z = String(cl.z); if (z.includes('%')) fm.n = 'pct'; else if (z.includes('€')) fm.n = 'eur'; else if (X.SSF.is_date(z)) fm.n = 'date'; }
         if (cl.c && cl.c.length) { const t = cl.c.map(x => String(x.t || '').replace(/^\[Threaded comment\][\s\S]*?Comment:\s*/i, '').trim()).filter(Boolean).join('\n'); if (t) fm.note = t.slice(0, 2000); }
         if (cl.s && cl.s.font) {
@@ -6583,14 +7041,14 @@ async function importFile(f) {
         const zz = String(cl.z || ''); const dm = /0\.(0+)/.exec(zz);
         if (cl.t === 'n' && fm.n !== 'date' && zz && zz !== 'General') { const nd = dm ? dm[1].length : 0; if (!(nd === 2 && (fm.n === 'eur' || fm.n === 'dec2' || fm.n === 'pct')) && (dm || fm.n)) fm.d = nd; }
         if (cl.c && cl.c.length) fm.note = cl.c.map(x => String(x.t || '').replace(/^[^:\n]{1,40}:\n/, '')).join('\n').trim().slice(0, 2000);
-        if (v !== '' || Object.keys(fm).length) cells[addr(r, c)] = { v, f: fm };
+        if (v !== '' || Object.keys(fm).length) { cells[key] = { v, f: fm }; if (r > maxR) maxR = r; if (c > maxC) maxC = c; }
       }
-      (ws['!merges'] || []).forEach(m => { if (m.s.r > maxR || m.s.c > maxC) return; const k = addr(m.s.r, m.s.c); (cells[k] ||= { v: '', f: {} }).f.mg = { r: m.e.r - m.s.r + 1, c: m.e.c - m.s.c + 1 }; });
+      (ws['!merges'] || []).forEach(m => { if (m.s.r >= MAX_ROWS || m.s.c >= MAX_COLS) return; const k = addr(m.s.r, m.s.c); (cells[k] ||= { v: '', f: {} }).f.mg = { r: Math.min(m.e.r, MAX_ROWS - 1) - m.s.r + 1, c: Math.min(m.e.c, MAX_COLS - 1) - m.s.c + 1 }; maxR = Math.max(maxR, Math.min(m.e.r, MAX_ROWS - 1)); maxC = Math.max(maxC, Math.min(m.e.c, MAX_COLS - 1)); });
       const hid = { r: [], c: [] };
       (ws['!rows'] || []).forEach((rw, i) => { if (rw && rw.hidden && i <= maxR) hid.r.push(i); });
       (ws['!cols'] || []).forEach((cw, i) => { if (cw && cw.hidden && i <= maxC) hid.c.push(i); });
       const colW = {}; (ws['!cols'] || []).slice(0, maxC + 1).forEach((cw, i) => { if (cw && cw.wpx) colW[i] = Math.round(Math.max(40, Math.min(cw.wpx, 420))); else if (cw && cw.wch) colW[i] = Math.round(Math.max(40, Math.min(cw.wch * 7.5, 420))); });
-      return { id: uid(), src: name, name: String(name).replace(/[\[\]:*?\/\\']/g, '').slice(0, 31) || 'Feuille', cells, rows: Math.max(60, maxR + 21), cols: Math.max(12, maxC + 2), colW, hid, cf: [], charts: [] };
+      return { id: uid(), src: name, name: String(name).replace(/[\[\]:*?\/\\']/g, '').slice(0, 31) || 'Feuille', cells, rows: Math.min(MAX_ROWS, Math.max(60, maxR + 21)), cols: Math.min(MAX_COLS, Math.max(12, maxC + 2)), colW, hid, cf: [], charts: [] };
       });
       let vba = null;
       if (ext === 'xlsm') { try { vba = await readVba(await f.arrayBuffer(), sheets); } catch (err) { console.warn('Macros non lues', err); } }
@@ -6613,10 +7071,12 @@ async function importFile(f) {
         if (sh && o && nameOk(n.Name)) names[n.Name] = { s: sh.name, ref: rngRef(o) };
       });
       sheets.forEach(s => { delete s.src; });
-      await createDoc('feuille', Object.assign({ title, sheets, active: 0, names }, vba ? { vba } : {}));
-      const more = wb.SheetNames.length > 20 ? ' (20 premières feuilles)' : '';
-      if (vba) toast('Classeur importé. Ses macros sont conservées telles quelles : Grimoire ne les exécute pas, Excel les retrouvera à l\'enregistrement en .xlsm.');
-      else toast(cut ? `Classeur importé${more}, limité à 1 000 lignes et 52 colonnes par feuille.` : `Classeur importé : ${sheets.length} feuille${sheets.length > 1 ? 's' : ''}${more}.`);
+      if (wb.SheetNames.length > 255) cut = true;
+      await createDoc('feuille', Object.assign({ title, sheets, active: 0, names }, vba ? { vba } : {}, cut ? { cut: 1 } : {}));
+      const more = wb.SheetNames.length > 255 ? ' (255 premières feuilles)' : '';
+      if (cut) alertTrunc(title, more);
+      else if (vba) toast('Classeur importé. Ses macros sont conservées telles quelles : Grimoire ne les exécute pas, Excel les retrouvera à l\'enregistrement en .xlsm.');
+      else toast(`Classeur importé : ${sheets.length} feuille${sheets.length > 1 ? 's' : ''}${more}.`);
     } else if (ext === 'txt' || ext === 'md') {
       const text = await f.text();
       const html = text.split(/\n{2,}/).map(p => { const t = p.trim(); const h = /^(#{1,3})\s+(.*)$/.exec(t); return h ? `<h${h[1].length}>${esc(h[2])}</h${h[1].length}>` : `<p>${esc(t).replace(/\n/g, '<br>')}</p>`; }).join('');
@@ -7192,7 +7652,7 @@ async function importHandles(hs) {
     const prev = state.cur && state.cur.id;
     await importFile(x.f);
     const c = state.cur;
-    if (c && c.id !== prev && kindFor(c.type, x.h.name)) { await linkHandle(c.id, x.h); const imp = ls.get('grim.fimp', {}); imp[c.id] = 1; ls.set('grim.fimp', imp); }
+    if (c && c.id !== prev && !c.cut && kindFor(c.type, x.h.name)) { await linkHandle(c.id, x.h); const imp = ls.get('grim.fimp', {}); imp[c.id] = 1; ls.set('grim.fimp', imp); }
   }
 }
 
