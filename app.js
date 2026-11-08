@@ -2200,12 +2200,14 @@ async function openSheet() {
   SH.hist = []; SH.fut = []; SH.sel = { r: 0, c: 0 }; SH.anc = { r: 0, c: 0 }; SH.editing = null;
   SH.vals = []; SH.valsDirty = true; SH.hidR = new Uint8Array(0); SH.mgSig = null;
   show('sheet'); gw.scrollTop = 0; gw.scrollLeft = 0;
+  SH.raw = true; // les cases s'affichent tout de suite, avant que le moteur ait tout calculé
   buildGrid(); renderTabs();
   $('#sStatus').textContent = 'Chargement du moteur de calcul…';
   try { await ensureHF(); }
   catch { toast('Moteur de calcul injoignable : les formules s\'afficheront sans être calculées. Vérifiez la connexion.', true); }
   if (state.cur !== cur) return;
-  loadHF(); renderValues(); SH.hiddenRows = 0; applyFilters(); applyFreeze(); renderTabs(); select(0, 0);
+  if ((SH.nc || 0) > BIG) { $('#sStatus').textContent = 'Chargement des calculs…'; await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0))); if (state.cur !== cur) return; }
+  loadHF(); SH.raw = false; renderValues(); SH.hiddenRows = 0; applyFilters(); applyFreeze(); renderTabs(); select(0, 0);
   gw.focus({ preventScroll: true });
 }
 function loadHF() {
@@ -2421,9 +2423,9 @@ function numFmt(n, d) {
 const GRID_FONTS = ['Instrument Sans', 'Arial', 'Calibri', 'Georgia', 'Times New Roman', 'Verdana', 'Courier New'];
 const GRID_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 function display(r, c) {
-  const x = cellOf(r, c), f = (x && x.f) || {};
-  let v = SH.hf ? (SH.vals[r] || [])[c] : (x ? (parseNum(x.v) ?? x.v) : null);
-  if (!SH.hf && x && String(x.v)[0] === '=') v = x.v;
+  const x = cellOf(r, c), f = (x && x.f) || {}, raw = !SH.hf || SH.raw;
+  let v = raw ? (x ? (parseNum(x.v) ?? x.v) : null) : (SH.vals[r] || [])[c];
+  if (raw && x && String(x.v)[0] === '=') v = SH.raw ? '…' : x.v; // pendant le chargement du moteur : « … »
   let txt = '', cls = '';
   if (f.chk) { cls = 'chk' + (v === true || v === 1 ? ' on' : ''); }
   else if (v == null || v === '') txt = '';
@@ -6982,6 +6984,50 @@ function xlCur(z) {
   const s2 = sym.trim(), hit = CURRENCIES.find(([c, , y]) => y === s2 || c === s2.toUpperCase());
   return hit && hit[0] !== 'EUR' ? hit[0] : s2 === '$' ? 'USD' : null;
 }
+// Lecture d'un CSV (guillemets, guillemets doublés, retours à la ligne dans un champ) en cases Grimoire.
+// Les pourcentages, euros et dates reçoivent leur format, comme à la saisie.
+function csvCells(text, sep) {
+  const cells = {}, n = text.length, S = sep.charCodeAt(0);
+  let r = 0, c = 0, i = 0, maxR = 0, maxC = 0, cut = false;
+  const put = v => {
+    if (v === '') return;
+    if (r >= MAX_ROWS || c >= MAX_COLS) { cut = true; return; }
+    const fm = {}, t = v.trim(), k0 = t.charCodeAt(0);
+    if ((k0 >= 48 && k0 <= 57) || k0 === 45 || k0 === 43) { // commence par un chiffre ou un signe : nombre ou date possible
+      const last = t.charCodeAt(t.length - 1);
+      if (last === 37 && parseNum(t) != null) fm.n = 'pct'; // %
+      else if (last === 8364 && parseNum(t) != null) fm.n = 'eur'; // €
+      else if (!(last >= 48 && last <= 57 && /^-?\d+([.,]\d+)?$/.test(t)) && parseNum(t) == null && parseDate(t) != null) fm.n = 'date';
+    }
+    cells[COLN(c) + (r + 1)] = { v, f: fm };
+    if (r > maxR) maxR = r; if (c > maxC) maxC = c;
+  };
+  while (i < n) {
+    let ch = text.charCodeAt(i);
+    if (ch === 34) { // champ entre guillemets
+      let v = '', j = i + 1;
+      for (;;) {
+        const k = text.indexOf('"', j);
+        if (k < 0) { v += text.slice(j); i = n; break; }
+        v += text.slice(j, k);
+        if (text.charCodeAt(k + 1) === 34) { v += '"'; j = k + 2; continue; }
+        i = k + 1; break;
+      }
+      put(v);
+      ch = text.charCodeAt(i);
+      while (i < n && ch !== S && ch !== 10 && ch !== 13) { i++; ch = text.charCodeAt(i); } // texte après le guillemet fermant : ignoré
+    } else {
+      let j = i;
+      while (j < n) { const k = text.charCodeAt(j); if (k === S || k === 10 || k === 13) break; j++; }
+      put(text.slice(i, j)); i = j; ch = text.charCodeAt(i);
+    }
+    if (i >= n) break;
+    if (ch === S) { c++; i++; if (i >= n) break; continue; }
+    if (ch === 13 && text.charCodeAt(i + 1) === 10) i++;
+    i++; r++; c = 0;
+  }
+  return { cells, maxR, maxC, cut };
+}
 // Fichier plus grand qu'une feuille : on prévient, et le classeur n'est jamais relié à l'original.
 function alertTrunc(title, more) { toast(`« ${title} » dépasse la taille d'une feuille (1 048 576 lignes, 16 384 colonnes)${more || ''} : seule la partie qui tient a été importée. Ce classeur n'est pas relié au fichier d'origine, pour ne jamais l'écraser.`, true); }
 async function importFile(f) {
@@ -7006,7 +7052,15 @@ async function importFile(f) {
       const html = attachFloats(box).innerHTML;
       await createDoc('texte', Object.assign({ title, html }, page ? { page } : {}, comments && comments.length ? { comments } : {}));
       toast(droppedImages ? `Document importé. ${droppedImages} image${droppedImages > 1 ? 's' : ''} dans un format non pris en charge.` : 'Document importé.');
-    } else if (['xlsx', 'xlsm', 'xls', 'ods', 'csv'].includes(ext)) {
+    } else if (ext === 'csv') {
+      // CSV lu directement (sans passer par SheetJS) : deux à trois fois plus rapide sur un gros fichier,
+      // et chaque case garde exactement ce qui est écrit (dates à la française, zéros en tête…).
+      const text = (await f.text()).replace(/^\uFEFF/, '');
+      const R = csvCells(text, guessSep(text));
+      const sheet = { id: uid(), name: 'Feuille1', cells: R.cells, rows: Math.min(MAX_ROWS, Math.max(60, R.maxR + 21)), cols: Math.min(MAX_COLS, Math.max(12, R.maxC + 2)), colW: {}, hid: { r: [], c: [] }, cf: [], charts: [], dm: 1 };
+      await createDoc('feuille', Object.assign({ title, sheets: [sheet], active: 0, names: {} }, R.cut ? { cut: 1 } : {}));
+      if (R.cut) alertTrunc(title); else toast(`CSV importé : ${(R.maxR + 1).toLocaleString('fr-FR')} lignes.`);
+    } else if (['xlsx', 'xlsm', 'xls', 'ods'].includes(ext)) {
       await loadScript(LIB.xlsx);
       const X = window.XLSX;
       const wb = ext === 'csv' ? X.read(await f.text(), { type: 'string', FS: guessSep(await f.text()) }) : X.read(await f.arrayBuffer(), { cellFormula: true, cellStyles: true });
