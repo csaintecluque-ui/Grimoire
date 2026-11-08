@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.21.0';
+const APP_VERSION = '1.22.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -957,6 +957,28 @@ function clean(node, doc) {
       if (!d.firstChild) d.innerHTML = '<p><br></p>';
       ch.replaceWith(d); continue;
     }
+    // note de bas de page, champ de fusion, renvoi, numéro de légende : éléments non modifiables au clavier
+    if (tag === 'SUP' && ch.classList.contains('fn')) {
+      const n = doc.createElement('sup'); n.className = 'fn'; n.setAttribute('contenteditable', 'false');
+      n.setAttribute('data-note', String(ch.getAttribute('data-note') || '').slice(0, 4000)); n.textContent = (ch.textContent || '').replace(/\D/g, '') || '1';
+      ch.replaceWith(n); continue;
+    }
+    if (tag === 'SPAN' && (ch.hasAttribute('data-mf') || ch.hasAttribute('data-xref') || ch.hasAttribute('data-capn'))) {
+      const n = doc.createElement('span'); n.setAttribute('contenteditable', 'false');
+      if (ch.hasAttribute('data-mf')) { const f = String(ch.getAttribute('data-mf')).replace(/[«»<>]/g, '').slice(0, 60); n.className = 'mf'; n.setAttribute('data-mf', f); n.textContent = '«' + f + '»'; }
+      else if (ch.hasAttribute('data-xref')) { const id = ch.getAttribute('data-xref'); if (!/^[\w-]{1,40}$/.test(id)) { ch.replaceWith(doc.createTextNode(ch.textContent)); continue; } n.className = 'xref'; n.setAttribute('data-xref', id); n.textContent = (ch.textContent || '').slice(0, 80); }
+      else { n.className = 'capn'; n.setAttribute('data-capn', '1'); n.textContent = (ch.textContent || '').replace(/\D/g, '') || '1'; }
+      ch.replaceWith(n); continue;
+    }
+    // zone de texte (encadré) : à gauche, à droite ou sur toute la largeur
+    if (tag === 'DIV' && /^(left|right|full)$/.test(ch.getAttribute('data-tbox') || '')) {
+      const d = doc.createElement('div'); d.setAttribute('data-tbox', ch.getAttribute('data-tbox'));
+      const w = parseFloat(ch.style && ch.style.width); if (w >= 15 && w <= 100) d.style.width = Math.round(w) + '%';
+      d.append(...ch.childNodes); clean(d, doc);
+      [...d.childNodes].forEach(n => { if (n.nodeType === 3 && n.nodeValue.trim()) { const pp = doc.createElement('p'); n.replaceWith(pp); pp.appendChild(n); } });
+      if (!d.firstChild) d.innerHTML = '<p><br></p>';
+      ch.replaceWith(d); continue;
+    }
     if (tag === 'DIV' && ch.hasAttribute('data-toc')) {
       const d = doc.createElement('div'); d.setAttribute('data-toc', '1'); d.setAttribute('contenteditable', 'false'); ch.replaceWith(d); continue;
     }
@@ -1015,6 +1037,7 @@ function clean(node, doc) {
     if (tag === 'UL' && ch.hasAttribute('data-check')) keep['data-check'] = '1';
     if (tag === 'LI' && ch.getAttribute('data-done') === '1') keep['data-done'] = '1';
     if (tag === 'HR' && ch.hasAttribute('data-pb')) keep['data-pb'] = '1';
+    if (tag === 'P' && /^(Figure|Tableau|Équation)$/.test(ch.getAttribute('data-cap') || '') && /^[\w-]{1,40}$/.test(ch.getAttribute('data-capid') || '')) { keep['data-cap'] = ch.getAttribute('data-cap'); keep['data-capid'] = ch.getAttribute('data-capid'); }
     if (tag === 'TD' || tag === 'TH') { const cs = parseInt(ch.getAttribute('colspan'), 10); if (cs > 1 && cs <= 30) keep.colspan = String(cs); }
     const colW = tag === 'COL' ? (st.width || ch.getAttribute('width') || '') : '';
     let el = ch;
@@ -1046,6 +1069,7 @@ function clean(node, doc) {
       });
     }
     if (T === 'P' && el.querySelector('p,h1,h2,h3,ul,ol,table,blockquote,hr,div')) el.replaceWith(...el.childNodes);
+    if (T === 'P' && el.hasAttribute('data-cap') && !el.querySelector('span.capn')) { el.removeAttribute('data-cap'); el.removeAttribute('data-capid'); }
   }
 }
 
@@ -1066,8 +1090,8 @@ function openWriter() {
   CM.active = CM.edit = null; CM.panel = false; cmPurgeOrphans();
   applyDocStyles(); refreshWriter(); renderComments(); renderTrackBar();
 }
-const refreshWriter = () => { updateOutline(); updateStats(); updateToolState(); };
-const refreshSoon = debounce(() => { updateOutline(); updateStats(); }, 350);
+const refreshWriter = () => { updateOutline(); updateStats(); updateToolState(); refreshDocBits(); };
+const refreshSoon = debounce(() => { updateOutline(); updateStats(); refreshDocBits(); }, 350);
 
 ed.addEventListener('input', () => {
   if (!state.cur) return;
@@ -1539,8 +1563,322 @@ $('#findBar').addEventListener('click', e => {
   ({ prev: () => findGo(-1), next: () => findGo(1), one: replaceOne, all: replaceAll, rep: () => { $('#findBar').classList.toggle('with-rep'); $('#rIn').focus(); }, close: closeFind })[b.dataset.f]();
 });
 
+/* --- notes de bas de page, légendes et renvois, zones de texte, formes, champs de fusion */
+const wDlg = $('#wDlg');
+function openWDlg(html, cls) { closeWPops(); wDlg.className = 'fpop sdlg wdlg' + (cls ? ' ' + cls : ''); wDlg.innerHTML = `<div class="dlg-in">${html}</div>`; wDlg.hidden = false; const f = wDlg.querySelector('[autofocus]'); if (f) setTimeout(() => f.focus(), 30); return wDlg.firstElementChild; }
+function closeWDlg() { if (wDlg.hidden) return; wDlg.hidden = true; wDlg.innerHTML = ''; const f = W_DLG_CLOSE; W_DLG_CLOSE = null; if (f) f(); }
+let W_DLG_CLOSE = null;
+wDlg.addEventListener('click', e => { if (e.target.closest('[data-dx]')) closeWDlg(); });
+wDlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeWDlg(); } });
+// Position du curseur dans le document au moment d'ouvrir une fenêtre (la fenêtre prend ensuite le focus)
+// (gardée comme « bloc + nombre de caractères » : une plage vivante peut glisser hors du paragraphe quand le navigateur retouche le texte)
+function caretNow() {
+  const s = getSelection(); const r = s.rangeCount && ed.contains(s.getRangeAt(0).commonAncestorContainer) ? s.getRangeAt(0) : savedRange;
+  if (!r || !ed.contains(r.startContainer)) return null;
+  let blk = r.startContainer; while (blk && blk.parentNode !== ed) blk = blk.parentNode;
+  if (!blk || blk.nodeType !== 1) return { range: r.cloneRange() };
+  const pre = document.createRange(); pre.selectNodeContents(blk); pre.setEnd(r.startContainer, r.startOffset);
+  return { blk, off: pre.toString().length };
+}
+function caretBack(at) {
+  ed.focus({ preventScroll: true });
+  if (!at) return;
+  let r = at.range || null;
+  if (!r && at.blk && at.blk.isConnected) {
+    r = document.createRange();
+    const w = document.createTreeWalker(at.blk, NodeFilter.SHOW_TEXT); let left = at.off, n, done = false;
+    while ((n = w.nextNode())) { if (left <= n.length) { r.setStart(n, left); done = true; break; } left -= n.length; }
+    if (!done) { r.selectNodeContents(at.blk); r.collapse(false); } else r.collapse(true);
+  }
+  if (r) { const s = getSelection(); s.removeAllRanges(); s.addRange(r); savedRange = r.cloneRange(); }
+}
+// Bloc de premier niveau qui contient le curseur (pour insérer après lui)
+function caretBlock() {
+  const s = getSelection(); let n = s.rangeCount ? s.anchorNode : null;
+  if (!n || !ed.contains(n)) n = savedRange && ed.contains(savedRange.startContainer) ? savedRange.startContainer : null;
+  while (n && n.parentNode !== ed) n = n.parentNode;
+  return n && n.nodeType === 1 ? n : ed.lastElementChild;
+}
+function insertBlockAfter(html, before) {
+  const b = caretBlock(), tmp = document.createElement('div'); tmp.innerHTML = sanitize(html);
+  const nodes = [...tmp.childNodes];
+  if (b) { if (before) b.before(...nodes); else b.after(...nodes); } else ed.append(...nodes);
+  afterEdit(); refreshDocBits(); return nodes[0];
+}
+// numéros des notes, des légendes et des renvois, liste des notes sous la page
+function refreshDocBits() { if (state.view !== 'writer') return; fnRenumber(); capRenumber(); }
+function fnRenumber() {
+  const notes = $$('sup.fn', ed), box = $('#fnArea');
+  notes.forEach((s, i) => { const t = String(i + 1); if (s.textContent !== t) s.textContent = t; });
+  if (!notes.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.innerHTML = `<p class="fn-t">Notes</p><ol>${notes.map((s, i) => `<li data-i="${i}" tabindex="0">${s.dataset.note ? esc(s.dataset.note) : '<span class="fn-empty">Note vide : cliquez pour l\'écrire</span>'}</li>`).join('')}</ol>`;
+}
+function insertFootnote() {
+  if (state.view !== 'writer') return;
+  caretBack(caretNow());
+  insertInline('<sup class="fn" contenteditable="false" data-note="">0</sup>');
+  const s = $$('sup.fn', ed).find(x => x.textContent === '0');
+  fnRenumber();
+  if (s) openFnPop(s);
+}
+function openFnPop(sup) {
+  const p = $('#fnPop'); closeWPops();
+  p.innerHTML = `<div class="fp-h"><b>Note ${esc(sup.textContent)}</b><button class="xbtn" data-fx aria-label="Fermer">${ic('close')}</button></div>
+    <textarea id="fnTx" rows="4" placeholder="Texte de la note de bas de page">${esc(sup.dataset.note || '')}</textarea>
+    <div class="fp-acts"><button class="pbtn" data-fok>OK</button><button class="pbtn ghost" data-fdel>Supprimer la note</button></div>`;
+  p.hidden = false; p._sup = sup;
+  const r = sup.getBoundingClientRect(), host = $('#writer').getBoundingClientRect();
+  p.style.left = Math.max(8, Math.min(r.left - host.left - 20, host.width - 340)) + 'px'; p.style.top = (r.bottom - host.top + 6) + 'px';
+  const tx = $('#fnTx'); setTimeout(() => { tx.focus(); tx.setSelectionRange(tx.value.length, tx.value.length); }, 20);
+}
+function closeFnPop() { const p = $('#fnPop'); if (p.hidden) return; p.hidden = true; p._sup = null; }
+$('#fnPop').addEventListener('input', e => { const s = $('#fnPop')._sup; if (s && e.target.id === 'fnTx') { s.dataset.note = e.target.value.slice(0, 4000); state.cur.html = edHtml(); scheduleSave(); fnRenumber(); } });
+$('#fnPop').addEventListener('click', e => {
+  const p = $('#fnPop'), s = p._sup;
+  if (e.target.closest('[data-fx]') || e.target.closest('[data-fok]')) { closeFnPop(); return; }
+  if (e.target.closest('[data-fdel]') && s) { s.remove(); closeFnPop(); afterEdit(); fnRenumber(); toast('Note supprimée'); }
+});
+$('#fnPop').addEventListener('keydown', e => { if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); closeFnPop(); ed.focus({ preventScroll: true }); } });
+document.addEventListener('mousedown', e => { if (!$('#fnPop').hidden && !e.target.closest('#fnPop') && !e.target.closest('sup.fn')) closeFnPop(); });
+ed.addEventListener('click', e => {
+  const s = e.target.closest('sup.fn'); if (s) { e.preventDefault(); openFnPop(s); return; }
+  const x = e.target.closest('span.xref'); if (x) { const c = ed.querySelector(`p[data-capid="${x.dataset.xref}"]`); if (c) { c.scrollIntoView({ block: 'center', behavior: 'smooth' }); c.classList.add('flash'); setTimeout(() => c.classList.remove('flash'), 1200); } }
+});
+$('#fnArea').addEventListener('click', e => { const li = e.target.closest('li[data-i]'); if (!li) return; const s = $$('sup.fn', ed)[+li.dataset.i]; if (s) { s.scrollIntoView({ block: 'center' }); openFnPop(s); } });
+// Légendes : « Figure 1 : … », numérotées dans l'ordre du document, par catégorie
+const CAP_CATS = ['Figure', 'Tableau', 'Équation'];
+function capRenumber() {
+  const n = {}, map = {}, seen = new Set();
+  // Entrée au bout d'une légende recopie ses attributs dans le paragraphe suivant : on les retire
+  $$('p[data-cap]', ed).forEach(p => { if (!p.querySelector('span.capn') || seen.has(p.dataset.capid)) { p.removeAttribute('data-cap'); p.removeAttribute('data-capid'); } else seen.add(p.dataset.capid); });
+  $$('p[data-cap]', ed).forEach(p => { const c = p.dataset.cap; n[c] = (n[c] || 0) + 1; const sp = p.querySelector('span.capn'); if (sp && sp.textContent !== String(n[c])) sp.textContent = String(n[c]); map[p.dataset.capid] = `${c} ${n[c]}`; });
+  $$('span.xref', ed).forEach(x => { const t = map[x.dataset.xref] || '(renvoi introuvable)'; if (x.textContent !== t) x.textContent = t; x.classList.toggle('lost', !map[x.dataset.xref]); });
+}
+function openCaption() {
+  if (state.view !== 'writer') return;
+  const inTable = closestEl('TABLE'), b = caretBlock(), img = b && b.querySelector && b.querySelector('img'), at = caretNow();
+  const cat = inTable ? 'Tableau' : img ? 'Figure' : 'Figure';
+  openWDlg(dlgHead('Insérer une légende') + `<p class="dlg-note">La légende est numérotée toute seule (Figure 1, Figure 2…) et se renumérote quand on en ajoute ou en retire.</p>
+    <label class="dlg-f"><span>Catégorie</span><select id="capCat">${CAP_CATS.map(c => `<option${c === cat ? ' selected' : ''}>${c}</option>`).join('')}</select></label>
+    <label class="dlg-f"><span>Texte de la légende</span><input id="capTx" autofocus autocomplete="off" placeholder="ex. Évolution des ventes"></label>
+    <div class="fp-acts"><button class="pbtn" id="capOk">Insérer</button></div>`);
+  const go = () => {
+    const c = $('#capCat').value, t = $('#capTx').value.trim(), id = 'cap' + uid();
+    closeWDlg(); caretBack(at);
+    const node = insertBlockAfter(`<p data-cap="${c}" data-capid="${id}">${c} <span class="capn" data-capn="1" contenteditable="false">1</span>${t ? ' : ' + esc(t) : ''}</p>`, c === 'Tableau' && inTable);
+    capRenumber(); afterEdit();
+    if (node && node.nodeType === 1) { const r = document.createRange(); r.selectNodeContents(node); r.collapse(false); caretBack({ range: r }); node.scrollIntoView({ block: 'nearest' }); }
+  };
+  $('#capOk').addEventListener('click', go); $('#capTx').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+}
+function openXref() {
+  if (state.view !== 'writer') return;
+  capRenumber();
+  const caps = $$('p[data-cap]', ed), at = caretNow();
+  if (!caps.length) return toast('Aucune légende dans le document : Insertion › Légende d\'abord.', true);
+  openWDlg(dlgHead('Insérer un renvoi') + `<p class="dlg-note">Le renvoi (« voir Figure 2 ») suit la légende : son numéro change avec elle.</p>
+    <div class="xr-list">${caps.map(p => `<button type="button" class="xr-it" data-id="${p.dataset.capid}">${esc(p.textContent.trim().slice(0, 90))}</button>`).join('')}</div>`, 'wide');
+  wDlg.querySelector('.xr-list').addEventListener('click', e => {
+    const b = e.target.closest('[data-id]'); if (!b) return;
+    closeWDlg(); caretBack(at);
+    insertInline(`<span class="xref" data-xref="${b.dataset.id}" contenteditable="false">?</span>`);
+    capRenumber(); afterEdit();
+  });
+}
+// Zone de texte : un encadré à gauche, à droite (le texte l'entoure) ou sur toute la largeur
+function openTextBox() {
+  if (state.view !== 'writer') return;
+  const at = caretNow();
+  openWDlg(dlgHead('Insérer une zone de texte') + `<div class="dlg-row"><label class="dlg-f"><span>Place</span><select id="tbPos"><option value="right">À droite, le texte l'entoure</option><option value="left">À gauche, le texte l'entoure</option><option value="full">Sur toute la largeur</option></select></label><label class="dlg-f"><span>Largeur</span><select id="tbW"><option>30</option><option selected>40</option><option>50</option><option>100</option></select></label></div>
+    <div class="fp-acts"><button class="pbtn" id="tbOk">Insérer</button></div>`);
+  $('#tbOk').addEventListener('click', () => {
+    const pos = $('#tbPos').value, w = pos === 'full' ? 100 : +$('#tbW').value;
+    closeWDlg(); caretBack(at);
+    const node = insertBlockAfter(`<div data-tbox="${pos}" style="width:${w}%"><p>Texte de l'encadré</p></div>`, pos !== 'full');
+    if (node && node.firstElementChild) { const r = document.createRange(); r.selectNodeContents(node.firstElementChild); const sl = getSelection(); sl.removeAllRanges(); sl.addRange(r); ed.focus(); }
+  });
+}
+// Formes : dessinées en SVG puis insérées comme une image (redimensionnable, habillage du texte, export Word et PDF)
+const SHAPES = {
+  rect: ['Rectangle', (w, h, s) => `<rect x="${s}" y="${s}" width="${w - 2 * s}" height="${h - 2 * s}"/>`],
+  round: ['Rectangle arrondi', (w, h, s) => `<rect x="${s}" y="${s}" width="${w - 2 * s}" height="${h - 2 * s}" rx="${Math.min(w, h) / 6}"/>`],
+  ellipse: ['Ellipse', (w, h, s) => `<ellipse cx="${w / 2}" cy="${h / 2}" rx="${w / 2 - s}" ry="${h / 2 - s}"/>`],
+  arrow: ['Flèche', (w, h, s) => `<path d="M${s},${h * .32}H${w * .62}V${s}L${w - s},${h / 2}L${w * .62},${h - s}V${h * .68}H${s}Z"/>`],
+  star: ['Étoile', (w, h, s) => { const c = [w / 2, h / 2], R = Math.min(w, h) / 2 - s, r = R * .45; let d = ''; for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, q = i % 2 ? r : R; d += (i ? 'L' : 'M') + (c[0] + q * Math.cos(a)).toFixed(1) + ',' + (c[1] + q * Math.sin(a)).toFixed(1); } return `<path d="${d}Z"/>`; }],
+  bubble: ['Bulle', (w, h, s) => `<path d="M${s + 12},${s}H${w - s - 12}Q${w - s},${s} ${w - s},${s + 12}V${h * .7 - 12}Q${w - s},${h * .7} ${w - s - 12},${h * .7}H${w * .38}L${w * .2},${h - s}L${w * .24},${h * .7}H${s + 12}Q${s},${h * .7} ${s},${h * .7 - 12}V${s + 12}Q${s},${s} ${s + 12},${s}Z"/>`],
+  line: ['Trait', (w, h, s) => `<line x1="${s}" y1="${h / 2}" x2="${w - s}" y2="${h / 2}"/>`]
+};
+const SHAPE_COLS = [['#2A78D6', 'Bleu'], ['#1BAF7A', 'Vert'], ['#EB6834', 'Orange'], ['#E34948', 'Rouge'], ['#A35E2C', 'Cuivre'], ['#6B5F56', 'Gris'], ['none', 'Sans fond']];
+async function shapePng(kind, fill, line, text, w = 360, h = 220) {
+  const s = 4, body = SHAPES[kind][1](w, h, s);
+  const tc = fill === 'none' || kind === 'line' ? '#1E1814' : '#FFFFFF';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><g fill="${kind === 'line' ? 'none' : fill === 'none' ? '#FFFFFF' : fill}" fill-opacity="${fill === 'none' ? 0 : 1}" stroke="${line}" stroke-width="${kind === 'line' ? 6 : 3}" stroke-linejoin="round">${body}</g>${text ? `<text x="${w / 2}" y="${(kind === 'bubble' ? h * .35 : h / 2) + 9}" text-anchor="middle" font-family="Arial, sans-serif" font-size="26" font-weight="600" fill="${tc}">${esc(text)}</text>` : ''}</svg>`;
+  const im = new Image(); im.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  await im.decode();
+  const c = document.createElement('canvas'); c.width = w * 2; c.height = h * 2;
+  const g = c.getContext('2d'); g.scale(2, 2); g.drawImage(im, 0, 0, w, h);
+  return c.toDataURL('image/png');
+}
+function openShape() {
+  if (state.view !== 'writer') return;
+  const sel = { kind: 'rect', fill: '#2A78D6' }, at = caretNow();
+  openWDlg(dlgHead('Insérer une forme') + `<div class="shp-grid">${Object.entries(SHAPES).map(([k, [l, f]]) => `<button type="button" data-k="${k}" aria-pressed="${k === 'rect'}" title="${l}"><svg viewBox="0 0 60 40"><g fill="currentColor" fill-opacity=".25" stroke="currentColor" stroke-width="2">${f(60, 40, 3)}</g></svg><small>${l}</small></button>`).join('')}</div>
+    <div class="swatches shp-col">${SHAPE_COLS.map(([c, l]) => `<button type="button" class="sw" data-c="${c}" title="${l}" aria-pressed="${c === sel.fill}" style="background:${c === 'none' ? 'repeating-linear-gradient(45deg,#fff 0 4px,#ddd 4px 8px)' : c}"></button>`).join('')}</div>
+    <label class="dlg-f"><span>Texte dans la forme (facultatif)</span><input id="shpTx" autocomplete="off" maxlength="40"></label>
+    <div class="fp-acts"><button class="pbtn" id="shpOk">Insérer</button></div>`, 'wide');
+  wDlg.querySelector('.shp-grid').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (!b) return; sel.kind = b.dataset.k; wDlg.querySelectorAll('.shp-grid [data-k]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); });
+  wDlg.querySelector('.shp-col').addEventListener('click', e => { const b = e.target.closest('[data-c]'); if (!b) return; sel.fill = b.dataset.c; wDlg.querySelectorAll('.shp-col [data-c]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); });
+  $('#shpOk').addEventListener('click', async () => {
+    const line = sel.fill === 'none' ? '#1E1814' : sel.fill, tx = $('#shpTx').value.trim();
+    const src = await shapePng(sel.kind, sel.fill, sel.kind === 'line' ? (sel.fill === 'none' ? '#1E1814' : sel.fill) : line, sel.kind === 'line' ? '' : tx, 360, sel.kind === 'line' ? 40 : 220);
+    closeWDlg(); caretBack(at);
+    insertInline(`<img src="${src}" alt="" style="width:40%">`);
+    toast('Forme insérée : elle se redimensionne et s\'habille comme une image.');
+  });
+}
+// Champs de fusion : « Nom », « Ville »… remplacés par chaque ligne d'un classeur au publipostage
+// Pose un élément en ligne exactement au curseur (insertHTML de Chrome sort parfois les éléments non modifiables du paragraphe).
+function insertInline(html) {
+  const s = getSelection(); if (!s.rangeCount || !ed.contains(s.getRangeAt(0).commonAncestorContainer)) { exec('insertHTML', html); return; }
+  const r = s.getRangeAt(0); r.deleteContents();
+  const t = document.createElement('template'); t.innerHTML = html; const nodes = [...t.content.childNodes];
+  const frag = document.createDocumentFragment(); nodes.forEach(n => frag.appendChild(n)); r.insertNode(frag);
+  const last = nodes[nodes.length - 1];
+  if (last) { const after = document.createRange(); after.setStartAfter(last); after.collapse(true); s.removeAllRanges(); s.addRange(after); savedRange = after.cloneRange(); }
+  normalizeBlocks(); state.cur.html = edHtml(); scheduleSave(); refreshSoon(); updateToolState();
+}
+function insertMergeField(name, at) { if (at) caretBack(at); else restoreRange(); insertInline(`<span class="mf" data-mf="${esc(name)}" contenteditable="false">«${esc(name)}»</span>`); }
+
+/* --- aperçu avant impression : les pages exactes du PDF (mêmes coupures, en-têtes, numéros) */
+async function previewBytes() {
+  const cur = state.cur;
+  if (cur.type === 'feuille') { commitEdit(false); return gridsToPdfBytes(await sheetGrids(cur), cur.title); }
+  return htmlToPdfBytes(cur.html, pageOf(), cur.title, cur.styles);
+}
+async function openPreview(opt = {}) {
+  if (!state.cur || !/^(writer|sheet)$/.test(state.view)) return;
+  toast('Préparation de l\'aperçu…');
+  let bytes;
+  try { bytes = opt.bytes || await previewBytes(); } catch (e) { console.warn(e); return toast('Aperçu impossible.', true); }
+  let doc; try { doc = await pdfjsOpen(bytes.slice()); } catch (e) { console.warn(e); return toast('Aperçu impossible.', true); }
+  let ov = $('#pvOv'); if (ov) ov.remove();
+  ov = document.createElement('div'); ov.id = 'pvOv'; ov.className = 'pv-ov'; ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-label', 'Aperçu avant impression');
+  ov.innerHTML = `<div class="pv-bar"><b>${esc(opt.title || 'Aperçu avant impression')}</b><span class="pv-n">${doc.numPages} page${doc.numPages > 1 ? 's' : ''}</span>${opt.nav || ''}<span class="pv-sp"></span><button class="pbtn ghost" data-pv="pdf">${ic('pdf')}Enregistrer en PDF</button><button class="pbtn ghost" data-pv="print">${ic('printer')}Imprimer</button><button class="pbtn" data-pv="close">Fermer</button></div><div class="pv-pages"></div>`;
+  document.body.appendChild(ov);
+  const box = ov.querySelector('.pv-pages'), W = Math.min(820, innerWidth - 40);
+  const io = new IntersectionObserver(es => es.forEach(async en => {
+    if (!en.isIntersecting || en.target._done) return; en.target._done = true;
+    const pg = await doc.getPage(+en.target.dataset.p), vp1 = pg.getViewport({ scale: 1 }), k = W / vp1.width, vp = pg.getViewport({ scale: k * (devicePixelRatio || 1) });
+    const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height; c.style.width = W + 'px';
+    await pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise; en.target.innerHTML = ''; en.target.appendChild(c);
+  }), { root: box, rootMargin: '600px' });
+  for (let i = 1; i <= doc.numPages; i++) {
+    const pg = await doc.getPage(i), vp1 = pg.getViewport({ scale: 1 });
+    const d = document.createElement('div'); d.className = 'pv-page'; d.dataset.p = i; d.style.width = W + 'px'; d.style.height = Math.round(W * vp1.height / vp1.width) + 'px';
+    d.innerHTML = `<span class="pv-lbl">Page ${i}</span>`; box.appendChild(d); io.observe(d);
+  }
+  const close = () => { io.disconnect(); ov.remove(); try { doc.destroy(); } catch {} document.removeEventListener('keydown', esc1, true); };
+  const esc1 = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', esc1, true);
+  ov.addEventListener('click', e => {
+    const b = e.target.closest('[data-pv]'); if (!b) return;
+    if (b.dataset.pv === 'close') close();
+    else if (b.dataset.pv === 'pdf') saveFile(safeName(opt.file || state.cur.title) + '.pdf', bytes);
+    else if (b.dataset.pv === 'print') printBytes(bytes);
+    else if (opt.onNav) { close(); opt.onNav(b.dataset.pv); }
+  });
+}
+
+/* --- publipostage : une lettre par ligne d'un classeur Grimoire */
+const MM = { book: null, sheet: 0, fields: [], rows: [] };
+async function mmLoad(id, si) {
+  const book = state.docs.get(id); if (!book) return false;
+  const B = clone(book); ensureSheets(B); unpackDoc(B);
+  const sh = B.sheets[si] || B.sheets[0];
+  await ensureHF();
+  const HFm = window.HyperFormula;
+  const hf = HFm.buildEmpty({ licenseKey: 'gpl-v3', decimalSeparator: ',', thousandSeparator: '', functionArgSeparator: ';', arrayColumnSeparator: ';', arrayRowSeparator: '|', maxRows: MAX_ROWS, maxColumns: MAX_COLS });
+  let vals = [];
+  try {
+    const ids = B.sheets.map(x => hf.getSheetId(hf.addSheet(x.name)));
+    hf.batch(() => B.sheets.forEach((x, i) => hf.setSheetContent(ids[i], sheetData(x))));
+    vals = hf.getSheetValues(ids[B.sheets.indexOf(sh)]) || [];
+  } finally { try { hf.destroy(); } catch {} }
+  const txt = (r, c) => {
+    const v = (vals[r] || [])[c], x = sh.cells[addr(r, c)], f = (x && x.f) || {};
+    if (v == null || v === '' || typeof v === 'object') return '';
+    if (typeof v === 'number') return f.n === 'date' ? fmtDate(v) : numFmt(f.n, f.d).format(v);
+    if (typeof v === 'boolean') return v ? 'VRAI' : 'FAUX';
+    return String(v);
+  };
+  const h = vals.findIndex(row => row && row.some(v => v != null && v !== '')); if (h < 0) return false;
+  const n = Math.max(...vals.map(r => (r || []).length));
+  const cols = []; for (let c = 0; c < n; c++) { const t = txt(h, c).trim(); if (t) cols.push([c, t.replace(/[«»<>"]/g, '').slice(0, 60)]); }
+  MM.fields = cols.map(([, t]) => t);
+  MM.rows = [];
+  for (let r = h + 1; r < vals.length; r++) { const rec = {}; let any = false; cols.forEach(([c, t]) => { const v = txt(r, c); rec[t] = v; if (v) any = true; }); if (any) MM.rows.push(rec); }
+  MM.book = id; MM.sheet = B.sheets.indexOf(sh);
+  return true;
+}
+function mmMerge(html, rec) {
+  const d = document.createElement('div'); d.innerHTML = html;
+  const norm = k => String(k).toLowerCase().replace(/[\s_]+/g, ' ').trim(), keys = Object.keys(rec);
+  d.querySelectorAll('span.mf').forEach(sp => { const k = sp.getAttribute('data-mf'), hit = k in rec ? k : keys.find(x => norm(x) === norm(k)); sp.replaceWith(document.createTextNode(hit != null ? rec[hit] : '')); });
+  return d.innerHTML;
+}
+async function openMailMerge() {
+  if (state.view !== 'writer') return;
+  const books = [...state.docs.values()].filter(d => d.type === 'feuille').sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (!books.length) return toast('Créez ou importez d\'abord un classeur avec votre liste (une ligne de titres : Nom, Adresse, Ville…).', true);
+  const pick = MM.book && state.docs.has(MM.book) ? MM.book : books[0].id;
+  let at = caretNow();
+  openWDlg(dlgHead('Publipostage') + `<p class="dlg-note">1. Choisissez le classeur de la liste (1re ligne : les titres). 2. Cliquez sur un champ pour le placer à l'endroit du curseur. 3. Créez les lettres : une par ligne.</p>
+    <div class="dlg-row"><label class="dlg-f"><span>Classeur</span><select id="mmBook">${books.map(d => `<option value="${d.id}"${d.id === pick ? ' selected' : ''}>${esc(d.title || 'Sans titre')}</option>`).join('')}</select></label><label class="dlg-f"><span>Feuille</span><select id="mmSheet"></select></label></div>
+    <p class="dlg-note" id="mmInfo">Lecture…</p><div class="mm-fields" id="mmFields"></div>
+    <div class="fp-acts mm-acts"><button class="pbtn ghost" id="mmPrev">Aperçu lettre par lettre</button><button class="pbtn" id="mmDoc">Créer le document des lettres</button><button class="pbtn ghost" id="mmPdf">Créer le PDF</button></div>`, 'wide');
+  const fillSheets = () => { const b = state.docs.get($('#mmBook').value); const sh = (b && b.sheets) || [{ name: 'Feuille1' }]; $('#mmSheet').innerHTML = sh.map((x, i) => `<option value="${i}"${MM.book === b.id && MM.sheet === i ? ' selected' : ''}>${esc(x.name || 'Feuille' + (i + 1))}</option>`).join(''); };
+  const load = async () => {
+    $('#mmInfo').textContent = 'Lecture…';
+    const ok = await mmLoad($('#mmBook').value, +$('#mmSheet').value || 0).catch(e => { console.warn(e); return false; });
+    if (!ok || !MM.fields.length) { $('#mmInfo').textContent = 'Ce classeur ne contient pas de ligne de titres.'; $('#mmFields').innerHTML = ''; return; }
+    $('#mmInfo').textContent = `${MM.rows.length} ligne${MM.rows.length > 1 ? 's' : ''} : ${MM.rows.length} lettre${MM.rows.length > 1 ? 's' : ''}. Champs :`;
+    $('#mmFields').innerHTML = MM.fields.map(f => `<button type="button" class="mm-f" data-f="${esc(f)}">«${esc(f)}»</button>`).join('');
+  };
+  fillSheets(); load();
+  $('#mmBook').addEventListener('change', () => { fillSheets(); load(); });
+  $('#mmSheet').addEventListener('change', load);
+  $('#mmFields').addEventListener('mousedown', e => e.preventDefault());
+  $('#mmFields').addEventListener('click', e => { const b = e.target.closest('[data-f]'); if (b) { insertMergeField(b.dataset.f, at); at = caretNow(); } });
+  const tpl = () => { const used = $$('span.mf', ed).map(x => x.dataset.mf); if (!used.length) { toast('Placez d\'abord au moins un champ dans la lettre.', true); return null; } const nf = k => String(k).toLowerCase().replace(/[\s_]+/g, ' ').trim(), miss = used.filter(f => !MM.fields.some(x => nf(x) === nf(f))); if (miss.length) toast(`Champ absent du classeur : ${[...new Set(miss)].join(', ')} (laissé vide).`, true); return state.cur.html; };
+  const all = () => MM.rows.map(r => mmMerge(state.cur.html, r)).join('<hr data-pb="1">');
+  $('#mmDoc').addEventListener('click', async () => {
+    if (!tpl() || !MM.rows.length) return;
+    const src = state.cur, html = all(); closeWDlg();
+    await createDoc('texte', { title: `Lettres — ${src.title || 'publipostage'}`, html, page: src.page ? clone(src.page) : undefined, styles: src.styles ? clone(src.styles) : undefined, autoTitle: false });
+    toast(`${MM.rows.length} lettres créées dans un nouveau document (une par page).`);
+  });
+  $('#mmPdf').addEventListener('click', async () => {
+    if (!tpl() || !MM.rows.length) return;
+    toast('Création du PDF…');
+    try { const b = await htmlToPdfBytes(all(), pageOf(), state.cur.title, state.cur.styles); await saveFile(safeName(`Lettres — ${state.cur.title || 'publipostage'}`) + '.pdf', b); } catch (e) { console.warn(e); toast('Création du PDF impossible.', true); }
+  });
+  $('#mmPrev').addEventListener('click', () => { if (!tpl() || !MM.rows.length) return; closeWDlg(); mmPreview(0); });
+}
+async function mmPreview(i) {
+  i = Math.max(0, Math.min(MM.rows.length - 1, i));
+  const b = await htmlToPdfBytes(mmMerge(state.cur.html, MM.rows[i]), pageOf(), state.cur.title, state.cur.styles);
+  openPreview({ bytes: b, title: `Lettre ${i + 1} sur ${MM.rows.length}`, file: `Lettre ${i + 1} — ${state.cur.title}`, nav: `<button class="pbtn ghost" data-pv="prev"${i ? '' : ' disabled'}>◀ Précédente</button><button class="pbtn ghost" data-pv="next"${i < MM.rows.length - 1 ? '' : ' disabled'}>Suivante ▶</button>`, onNav: k => mmPreview(i + (k === 'next' ? 1 : -1)) });
+}
+
 /* --- mise en page */
-const PAGE_DEF = { orient: 'portrait', margin: 'normal', header: '', footer: '', num: 'none' };
+const PAGE_DEF = { orient: 'portrait', margin: 'normal', header: '', footer: '', num: 'none', firstDiff: false, headerFirst: '', footerFirst: '', evenDiff: false, headerEven: '', footerEven: '' };
+// En-tête, pied et numéro de la page n (1 = première) : première page et pages paires peuvent être différentes.
+function hfFor(P, n) {
+  if (P.firstDiff && n === 1) return { h: P.headerFirst || '', f: P.footerFirst || '', num: 'none' };
+  if (P.evenDiff && n % 2 === 0) return { h: P.headerEven || '', f: P.footerEven || '', num: P.num === 'right' ? 'left' : P.num };
+  return { h: P.header || '', f: P.footer || '', num: P.num };
+}
 const MARGIN_PX = { normal: 94, narrow: 48, wide: 121 };
 const MARGIN_TW = { normal: 1418, narrow: 720, wide: 1814 };
 const pageOf = () => Object.assign({}, PAGE_DEF, (state.cur && state.cur.page) || {});
@@ -1554,11 +1892,15 @@ function applyPageLayout() {
   const q = s => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
   const numTxt = P.num === 'xofy' ? '"Page " counter(page) " sur " counter(pages)' : 'counter(page)';
   let css = `@page{size:A4 ${P.orient};margin:${mm}mm}`;
-  const boxes = [];
-  if (P.header) boxes.push(`@top-center{content:${q(P.header)};font:9pt sans-serif;color:#555}`);
-  if (P.footer) boxes.push(`@bottom-left{content:${q(P.footer)};font:9pt sans-serif;color:#555}`);
-  if (P.num !== 'none') boxes.push(`@bottom-${P.num === 'right' ? 'right' : 'center'}{content:${numTxt};font:9pt sans-serif;color:#555}`);
-  if (boxes.length) css += `@page{${boxes.join('')}}`;
+  const F = 'font:9pt sans-serif;color:#555';
+  // chaque case de marge est écrite (content:none si vide) : la première page et les pages paires peuvent la remplacer
+  const boxes = o => `@top-center{content:${o.h ? q(o.h) : 'none'};${F}}`
+    + `@bottom-left{content:${o.num === 'left' ? numTxt : o.f ? q(o.f) : 'none'};${F}}`
+    + `@bottom-center{content:${o.num === 'center' || o.num === 'xofy' ? numTxt : 'none'};${F}}`
+    + `@bottom-right{content:${o.num === 'right' ? numTxt : o.num === 'left' && o.f ? q(o.f) : 'none'};${F}}`;
+  css += `@page{${boxes(hfFor(P, 3))}}`;
+  if (P.evenDiff) css += `@page:left{${boxes(hfFor(P, 2))}}`;
+  if (P.firstDiff) css += `@page:first{${boxes(hfFor(P, 1))}}`;
   $('#pageCss').textContent = state.view === 'writer' ? css : '';
 }
 function openPagePop() {
@@ -1570,6 +1912,10 @@ function openPagePop() {
     <label class="field" for="ppHead"><span>En-tête</span><input id="ppHead" value="${esc(P.header)}" placeholder="Texte en haut de chaque page" autocomplete="off"></label>
     <label class="field" for="ppFoot"><span>Pied de page</span><input id="ppFoot" value="${esc(P.footer)}" placeholder="Texte en bas de chaque page" autocomplete="off"></label>
     <div class="pp-row"><span>Numéros de page</span>${seg('num', [['none', 'Aucun'], ['center', 'Centre'], ['right', 'Droite'], ['xofy', 'Page X sur Y']])}</div>
+    <label class="pp-chk"><input type="checkbox" id="ppFirst"${P.firstDiff ? ' checked' : ''}> Première page différente (sans numéro)</label>
+    <div class="pp-sub" id="ppFirstW"${P.firstDiff ? '' : ' hidden'}><input id="ppHeadF" value="${esc(P.headerFirst)}" placeholder="En-tête de la première page (vide : aucun)" autocomplete="off"><input id="ppFootF" value="${esc(P.footerFirst)}" placeholder="Pied de la première page" autocomplete="off"></div>
+    <label class="pp-chk"><input type="checkbox" id="ppEven"${P.evenDiff ? ' checked' : ''}> Pages paires différentes (recto verso)</label>
+    <div class="pp-sub" id="ppEvenW"${P.evenDiff ? '' : ' hidden'}><input id="ppHeadE" value="${esc(P.headerEven)}" placeholder="En-tête des pages paires" autocomplete="off"><input id="ppFootE" value="${esc(P.footerEven)}" placeholder="Pied des pages paires" autocomplete="off"></div>
     <p class="set-note">S'appliquent à l'impression, au PDF et à l'export Word.</p>`;
   placeWPop(p, $('[data-w="layout"]'));
 }
@@ -1580,7 +1926,14 @@ $('#pagePop').addEventListener('click', e => {
   setPage(b.parentElement.dataset.pk, b.dataset.v);
   $$('button', b.parentElement).forEach(x => x.setAttribute('aria-pressed', String(x === b)));
 });
-$('#pagePop').addEventListener('input', e => { if (e.target.id === 'ppHead') setPage('header', e.target.value); if (e.target.id === 'ppFoot') setPage('footer', e.target.value); });
+$('#pagePop').addEventListener('input', e => {
+  const k = { ppHead: 'header', ppFoot: 'footer', ppHeadF: 'headerFirst', ppFootF: 'footerFirst', ppHeadE: 'headerEven', ppFootE: 'footerEven' }[e.target.id];
+  if (k) setPage(k, e.target.value);
+});
+$('#pagePop').addEventListener('change', e => {
+  if (e.target.id === 'ppFirst') { setPage('firstDiff', e.target.checked); $('#ppFirstW').hidden = !e.target.checked; }
+  if (e.target.id === 'ppEven') { setPage('evenDiff', e.target.checked); $('#ppEvenW').hidden = !e.target.checked; }
+});
 // repères de pages (aperçu) et nombre de pages
 function updatePageMarks() {
   const box = $('#pgMarks');
@@ -6399,15 +6752,19 @@ async function exportPdfFile() {
   catch (e) { console.warn(e); if (CAPTURE) throw e; toast(e && e.userMsg || 'Export impossible : ce PDF est peut-être protégé.', true); }
 }
 async function printPdf() {
-  try {
-    const bytes = await pdfExportBytes();
+  try { printBytes(await pdfExportBytes()); }
+  catch (e) { toast(e && e.userMsg || 'Impression impossible.', true); }
+}
+// Imprime un PDF tel quel (iframe cachée) ; sur téléphone, l'ouvre dans un onglet.
+function printBytes(bytes) {
+  {
     const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
     if (isPhone()) { window.open(url, '_blank'); return; }
     let fr = $('#pdfPrintFrame'); if (fr) fr.remove();
     fr = document.createElement('iframe'); fr.id = 'pdfPrintFrame'; fr.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;bottom:0;right:0';
     fr.src = url; document.body.appendChild(fr);
     fr.onload = () => { try { fr.contentWindow.focus(); fr.contentWindow.print(); } catch { window.open(url, '_blank'); } };
-  } catch (e) { toast(e && e.userMsg || 'Impression impossible.', true); }
+  }
 }
 // Diviser / extraire : parts = listes d'indices de pages
 async function splitPdf(parts, dest, label) {
@@ -6617,13 +6974,15 @@ function pdfMakeBytes(dd) {
 // Pied et en-tête de page, numéros « Page X sur Y »
 function pdfHeadFoot(P, dd, mar) {
   const small = { fontSize: 8.5, color: '#666666' };
-  if (P.header) dd.header = () => ({ text: P.header, alignment: 'center', margin: [mar, 22, mar, 0], ...small });
-  if (P.footer || (P.num && P.num !== 'none')) dd.footer = (cur, n) => ({
-    columns: [
-      { text: P.footer || '', alignment: 'left', ...small },
-      { text: P.num === 'xofy' ? `Page ${cur} sur ${n}` : P.num && P.num !== 'none' ? String(cur) : '', alignment: P.num === 'right' ? 'right' : 'center', ...small }
-    ], margin: [mar, 10, mar, 0]
-  });
+  const any = k => P[k] || (P.firstDiff && P[k + 'First']) || (P.evenDiff && P[k + 'Even']);
+  if (any('header')) dd.header = cur => ({ text: hfFor(P, cur).h, alignment: 'center', margin: [mar, 22, mar, 0], ...small });
+  if (any('footer') || (P.num && P.num !== 'none')) dd.footer = (cur, n) => {
+    const o = hfFor(P, cur), num = o.num === 'xofy' ? `Page ${cur} sur ${n}` : o.num && o.num !== 'none' ? String(cur) : '';
+    return { columns: [
+      { text: o.num === 'left' ? num : o.f, alignment: 'left', ...small },
+      { text: o.num === 'left' ? o.f : num, alignment: o.num === 'right' || o.num === 'left' ? 'right' : 'center', ...small }
+    ], margin: [mar, 10, mar, 0] };
+  };
 }
 // --- HTML (le sous-ensemble produit par Grimoire) → contenu pdfmake
 function htmlToPdfContent(html, contentW, sty = {}) {
@@ -6734,6 +7093,13 @@ function htmlToPdfContent(html, contentW, sty = {}) {
         kids.forEach(c => { const g = Math.min(k - 1, Math.floor(acc / (tot / k))); groups[g].appendChild(c.cloneNode(true)); acc += c.textContent.length + 40; });
         out.push({ columns: groups.map(g => ({ width: '*', stack: blocks(g) })), columnGap: 16, margin: [0, 0, 0, 6] });
       }
+      else if (tg === 'DIV' && n.hasAttribute('data-tbox')) {
+        // zone de texte : un encadré (sans habillage du texte en PDF), aligné à gauche ou à droite
+        const pos = n.getAttribute('data-tbox'), w = Math.max(80, contentW * (parseFloat(n.style.width) || 100) / 100);
+        const box = { width: w, table: { widths: ['*'], body: [[{ stack: blocks(n), fillColor: '#F6F2EC', margin: [4, 4, 4, 2] }]] }, layout: { hLineWidth: () => 0.7, vLineWidth: () => 0.7, hLineColor: () => '#C5B8A8', vLineColor: () => '#C5B8A8' } };
+        out.push(pos === 'full' ? { ...box, width: undefined, margin: [0, 2, 0, 8] } : { columns: pos === 'right' ? [{ width: '*', text: '' }, box] : [box, { width: '*', text: '' }], margin: [0, 2, 0, 8] });
+      }
+      else if (tg === 'P' && n.hasAttribute('data-cap')) out.push(...para(n, { italics: true, fontSize: 9.5, color: '#4A4038' }));
       else if (tg === 'DIV' && n.hasAttribute('data-toc')) { hasToc = true; out.push({ toc: { title: { text: 'Sommaire', fontSize: 14, bold: true, margin: [0, 0, 0, 8] }, numberStyle: { color: '#6B5F56' } }, margin: [0, 0, 0, 12] }); }
       else out.push(...para(n));
     });
@@ -6742,6 +7108,10 @@ function htmlToPdfContent(html, contentW, sty = {}) {
   };
   const content = blocks(root);
   if (!hasToc) content.forEach(c => { delete c.tocItem; });
+  // notes de bas de page : regroupées en fin de document (le PDF n'a pas de bas de page dynamique)
+  const fns = [...root.querySelectorAll('sup.fn')];
+  if (fns.length) content.push({ canvas: [{ type: 'line', x1: 0, y1: 4, x2: Math.min(160, contentW), y2: 4, lineWidth: 0.6, lineColor: '#9a8f84' }], margin: [0, 14, 0, 4] },
+    { text: 'Notes', bold: true, fontSize: 10, margin: [0, 0, 0, 4] }, { ol: fns.map(s => ({ text: pdfTxt(s.getAttribute('data-note') || ''), fontSize: 9.5, margin: [0, 0, 0, 2] })) });
   return content;
 }
 async function htmlToPdfBytes(html, page = {}, title = '', sty = null) {
@@ -7083,8 +7453,8 @@ async function docxToHtml(buf) {
   const textW = Math.max(2000, pw - ml - mr) * 635; // EMU
   const page = { orient: wAt(pgSz, 'orient') === 'landscape' || pw > ph ? 'landscape' : 'portrait' };
   page.margin = Object.entries(MARGIN_TW).sort((a, b) => Math.abs(a[1] - ml) - Math.abs(b[1] - ml))[0][0];
-  const hfText = async (kind) => {
-    const ref = wKids(sect, kind + 'Reference').find(r => wAt(r, 'type') === 'default') || wKids(sect, kind + 'Reference')[0];
+  const hfText = async (kind, type = 'default') => {
+    const ref = wKids(sect, kind + 'Reference').find(r => wAt(r, 'type') === type) || (type === 'default' ? wKids(sect, kind + 'Reference')[0] : null);
     const rel = ref && RELS[rAt(ref, 'id')]; if (!rel) return null;
     const x = xml(await read('word/' + rel.target.replace(/^\/?word\//, '')));
     if (!x) return null;
@@ -7100,6 +7470,16 @@ async function docxToHtml(buf) {
   if (H) { page.header = H.text.join(' · ').slice(0, 120); }
   if (F) { page.footer = F.text.join(' · ').slice(0, 120); if (F.num) page.num = F.num; }
   if (H && H.num && !page.num) page.num = H.num;
+  // première page et pages paires différentes
+  if (wKid(sect, 'titlePg') && wOn(wKid(sect, 'titlePg')) !== false) {
+    const h1 = await hfText('header', 'first'), f1 = await hfText('footer', 'first');
+    page.firstDiff = true; page.headerFirst = h1 ? h1.text.join(' · ').slice(0, 120) : ''; page.footerFirst = f1 ? f1.text.join(' · ').slice(0, 120) : '';
+  }
+  const setX = xml(await read('word/settings.xml'));
+  if (setX && desc(setX.documentElement, 'evenAndOddHeaders').length) {
+    const h2 = await hfText('header', 'even'), f2 = await hfText('footer', 'even');
+    if (h2 || f2) { page.evenDiff = true; page.headerEven = h2 ? h2.text.join(' · ').slice(0, 120) : ''; page.footerEven = f2 ? f2.text.join(' · ').slice(0, 120) : ''; }
+  }
   // notes de bas de page
   const FN = {}; const fnOrder = [];
   const fnX = xml(await read('word/footnotes.xml'));
@@ -7186,6 +7566,10 @@ async function docxToHtml(buf) {
           const inner = sub.map(x => x.raw || (x.css ? `<span style="${x.css}">${x.html}</span>` : x.html)).join('');
           parts.push({ raw: rel && rel.ext ? `<a href="${escA(rel.target)}">${inner}</a>` : inner }); cur = null;
         }
+        else if (n === 'fldSimple' && /^\s*MERGEFIELD\s/i.test(wAt(c, 'instr') || '')) {
+          const nm = (/MERGEFIELD\s+"?([^"\\]+?)"?\s*(?:\\|$)/i.exec(wAt(c, 'instr') || '') || [])[1];
+          cur = null; if (nm) parts.push({ raw: `<span class="mf" data-mf="${escA(nm.trim())}" contenteditable="false">«${esc(nm.trim())}»</span>` });
+        }
         else if (n === 'fldSimple') {
           const ins = wAt(c, 'instr') || ''; const m = /HYPERLINK\s+"([^"]+)"/.exec(ins);
           cur = null; const save = parts.length; await visit(c); const sub = parts.splice(save);
@@ -7212,11 +7596,14 @@ async function docxToHtml(buf) {
             const m = /HYPERLINK\s+"([^"]+)"/.exec(f.instr);
             if (/^\s*TOC\b/.test(f.instr)) ctx.toc = true;
             if (m) { f.link = true; flushLink(); linkHref = m[1]; linkParts = []; }
+            const mf = /^\s*MERGEFIELD\s+"?([^"\\]+?)"?\s*(?:\\|$)/i.exec(f.instr);
+            if (mf) { f.mf = true; raw(`<span class="mf" data-mf="${escA(mf[1].trim())}" contenteditable="false">«${esc(mf[1].trim())}»</span>`); }
           } else if (t === 'end' && fld.length) { const f = fld.pop(); if (f.link) flushLink(); if (/^\s*TOC\b/.test(f.instr)) ctx.tocEnd = true; }
           continue;
         }
         if (n === 'instrText') { if (fld.length) fld[fld.length - 1].instr += c.textContent; continue; }
         if (fld.length && fld[fld.length - 1].phase === 'instr') continue;
+        if (fld.length && fld[fld.length - 1].mf) continue; // texte affiché d'un champ de fusion : remplacé par le champ
         if (rp.hidden) continue;
         const target = linkParts ? { push: (css, html) => linkParts.push({ css, html: cw(html) }) } : { push: (css, html) => push(css, cw(html)) };
         if (n === 't' || n === 'delText') { let t = c.textContent; if (rp.caps) t = t.toUpperCase(); if (t) target.push(rp.css, esc(t)); }
@@ -7228,7 +7615,7 @@ async function docxToHtml(buf) {
           else raw('<br>');
         }
         else if (n === 'sym') { const ch = parseInt(wAt(c, 'char'), 16); if (ch === 0xF0FE || ch === 0xF078) target.push(rp.css, '☒'); else if (ch === 0xF0A8 || ch === 0xF06F) target.push(rp.css, '☐'); }
-        else if (n === 'footnoteReference') { const id = wAt(c, 'id'); if (FN[id]) { fnOrder.push(id); raw(`<sup>${fnOrder.length}</sup>`); } }
+        else if (n === 'footnoteReference') { const id = wAt(c, 'id'); if (FN[id]) { fnOrder.push(id); const note = desc(FN[id], 'p').map(p => desc(p, 't').map(t => t.textContent).join('')).join(' ').replace(/\s+/g, ' ').trim(); raw(`<sup class="fn" contenteditable="false" data-note="${escA(note)}">${fnOrder.length}</sup>`); } }
         else if (n === 'drawing' || n === 'pict' || n === 'AlternateContent' || n === 'object') {
           const host = n === 'AlternateContent' ? (wKid(c, 'Choice') || c) : c;
           const blip = desc(host, 'blip')[0], vimg = desc(host, 'imagedata')[0];
@@ -7355,6 +7742,12 @@ async function docxToHtml(buf) {
         const ind = !lvl && eff.ind > 0 && eff.ind !== baseP.ind ? `margin-left:${Math.round(eff.ind / 15)}px` : '';
         const st = [style, ind].filter(Boolean).join(';');
         const tag = lvl ? 'h' + lvl : 'p';
+        // légende Word (« Figure 3 : … ») : numérotée automatiquement dans Grimoire
+        const capM = !lvl && sid && isKind(sid, /^(caption|légende)$/i) && segs.length === 1 && /^(\s*)(Figure|Tableau|Table|Équation|Equation)(\s|&nbsp;)+(\d+)/.exec(segs[0]);
+        if (capM) {
+          const cat = { Table: 'Tableau', Equation: 'Équation' }[capM[2]] || capM[2], id = 'cap' + uid();
+          emit(`<p data-cap="${cat}" data-capid="${id}"${st ? ` style="${st}"` : ''}>${segs[0].replace(capM[0], `${cat} <span class="capn" data-capn="1" contenteditable="false">${capM[4]}</span>`)}</p>`);
+        } else
         segs.forEach((s, k) => {
           if (k > 0) emit('<hr data-pb="1">');
           if (segs.length > 1 && !s.replace(/<br>/g, '').trim()) return;
@@ -7402,16 +7795,27 @@ async function docxToHtml(buf) {
   const body = wKid(docX.documentElement, 'body');
   const ctx = {};
   let html = await blocks(body, ctx);
-  if (fnOrder.length) {
-    let notes = '<hr>';
-    for (let k = 0; k < fnOrder.length; k++) {
-      const inner = (await blocks(FN[fnOrder[k]], {})).replace(/^<p([^>]*)>/, `<p$1><sup>${k + 1}</sup> `);
-      notes += inner;
-    }
-    html += notes;
-  }
+  // (les notes de bas de page sont gardées dans leur appel : <sup class="fn" data-note="…">)
   const used = new Set([...html.matchAll(/data-c="([\w-]+)"/g)].map(m => m[1]));
-  return { html, page, comments: CMT.filter(c => used.has(c.id)) };
+  // styles du document Word (Normal, Titre 1 à 3) : repris comme styles du document Grimoire
+  const styles = {};
+  const toSty = (r, p, head) => {
+    const o = {}, ff = mapFont(r.font || ''); if (ff) o.ff = ff;
+    if (r.size && r.size >= 6 && r.size <= 72) o.fs = r.size;
+    if (r.color && /^[0-9A-Fa-f]{6}$/.test(r.color) && !/^000000$/.test(r.color)) o.color = '#' + r.color.toUpperCase();
+    if (head && r.b != null) o.b = !!r.b; if (r.i) o.i = true;
+    const al = { center: 'center', right: 'right', end: 'right', both: 'justify' }[p.jc]; if (al) o.al = al;
+    if (p.after != null && p.after <= 1200) o.sa = Math.round(p.after / 20);
+    return o;
+  };
+  if (stylesX) {
+    const pS = toSty(baseR, baseP, false); if (Object.keys(pS).length) styles.p = pS;
+    for (let lv = 1; lv <= 3; lv++) {
+      const id = Object.keys(STY).find(k => STY[k].type === 'paragraph' && (new RegExp(`^(heading|titre) ?${lv}$`).test(STY[k].name) || new RegExp(`^(heading|titre)${lv}$`, 'i').test(k)));
+      if (id) { const o = toSty(Object.assign({}, baseR, styleR(id)), styleP(id), true); if (Object.keys(o).length) styles['h' + lv] = o; }
+    }
+  }
+  return { html, page, comments: CMT.filter(c => used.has(c.id)), styles };
 }
 
 // Devise d'un format de nombre Excel ([$$-409], "CHF", £…)
@@ -7478,7 +7882,8 @@ async function importFile(f) {
       droppedImages = 0;
       let raw, page;
       let comments = [];
-      try { ({ html: raw, page, comments } = await docxToHtml(await f.arrayBuffer())); }
+      let styles = null;
+      try { ({ html: raw, page, comments, styles } = await docxToHtml(await f.arrayBuffer())); }
       catch (err) {
         console.warn('Import direct impossible, repli sur mammoth', err);
         droppedImages = 0;
@@ -7487,7 +7892,7 @@ async function importFile(f) {
       }
       const box = document.createElement('div'); box.innerHTML = restoreChecklists(sanitize(raw));
       const html = attachFloats(box).innerHTML;
-      await createDoc('texte', Object.assign({ title, html }, page ? { page } : {}, comments && comments.length ? { comments } : {}));
+      await createDoc('texte', Object.assign({ title, html }, page ? { page } : {}, comments && comments.length ? { comments } : {}, styles && Object.keys(styles).length ? { styles } : {}));
       toast(droppedImages ? `Document importé. ${droppedImages} image${droppedImages > 1 ? 's' : ''} dans un format non pris en charge.` : 'Document importé.');
     } else if (ext === 'csv') {
       // CSV lu directement (sans passer par SheetJS) : deux à trois fois plus rapide sur un gros fichier,
@@ -7819,6 +8224,7 @@ window.addEventListener('resize', relayoutComments);
 if (window.ResizeObserver) new ResizeObserver(relayoutComments).observe(ed);
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'm' || e.key === 'M' || e.code === 'KeyM') && state.view === 'writer') { e.preventDefault(); addComment(); }
+  if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'f' || e.key === 'F' || e.code === 'KeyF') && state.view === 'writer') { e.preventDefault(); insertFootnote(); }
 });
 
 /* =========================================================
@@ -8152,7 +8558,7 @@ const safeName = t => (String(t || 'Sans titre').replace(/[\\/:*?"<>|]+/g, ' ').
 
 const xmlEsc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
 // ---- Export Word : texte riche, liens, listes numérotées, tableaux, mise en page
-let LINKS = [], NUMS = [], TW = 9070;
+let LINKS = [], NUMS = [], TW = 9070, WFN = [], WBM = 0;
 const DOCX_FONT = { 'Source Serif 4': 'Georgia', 'Instrument Sans': 'Calibri' };
 function spanFmt(el, fmt) {
   const f = { ...fmt }, st = el.style;
@@ -8218,6 +8624,16 @@ function runsOf(node, fmt = {}) {
     } else if (n.nodeType === 1) {
       const tg = n.tagName;
       if (tg === 'BR') out += '<w:r><w:br/></w:r>';
+      else if (tg === 'SUP' && n.classList.contains('fn')) { WFN.push(n.getAttribute('data-note') || ''); out += `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="${WFN.length}"/></w:r>`; }
+      else if (tg === 'SPAN' && n.hasAttribute('data-mf')) out += `<w:fldSimple w:instr=" MERGEFIELD ${xmlEsc(n.getAttribute('data-mf').replace(/\s+/g, '_'))} \\* MERGEFORMAT "><w:r>${rPr(fmt)}<w:t xml:space="preserve">${xmlEsc(n.textContent)}</w:t></w:r></w:fldSimple>`;
+      else if (tg === 'SPAN' && n.hasAttribute('data-capn')) {
+        const cap = n.closest('p[data-cap]'), cat = cap ? cap.getAttribute('data-cap') : 'Figure', bm = ++WBM;
+        out += (cap ? `<w:bookmarkStart w:id="${bm}" w:name="_Ref${xmlEsc(cap.getAttribute('data-capid')).replace(/[^\w]/g, '')}"/>` : '') + `<w:fldSimple w:instr=" SEQ ${xmlEsc(cat)} \\* ARABIC "><w:r>${rPr(fmt)}<w:t>${xmlEsc(n.textContent)}</w:t></w:r></w:fldSimple>` + (cap ? `<w:bookmarkEnd w:id="${bm}"/>` : '');
+      }
+      else if (tg === 'SPAN' && n.hasAttribute('data-xref')) {
+        const m = /^(.*?)(\d+)$/.exec(n.textContent) || [null, n.textContent, ''];
+        out += `<w:r>${rPr(fmt)}<w:t xml:space="preserve">${xmlEsc(m[1])}</w:t></w:r>` + (m[2] ? `<w:fldSimple w:instr=" REF _Ref${xmlEsc(n.getAttribute('data-xref')).replace(/[^\w]/g, '')} \\h "><w:r>${rPr(fmt)}<w:t>${m[2]}</w:t></w:r></w:fldSimple>` : '');
+      }
       else if (tg === 'IMG') out += imgRun(n);
       else if (/^(UL|OL|TABLE)$/.test(tg)) return;
       else if ((tg === 'INS' || tg === 'DEL') && n.hasAttribute('data-a') && !fmt.ins && !fmt.del) {
@@ -8238,10 +8654,12 @@ function runsOf(node, fmt = {}) {
   });
   return out;
 }
-function pPr({ style, numPr, tabs, el, ind, jc } = {}) {
+function pPr({ style, numPr, tabs, el, ind, jc, frame, bdr } = {}) {
   let x = '';
   if (style) x += `<w:pStyle w:val="${style}"/>`;
+  if (frame) x += frame;
   if (numPr) x += numPr;
+  if (bdr) x += bdr;
   if (tabs) x += tabs;
   const st = el && el.style;
   const lh = st && parseFloat(st.lineHeight), mb = st && st.marginBottom, ml = st && parseInt(st.marginLeft, 10);
@@ -8338,6 +8756,18 @@ function bodyXml(root, cellFmt) {
     else if (tg === 'HR' && n.hasAttribute('data-pb')) out += '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
     else if (tg === 'HR') out += '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="C9804F"/></w:pBdr></w:pPr></w:p>';
     else if (tg === 'DIV' && n.hasAttribute('data-toc')) out += tocXml(root);
+    else if (tg === 'DIV' && n.hasAttribute('data-tbox')) {
+      // zone de texte : cadre Word (framePr) bordé, à gauche ou à droite, que le texte entoure
+      const pos = n.getAttribute('data-tbox'), w = Math.round(TW * (parseFloat(n.style.width) || 100) / 100);
+      const frame = pos === 'full' ? '' : `<w:framePr w:w="${w}" w:hSpace="227" w:vSpace="113" w:wrap="around" w:vAnchor="text" w:hAnchor="margin" w:xAlign="${pos}" w:y="1"/>`;
+      const b = k => `<w:${k} w:val="single" w:sz="6" w:space="6" w:color="C5B8A8"/>`;
+      const bdr = `<w:pBdr>${b('top')}${b('left')}${b('bottom')}${b('right')}</w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="F6F2EC"/>`;
+      [...n.children].forEach(c => {
+        if (/^(UL|OL|TABLE)$/.test(c.tagName)) { const d = document.createElement('div'); d.appendChild(c.cloneNode(true)); out += bodyXml(d); }
+        else out += para(/^H[1-3]$/.test(c.tagName) ? 'Heading' + c.tagName[1] : '', runsOf(c), c, { frame, bdr });
+      });
+    }
+    else if (tg === 'P' && n.hasAttribute('data-cap')) out += para('Caption', runsOf(n), n);
     else if (tg === 'DIV' && n.hasAttribute('data-cols')) {
       const sp = cols => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:sectPr><w:type w:val="continuous"/>${SECT_PAGE}<w:cols w:num="${cols}" w:space="567"/></w:sectPr></w:pPr></w:p>`;
       out += sp(1) + bodyXml(n) + sp(+n.getAttribute('data-cols') || 2); SECT_COLS = true;
@@ -8378,6 +8808,9 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:style w:type="paragraph" w:styleId="TOC2"><w:name w:val="toc 2"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="60"/><w:ind w:left="240"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="TOC3"><w:name w:val="toc 3"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="60"/><w:ind w:left="480"/></w:pPr></w:style>
 <w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="1F5FAD"/><w:u w:val="single"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Caption"><w:name w:val="caption"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:before="60" w:after="200"/></w:pPr><w:rPr><w:i/><w:color w:val="4A4038"/><w:sz w:val="18"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="FootnoteText"><w:name w:val="footnote text"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>
+<w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>
 </w:styles>`;
 // Styles Word construits d'après les styles du document
 const WSTY_BASE = {
@@ -8412,7 +8845,7 @@ async function exportDocx() {
   const root = document.createElement('div'); root.innerHTML = sanitize(state.cur.html);
   const zip = new window.JSZip();
   const add = zip.file.bind(zip); zip.file = (n, d, o) => add(n, d, { createFolders: false, ...(o || {}) });
-  MEDIA = []; LINKS = []; NUMS = [];
+  MEDIA = []; LINKS = []; NUMS = []; WFN = []; WBM = 0;
   const MAXW = TW * 635;
   for (const im of [...root.querySelectorAll('img')]) {
     const mm = /^data:image\/(png|jpeg|gif);base64,(.+)$/.exec(im.getAttribute('src') || '');
@@ -8438,17 +8871,24 @@ async function exportDocx() {
   const body = bodyXml(root);
   if (cmts.length) { const X = commentsXml(cmts); zip.file('word/comments.xml', X.comments); zip.file('word/commentsExtended.xml', X.ext); }
   CMX = { ids: new Map(), first: new Map(), last: new Map() };
-  const hasHdr = !!P.header, hasFtr = !!(P.footer || P.num !== 'none');
-  const numRuns = P.num === 'xofy' ? wRun("Page ") + FLD('PAGE') + wRun(" sur ") + FLD('NUMPAGES') : FLD('PAGE');
-  const ftrParas = (P.footer ? `<w:p><w:pPr><w:pStyle w:val="Footer"/>${P.num === 'none' ? '' : ''}</w:pPr>${wRun(P.footer)}</w:p>` : '')
-    + (P.num !== 'none' ? `<w:p><w:pPr><w:pStyle w:val="Footer"/><w:jc w:val="${P.num === 'right' ? 'right' : 'center'}"/></w:pPr>${numRuns}</w:p>` : '');
+  // en-têtes et pieds : normal, première page, pages paires (chacun dans sa partie Word)
+  const HF = [['default', 3], ...(P.firstDiff ? [['first', 1]] : []), ...(P.evenDiff ? [['even', 2]] : [])].map(([type, n], k) => {
+    const o = hfFor(P, n), numRuns = o.num === 'xofy' ? wRun("Page ") + FLD('PAGE') + wRun(" sur ") + FLD('NUMPAGES') : FLD('PAGE');
+    const hx = o.h ? `<w:p><w:pPr><w:pStyle w:val="Header"/><w:jc w:val="center"/></w:pPr>${wRun(o.h)}</w:p>` : '';
+    const fx = (o.f ? `<w:p><w:pPr><w:pStyle w:val="Footer"/></w:pPr>${wRun(o.f)}</w:p>` : '') + (o.num !== 'none' ? `<w:p><w:pPr><w:pStyle w:val="Footer"/><w:jc w:val="${o.num === 'right' ? 'right' : o.num === 'left' ? 'left' : 'center'}"/></w:pPr>${numRuns}</w:p>` : '');
+    return { type, k: k + 1, hx, fx };
+  });
+  const forced = HF.length > 1; // avec une première page ou des pages paires, chaque type a sa partie (même vide)
+  HF.forEach(h => { h.hasH = !!h.hx || forced; h.hasF = !!h.fx || forced; });
+  const hasHdr = HF.some(h => h.hasH), hasFtr = HF.some(h => h.hasF);
   const ct = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/>',
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
     '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>',
     '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>',
-    hasHdr ? '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' : '',
-    hasFtr ? '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>' : '',
+    HF.map(h => (h.hasH ? `<Override PartName="/word/header${h.k}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>` : '') + (h.hasF ? `<Override PartName="/word/footer${h.k}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>` : '')).join(''),
+    WFN.length ? '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>' : '',
+    '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>',
     cmts.length ? '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/><Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/>' : '',
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>'].join('');
   zip.file('[Content_Types].xml', ct);
@@ -8456,19 +8896,25 @@ async function exportDocx() {
   const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
   zip.file('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
     + `<Relationship Id="rId1" Type="${R}styles" Target="styles.xml"/><Relationship Id="rIdNum" Type="${R}numbering" Target="numbering.xml"/>`
-    + (hasHdr ? `<Relationship Id="rIdHdr" Type="${R}header" Target="header1.xml"/>` : '')
-    + (hasFtr ? `<Relationship Id="rIdFtr" Type="${R}footer" Target="footer1.xml"/>` : '')
+    + HF.map(h => (h.hasH ? `<Relationship Id="rIdHdr${h.k}" Type="${R}header" Target="header${h.k}.xml"/>` : '') + (h.hasF ? `<Relationship Id="rIdFtr${h.k}" Type="${R}footer" Target="footer${h.k}.xml"/>` : '')).join('')
+    + (WFN.length ? `<Relationship Id="rIdFn" Type="${R}footnotes" Target="footnotes.xml"/>` : '')
+    + `<Relationship Id="rIdSet" Type="${R}settings" Target="settings.xml"/>`
     + (cmts.length ? `<Relationship Id="rIdCm" Type="${R}comments" Target="comments.xml"/><Relationship Id="rIdCmx" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/>` : '')
     + MEDIA.map(m => `<Relationship Id="${m.rid}" Type="${R}image" Target="media/${m.name}"/>`).join('')
     + LINKS.map((u, k) => `<Relationship Id="rIdL${k + 1}" Type="${R}hyperlink" Target="${xmlEsc(u)}" TargetMode="External"/>`).join('')
     + '</Relationships>');
   zip.file('word/styles.xml', stylesXmlFor(state.cur.styles));
   zip.file('word/numbering.xml', numberingXml());
-  if (hasHdr) zip.file('word/header1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr ${D_NS}><w:p><w:pPr><w:pStyle w:val="Header"/><w:jc w:val="center"/></w:pPr>${wRun(P.header)}</w:p></w:hdr>`);
-  if (hasFtr) zip.file('word/footer1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr ${D_NS}>${ftrParas}</w:ftr>`);
+  HF.forEach(h => {
+    if (h.hasH) zip.file(`word/header${h.k}.xml`, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr ${D_NS}>${h.hx || '<w:p><w:pPr><w:pStyle w:val="Header"/></w:pPr></w:p>'}</w:hdr>`);
+    if (h.hasF) zip.file(`word/footer${h.k}.xml`, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr ${D_NS}>${h.fx || '<w:p><w:pPr><w:pStyle w:val="Footer"/></w:pPr></w:p>'}</w:ftr>`);
+  });
+  if (WFN.length) zip.file('word/footnotes.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:footnotes ${D_NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>`
+    + WFN.map((t, i) => `<w:footnote w:id="${i + 1}"><w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> ${xmlEsc(t)}</w:t></w:r></w:p></w:footnote>`).join('') + '</w:footnotes>');
+  zip.file('word/settings.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings ${W_NS}>${P.evenDiff ? '<w:evenAndOddHeaders/>' : ''}<w:defaultTabStop w:val="708"/><w:characterSpacingControl w:val="doNotCompress"/>${WFN.length ? '<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>' : ''}<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>`);
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
   zip.file('docProps/core.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEsc(state.cur.title || '')}</dc:title><dc:creator>${xmlEsc(cmAuthor().name)}</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`);
-  const sect = `<w:sectPr>${SECT_COLS ? '<w:type w:val="continuous"/>' : ''}${hasHdr ? '<w:headerReference w:type="default" r:id="rIdHdr"/>' : ''}${hasFtr ? '<w:footerReference w:type="default" r:id="rIdFtr"/>' : ''}<w:pgSz w:w="${pgW}" w:h="${pgH}"${land ? ' w:orient="landscape"' : ''}/><w:pgMar w:top="${mar}" w:right="${mar}" w:bottom="${mar}" w:left="${mar}" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr>`;
+  const sect = `<w:sectPr>${HF.map(h => (h.hasH ? `<w:headerReference w:type="${h.type}" r:id="rIdHdr${h.k}"/>` : '') + (h.hasF ? `<w:footerReference w:type="${h.type}" r:id="rIdFtr${h.k}"/>` : '')).join('')}${SECT_COLS ? '<w:type w:val="continuous"/>' : ''}<w:pgSz w:w="${pgW}" w:h="${pgH}"${land ? ' w:orient="landscape"' : ''}/><w:pgMar w:top="${mar}" w:right="${mar}" w:bottom="${mar}" w:left="${mar}" w:header="567" w:footer="567" w:gutter="0"/>${P.firstDiff ? '<w:titlePg/>' : ''}</w:sectPr>`;
   zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${D_NS}><w:body>${body}${sect}</w:body></w:document>`);
   const bytes = await zip.generateAsync({ type: 'uint8array' });
   await saveFile(safeName(state.cur.title) + '.docx', new Blob([bytes]));
@@ -8476,12 +8922,13 @@ async function exportDocx() {
 
 function exportHtml() {
   const t = esc(state.cur.title || 'Document');
-  const html = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>${t}</title><style>body{font-family:Georgia,serif;max-width:720px;margin:48px auto;padding:0 20px;line-height:1.6;color:#1E1814}h1{font-size:2em}h2{border-bottom:1px solid #DCD3C8}h3{color:#A35E2C}table{border-collapse:collapse;width:100%}td,th{border:1px solid #C5B8A8;padding:6px 9px;text-align:left}th{background:#EAD9B8}blockquote{border-left:3px solid #C9804F;margin-left:0;padding-left:1em;color:#6B5F56}</style></head><body>${sanitize(state.cur.html)}</body></html>`;
+  const html = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>${t}</title><style>body{font-family:Georgia,serif;max-width:720px;margin:48px auto;padding:0 20px;line-height:1.6;color:#1E1814}h1{font-size:2em}h2{border-bottom:1px solid #DCD3C8}h3{color:#A35E2C}table{border-collapse:collapse;width:100%}td,th{border:1px solid #C5B8A8;padding:6px 9px;text-align:left}th{background:#EAD9B8}blockquote{border-left:3px solid #C9804F;margin-left:0;padding-left:1em;color:#6B5F56}</style></head><body>${sanitize(state.cur.html)}${(() => { const d = document.createElement('div'); d.innerHTML = sanitize(state.cur.html); const f = [...d.querySelectorAll('sup.fn')]; return f.length ? `<hr><ol class="notes">${f.map(x => `<li>${esc(x.getAttribute('data-note') || '')}</li>`).join('')}</ol>` : ''; })()}</body></html>`;
   return saveFile(safeName(state.cur.title) + '.html', html);
 }
 function exportMd() {
   const root = document.createElement('div'); root.innerHTML = sanitize(state.cur.html);
-  const inl = n => [...n.childNodes].map(c => c.nodeType === 3 ? c.nodeValue : c.nodeType !== 1 ? '' : c.tagName === 'BR' ? '  \n' : /^(STRONG|B)$/.test(c.tagName) ? `**${inl(c)}**` : /^(EM|I)$/.test(c.tagName) ? `*${inl(c)}*` : c.tagName === 'S' ? `~~${inl(c)}~~` : c.tagName === 'A' ? `[${inl(c)}](${c.getAttribute('href')})` : c.tagName === 'IMG' ? '' : /^(UL|OL)$/.test(c.tagName) ? '' : inl(c)).join('');
+  const fnotes = [...root.querySelectorAll('sup.fn')];
+  const inl = n => [...n.childNodes].map(c => c.nodeType === 3 ? c.nodeValue : c.nodeType !== 1 ? '' : c.tagName === 'SUP' && c.classList.contains('fn') ? `[^${fnotes.indexOf(c) + 1}]` : c.tagName === 'BR' ? '  \n' : /^(STRONG|B)$/.test(c.tagName) ? `**${inl(c)}**` : /^(EM|I)$/.test(c.tagName) ? `*${inl(c)}*` : c.tagName === 'S' ? `~~${inl(c)}~~` : c.tagName === 'A' ? `[${inl(c)}](${c.getAttribute('href')})` : c.tagName === 'IMG' ? '' : /^(UL|OL)$/.test(c.tagName) ? '' : inl(c)).join('');
   const md = [...root.children].map(n => {
     const t = n.tagName;
     if (/^H[1-3]$/.test(t)) return '#'.repeat(+t[1]) + ' ' + inl(n).trim();
@@ -8492,7 +8939,7 @@ function exportMd() {
     if (t === 'HR') return '---';
     if (t === 'TABLE') { const rows = [...n.querySelectorAll('tr')].map(tr => '| ' + [...tr.children].map(c => inl(c).trim().replace(/\|/g, '\\|')).join(' | ') + ' |'); if (rows.length) rows.splice(1, 0, '|' + ' --- |'.repeat(n.querySelector('tr').children.length)); return rows.join('\n'); }
     return inl(n).trim();
-  }).filter(Boolean).join('\n\n');
+  }).filter(Boolean).join('\n\n') + (fnotes.length ? '\n\n' + fnotes.map((f, i) => `[^${i + 1}]: ${f.getAttribute('data-note') || ''}`).join('\n') : '');
   return saveFile(safeName(state.cur.title) + '.md', md + '\n');
 }
 const XL_RGB = { jaune: ['9A6512', 'FDF0C4'], vert: ['2F7D46', 'DDF0DF'], bleu: ['2563A8', 'DCE9F7'], rouge: ['B23F33', 'F8DEDA'], violet: ['6D4AA8', 'E9E1F5'], orange: ['C2611F', 'FBE3CF'], gris: ['5F6670', 'E7E8EA'], cuivre: ['A35E2C', 'F2E3D4'] };
@@ -9974,6 +10421,12 @@ function commands() {
     add('Insérer', 'Tableau 3 × 3', 'table', () => insertTable(3, 3));
     add('Insérer', 'Tableau 4 × 5', 'table', () => insertTable(5, 4));
     add('Insérer', 'Commentaire', 'comment', () => addComment(), 'Ctrl Alt M');
+    add('Insérer', 'Note de bas de page', 'note', insertFootnote, 'Ctrl Alt F');
+    add('Insérer', 'Légende (Figure 1, Tableau 1…)', 'tag', openCaption);
+    add('Insérer', 'Renvoi (voir Figure 2…)', 'link', openXref);
+    add('Insérer', 'Zone de texte', 'square', openTextBox);
+    add('Insérer', 'Forme (rectangle, flèche, bulle…)', 'square', openShape);
+    add('Publipostage', 'Publipostage (lettres à partir d\'un classeur)…', 'grid', openMailMerge);
     add('Format', 'Modifier les styles (Titre 1, Paragraphe…)', 'type', () => openStylePop());
     add('Révision', 'Activer ou désactiver le suivi des modifications', 'pen', () => toggleTrack(), 'Ctrl Maj E');
     add('Révision', 'Accepter toutes les modifications', 'tick', () => trAll(true));
@@ -9986,6 +10439,7 @@ function commands() {
     add('Insérer', 'Image', 'image', W.image);
     add('Insérer', 'Date du jour', 'pen', () => exec('insertText', new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })));
     add('Affichage', 'Mode concentration', 'focus', W.focus);
+    add('Affichage', 'Aperçu avant impression (pages exactes)', 'printer', openPreview);
     add('Affichage', 'Afficher ou masquer le plan', 'outline', W.outline);
     if (Plume.available) { add('Plume', 'Reformuler la sélection', 'feather', () => { openPlume(); runPlume('reformuler'); }); add('Plume', 'Corriger la sélection', 'feather', () => { openPlume(); runPlume('corriger'); }); add('Plume', 'Résumer le document', 'feather', () => { openPlume(); runPlume('resumer'); }); add('Plume', 'Rédiger avec Plume…', 'feather', () => { openPlume(); setTimeout(() => $('#plumeAsk').focus(), 30); }); }
     add('Exporter', 'Exporter en PDF (.pdf)', 'pdf', () => runExport('docpdf'));
@@ -10008,6 +10462,7 @@ function commands() {
     add('Affichage', 'Figer la première ligne', 'freeze', () => setFreeze(1, (state.cur.frz || {}).c || 0));
     add('Affichage', 'Figer la première colonne', 'freeze', () => setFreeze((state.cur.frz || {}).r || 0, 1));
     add('Affichage', 'Ne rien figer', 'freeze', () => setFreeze(0, 0));
+    add('Affichage', 'Aperçu avant impression (pages exactes)', 'printer', openPreview);
     add('Feuilles', 'Nouvelle feuille', 'plus', () => addSheet());
     add('Feuilles', 'Dupliquer cette feuille', 'copy', () => addSheet(state.cur.sheets[state.cur.active]));
     add('Feuilles', 'Renommer cette feuille', 'pen', () => startRename(state.cur.active));
