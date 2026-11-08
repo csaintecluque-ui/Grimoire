@@ -12,14 +12,16 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.22.0';
+const APP_VERSION = '1.23.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
   jszip: 'lib/jszip.min.js',
   pdfjs: 'lib/pdfjs/pdf.min.mjs', pdfWorker: 'lib/pdfjs/pdf.worker.min.mjs', pdflib: 'lib/pdf-lib.min.js',
   mammoth: 'lib/mammoth.browser.min.js',
-  pdfmake: 'lib/pdfmake.min.js', pdfmakeFonts: 'lib/vfs_fonts.js'
+  pdfmake: 'lib/pdfmake.min.js', pdfmakeFonts: 'lib/vfs_fonts.js',
+  gram: 'lib/grammalecte/worker.js', qpdf: 'lib/qpdf/worker.js',
+  tess: 'lib/tesseract/tesseract.min.js', tessWorker: 'lib/tesseract/worker.min.js', tessCore: 'lib/tesseract/core', tessLang: 'lib/tesseract/lang'
 };
 const loaded = {};
 function loadScript(src) {
@@ -53,6 +55,9 @@ const IC = {
   redo: '<path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 000 11H13"/>',
   outline: '<path d="M4 6h16M8 11h12M8 16h12"/><path d="M4 11h.01M4 16h.01"/>',
   focus: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+  scan: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M8 9h8M8 12h8M8 15h5"/>',
+  edtext: '<path d="M4 6V4h11v2M9.5 4v14M7.5 18h4"/><path d="M17.5 10v10M15.5 10h4M15.5 20h4"/>',
+  abc: '<path d="M2.5 15l3-8.5 3 8.5M3.6 12h3.8M11 6.5v8.5h2.6a2.1 2.1 0 0 0 0-4.3H11h2.2a2 2 0 0 0 0-4.2zM21 8.2a3.6 3.6 0 1 0 0 5.3"/><path d="M9 19.2l2 2 4.5-4.5"/>',
   feather: '<path d="M20 4C12 4 7 9 7 16v4"/><path d="M7 16c6 0 11-4 13-12"/><path d="M11 12h5"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   moon: '<path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/>',
@@ -1089,6 +1094,7 @@ function openWriter() {
   if (ls.get('grim.outline', true) === false) document.body.classList.add('no-outline');
   CM.active = CM.edit = null; CM.panel = false; cmPurgeOrphans();
   applyDocStyles(); refreshWriter(); renderComments(); renderTrackBar();
+  GC.on = ls.get('grim.gc', !isPhone()); GC.panel = false; renderGcPanel(); gcStart();
 }
 const refreshWriter = () => { updateOutline(); updateStats(); updateToolState(); refreshDocBits(); };
 const refreshSoon = debounce(() => { updateOutline(); updateStats(); refreshDocBits(); }, 350);
@@ -1871,6 +1877,235 @@ async function mmPreview(i) {
   openPreview({ bytes: b, title: `Lettre ${i + 1} sur ${MM.rows.length}`, file: `Lettre ${i + 1} — ${state.cur.title}`, nav: `<button class="pbtn ghost" data-pv="prev"${i ? '' : ' disabled'}>◀ Précédente</button><button class="pbtn ghost" data-pv="next"${i < MM.rows.length - 1 ? '' : ' disabled'}>Suivante ▶</button>`, onNav: k => mmPreview(i + (k === 'next' ? 1 : -1)) });
 }
 
+/* --- Grammaire et orthographe : Grammalecte (GPL v3) dans un Web Worker.
+   Les fautes sont soulignées avec l'API CSS Custom Highlight : le texte du document n'est jamais modifié
+   (rien n'est enregistré, rien ne part dans l'export). Analyse par paragraphe, avec mémoire des paragraphes déjà vus. */
+const GC = { w: null, seq: 0, wait: new Map(), cache: new Map(), byBlk: new Map(), on: false, panel: false, failed: false, gen: 0, typedAt: 0, pop: null };
+const GC_BLK = 'p,li,h1,h2,h3,h4,h5,h6,td,th,blockquote,pre,figcaption';
+// fautes de typographie ou de présentation (soulignées plus discrètement)
+const GC_TYPO = new Set(['typo', 'apos', 'esp', 'nbsp', 'tab', 'num', 'nf', 'liga', 'mapos', 'maj', 'minis', 'virg', 'poncfin', 'tu', 'unit', 'eepi', 'chim', 'date', 'mc', 'html', 'latex', 'md', 'idrule']);
+const GC_HL = !!(window.CSS && CSS.highlights && window.Highlight);
+const gcDict = () => new Set(ls.get('grim.dict', []));
+function gcWorker() {
+  if (GC.w) return GC.w;
+  const w = new Worker(LIB.gram);
+  w.onmessage = e => { const d = e.data || {}, p = GC.wait.get(d.id); if (!p) return; GC.wait.delete(d.id); if (d.err) p.rej(new Error(d.err)); else p.res(d.out); };
+  w.onerror = e => { e.preventDefault && e.preventDefault(); GC.failed = true; GC.wait.forEach(p => p.rej(new Error('Correcteur indisponible'))); GC.wait.clear(); try { w.terminate(); } catch {} GC.w = null; };
+  return GC.w = w;
+}
+function gcAsk(msg) { return new Promise((res, rej) => { const id = ++GC.seq; GC.wait.set(id, { res, rej }); gcWorker().postMessage({ ...msg, id }); }); }
+// Texte d'un paragraphe et correspondance avec le document (nœuds texte ; les éléments non modifiables comptent sans être corrigés)
+function gcText(b) {
+  const segs = []; let s = '';
+  const walk = n => {
+    for (let c = n.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) { segs.push({ n: c, a: s.length, len: c.data.length }); s += c.data; continue; }
+      if (c.nodeType !== 1) continue;
+      if (c.matches(GC_BLK) || c.matches('del[data-a], sup.fn, [data-toc]')) continue;
+      if (c.tagName === 'BR' || c.getAttribute('contenteditable') === 'false') {
+        const t = c.tagName === 'BR' ? ' ' : c.classList.contains('mf') ? c.textContent.replace(/[«»]/g, '') : c.textContent;
+        if (t) { segs.push({ n: null, a: s.length, len: t.length }); s += t; }
+        continue;
+      }
+      walk(c);
+    }
+  };
+  walk(b);
+  return { s, segs };
+}
+function gcRange(T, a, b) {
+  let sn = null, so = 0, en = null, eo = 0;
+  for (const g of T.segs) {
+    if (sn == null && a >= g.a && a < g.a + g.len) { if (!g.n) return null; sn = g.n; so = a - g.a; }
+    if (b > g.a && b <= g.a + g.len) { if (!g.n) return null; en = g.n; eo = b - g.a; break; }
+    if (sn && g.a >= a && !g.n) return null; // la faute couvre un champ, un renvoi… : on ne la montre pas
+  }
+  if (!sn || !en) return null;
+  try { const r = document.createRange(); r.setStart(sn, so); r.setEnd(en, eo); return r; } catch { return null; }
+}
+const gcBlocks = () => $$(GC_BLK, ed).filter(b => !b.closest('[contenteditable="false"], [data-toc]'));
+const gcOwnBlock = n => { const el = n && (n.nodeType === 1 ? n : n.parentElement); return el && ed.contains(el) ? el.closest(GC_BLK) : null; };
+async function gcRun(blocks) {
+  if (!GC.on || state.view !== 'writer' || GC.failed) return;
+  const gen = ++GC.gen, cur = state.cur;
+  const items = (blocks || gcBlocks()).map(b => ({ b, T: gcText(b) }));
+  const need = [...new Set(items.map(x => x.T.s).filter(s => /\p{L}/u.test(s) && !GC.cache.has(s)))];
+  try {
+    for (let i = 0; i < need.length; i += 40) {
+      const part = need.slice(i, i + 40), out = await gcAsk({ kind: 'check', paras: part });
+      part.forEach((s, k) => GC.cache.set(s, out[k]));
+      if (gen !== GC.gen || state.cur !== cur) return;
+    }
+  } catch (e) { console.warn(e); if (GC.failed) { gcStatus(); toast('Le correcteur n\'a pas pu démarrer (fichiers du correcteur introuvables).', true); } return; }
+  if (GC.cache.size > 6000) { const keep = new Set(items.map(x => x.T.s)); for (const k of GC.cache.keys()) if (!keep.has(k)) GC.cache.delete(k); }
+  if (gen !== GC.gen || state.cur !== cur) return;
+  const dict = gcDict(), ign = new Set(ls.get('grim.gcIgn', [])), sel = getSelection();
+  const caretBlk = sel.rangeCount ? gcOwnBlock(sel.anchorNode) : null, typing = Date.now() - GC.typedAt < 1500;
+  for (const { b, T } of items) {
+    if (!b.isConnected) continue;
+    const res = GC.cache.get(T.s);
+    if (!res) { GC.byBlk.delete(b); continue; }
+    if (gcText(b).s !== T.s) continue; // le paragraphe a changé entre-temps : il sera revu
+    const list = [];
+    res.g.forEach(x => {
+      const txt = T.s.slice(x.a, x.b);
+      if (ign.has('r:' + x.rule) || GC.ign?.has('e:' + x.rule + '|' + txt)) return;
+      const r = gcRange(T, x.a, x.b); if (!r) return;
+      list.push({ b, r, a: x.a, z: x.b, kind: GC_TYPO.has(x.type) ? 'typo' : 'gram', msg: x.msg, sug: x.sug, rule: x.rule, txt, url: x.url });
+    });
+    res.s.forEach(x => {
+      const w = x.w;
+      if (w.length < 2 || /\d/.test(w) || dict.has(w) || dict.has(w.toLowerCase()) || GC.ignW?.has(w)) return;
+      if (list.some(e => e.a < x.b && x.a < e.z)) return; // déjà signalée par la grammaire
+      if (typing && b === caretBlk && sel.anchorNode && gcText(b).s.length && x.b === gcCaretOffset(T, sel)) return; // mot en cours de frappe
+      const r = gcRange(T, x.a, x.b); if (!r) return;
+      list.push({ b, r, a: x.a, z: x.b, kind: 'spell', msg: 'Mot inconnu du dictionnaire.', sug: null, txt: w });
+    });
+    list.sort((p, q) => p.a - q.a);
+    if (list.length) GC.byBlk.set(b, list); else GC.byBlk.delete(b);
+  }
+  if (!blocks) for (const b of [...GC.byBlk.keys()]) if (!b.isConnected) GC.byBlk.delete(b);
+  gcPaint();
+}
+function gcCaretOffset(T, sel) { const g = T.segs.find(x => x.n === sel.anchorNode); return g ? g.a + sel.anchorOffset : -1; }
+function gcErrors() {
+  const out = []; gcBlocks().forEach(b => { const l = GC.byBlk.get(b); if (l) out.push(...l); });
+  return out;
+}
+function gcPaint() {
+  if (GC_HL) {
+    const H = { spell: new Highlight(), gram: new Highlight(), typo: new Highlight() };
+    GC.byBlk.forEach((list, b) => { if (!b.isConnected) { GC.byBlk.delete(b); return; } list.forEach(e => H[e.kind].add(e.r)); });
+    CSS.highlights.set('gc-spell', H.spell); CSS.highlights.set('gc-gram', H.gram); CSS.highlights.set('gc-typo', H.typo);
+  }
+  gcStatus();
+  if (GC.panel) renderGcPanel();
+}
+function gcClear() {
+  GC.gen++; GC.byBlk.clear(); closeGcPop();
+  if (GC_HL) ['gc-spell', 'gc-gram', 'gc-typo', 'gc-cur'].forEach(k => CSS.highlights.delete(k));
+}
+function gcStatus() {
+  const b = $('#wGcBtn'); if (!b) return;
+  const n = GC.on ? [...GC.byBlk.values()].reduce((s, l) => s + l.length, 0) : 0;
+  b.hidden = !GC.on;
+  b.innerHTML = GC.failed ? `${ic('abc')}correcteur indisponible` : `${ic('abc')}${n ? `${n} faute${n > 1 ? 's' : ''} possible${n > 1 ? 's' : ''}` : 'aucune faute repérée'}`;
+  const t = $('[data-w="gram"]'); if (t) t.setAttribute('aria-pressed', String(GC.on));
+}
+const gcSoon = debounce(() => gcRun(), 700);
+function gcStart() {
+  gcClear(); gcStatus();
+  if (!GC.on || state.view !== 'writer') return;
+  ed.spellcheck = false; // le correcteur du navigateur soulignerait les mêmes mots une deuxième fois
+  setTimeout(() => gcRun(), 400);
+}
+function setGcOn(on, quiet) {
+  GC.on = on; ls.set('grim.gc', on);
+  if (!on) { gcClear(); ed.spellcheck = true; GC.panel = false; renderGcPanel(); gcStatus(); if (!quiet) toast('Correcteur désactivé : plus de soulignés.'); return; }
+  gcStart();
+  if (!quiet) toast('Correcteur activé : orthographe en rouge, grammaire en bleu, typographie en pointillés.');
+}
+ed.addEventListener('input', () => {
+  if (!GC.on) return;
+  GC.typedAt = Date.now();
+  // les fautes du paragraphe en cours disparaissent pendant la frappe, puis reviennent après une courte pause
+  const s = getSelection(), b = s.rangeCount ? gcOwnBlock(s.anchorNode) : null;
+  if (b && GC.byBlk.has(b)) { GC.byBlk.delete(b); gcPaint(); }
+  closeGcPop(); gcSoon();
+});
+ed.addEventListener('click', e => {
+  if (!GC.on || e.target.closest('[contenteditable="false"]')) return;
+  const s = getSelection(); if (!s.rangeCount || !s.isCollapsed) return closeGcPop();
+  const b = gcOwnBlock(s.anchorNode), list = b && GC.byBlk.get(b);
+  const hit = list && list.find(x => { try { return x.r.comparePoint(s.anchorNode, s.anchorOffset) === 0; } catch { return false; } });
+  if (hit) openGcPop(hit); else closeGcPop();
+});
+document.addEventListener('mousedown', e => { if (GC.pop && !e.target.closest('#gcPop') && !e.target.closest('#ed')) closeGcPop(); });
+async function gcSuggest(x) {
+  if (x.sug) return x.sug;
+  try { x.sug = await gcAsk({ kind: 'suggest', word: x.txt }); } catch { x.sug = []; }
+  return x.sug;
+}
+function gcCardHtml(x, full) {
+  const label = x.kind === 'spell' ? 'Orthographe' : x.kind === 'typo' ? 'Typographie' : 'Grammaire';
+  const sug = x.sug == null ? '<span class="gc-wait">Recherche de suggestions…</span>' : x.sug.length ? x.sug.map((s, k) => `<button type="button" class="gc-sug" data-gs="${k}">${esc(s) || '<i>(supprimer)</i>'}</button>`).join('') : '<span class="gc-wait">Aucune suggestion.</span>';
+  const ctx = full ? `<p class="gc-ctx">${esc(gcText(x.b).s.slice(Math.max(0, x.a - 40), x.a)).replace(/^\S*\s/, '… ')}<mark class="gc-${x.kind}">${esc(x.txt)}</mark>${esc(gcText(x.b).s.slice(x.z, x.z + 40)).replace(/\s\S*$/, ' …')}</p>` : '';
+  return `<div class="gc-k gc-k-${x.kind}">${label}</div>${ctx}<p class="gc-msg">${esc(x.msg)}</p><div class="gc-sugs">${sug}</div>
+    <div class="gc-acts"><button type="button" data-ga="ign">Ignorer</button>${x.kind === 'spell' ? '<button type="button" data-ga="dict">Ajouter au dictionnaire</button>' : `<button type="button" data-ga="rule">Ne plus signaler cette règle</button>`}</div>`;
+}
+function openGcPop(x) {
+  let p = $('#gcPop');
+  if (!p) { p = document.createElement('div'); p.id = 'gcPop'; p.className = 'fpop gc-pop'; p.setAttribute('role', 'dialog'); p.setAttribute('aria-label', 'Correction proposée'); $('#writer').appendChild(p); gcBindCard(p, () => GC.pop); }
+  GC.pop = x;
+  const draw = () => {
+    if (GC.pop !== x) return;
+    p.innerHTML = gcCardHtml(x); p.hidden = false;
+    const host = $('#writer').getBoundingClientRect(), r = x.r.getBoundingClientRect();
+    p.style.left = Math.max(8, Math.min(r.left - host.left, host.width - p.offsetWidth - 8)) + 'px';
+    const below = r.bottom - host.top + 6;
+    p.style.top = (below + p.offsetHeight > host.height - 8 ? Math.max(8, r.top - host.top - p.offsetHeight - 6) : below) + 'px';
+  };
+  draw();
+  if (GC_HL) CSS.highlights.set('gc-cur', new Highlight(x.r));
+  if (x.sug == null) gcSuggest(x).then(draw);
+}
+function closeGcPop() { GC.pop = null; const p = $('#gcPop'); if (p) p.hidden = true; if (GC_HL) CSS.highlights.delete('gc-cur'); }
+// Boutons d'une carte (bulle sur le mot ou panneau) : suggestion, ignorer, dictionnaire, règle
+function gcBindCard(host, which) {
+  host.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+  host.addEventListener('click', e => {
+    const x = which(e); if (!x) return;
+    const s = e.target.closest('[data-gs]'), a = e.target.closest('[data-ga]');
+    if (s) { gcFix(x, x.sug[+s.dataset.gs]); return; }
+    if (!a) { if (host.id === 'gcPanel') gcShow(x); return; }
+    const k = a.dataset.ga;
+    if (k === 'ign') { if (x.kind === 'spell') (GC.ignW ||= new Set()).add(x.txt); else (GC.ign ||= new Set()).add('e:' + x.rule + '|' + x.txt); }
+    if (k === 'dict') { const d = ls.get('grim.dict', []); if (!d.includes(x.txt)) { d.push(x.txt); ls.set('grim.dict', d); } toast(`« ${x.txt} » ajouté à votre dictionnaire (Réglages pour le retirer).`); }
+    if (k === 'rule') { const l = ls.get('grim.gcIgn', []); if (!l.includes('r:' + x.rule)) { l.push('r:' + x.rule); ls.set('grim.gcIgn', l); } toast('Cette règle ne sera plus signalée (Réglages › Correcteur pour la rétablir).'); }
+    closeGcPop(); gcRun();
+  });
+}
+function gcFix(x, rep) {
+  if (rep == null || !x.r || !x.b.isConnected) return;
+  closeGcPop();
+  ed.focus({ preventScroll: true });
+  const s = getSelection(); s.removeAllRanges(); s.addRange(x.r.cloneRange());
+  if (rep) document.execCommand('insertText', false, rep); else document.execCommand('delete');
+  savedRange = s.rangeCount ? s.getRangeAt(0).cloneRange() : null;
+  afterEdit(); GC.typedAt = 0; gcRun();
+}
+function gcShow(x) {
+  const s = getSelection(); s.removeAllRanges(); s.addRange(x.r.cloneRange());
+  const r = x.r.getBoundingClientRect(), sc = $('#wScroll'), box = sc.getBoundingClientRect();
+  if (r.top < box.top + 40 || r.bottom > box.bottom - 40) sc.scrollTop += r.top - box.top - box.height / 3;
+  if (GC_HL) CSS.highlights.set('gc-cur', new Highlight(x.r));
+}
+// Panneau : toutes les fautes du document, dans l'ordre
+function renderGcPanel() {
+  let p = $('#gcPanel');
+  if (!GC.panel) { if (p) p.hidden = true; return; }
+  if (!p) {
+    p = document.createElement('aside'); p.id = 'gcPanel'; p.className = 'plume gc-panel'; p.setAttribute('aria-label', 'Grammaire et orthographe');
+    $('#writer .w-body').appendChild(p);
+    gcBindCard(p, e => { const c = e.target.closest('[data-gi]'); return c && GC.list && GC.list[+c.dataset.gi]; });
+    p.addEventListener('click', e => { if (e.target.closest('[data-gx]')) { GC.panel = false; renderGcPanel(); } if (e.target.closest('[data-gre]')) { GC.cache.clear(); gcRun(); } });
+  }
+  const list = GC.list = gcErrors(), n = list.length;
+  p.hidden = false;
+  p.innerHTML = `<div class="plume-h"><h2>Correcteur</h2><button class="xbtn" data-gx aria-label="Fermer le correcteur">${ic('close')}</button></div>
+    <div class="plume-b"><p class="gc-sum">${GC.failed ? 'Le correcteur n\'a pas pu démarrer.' : n ? `<b>${n}</b> faute${n > 1 ? 's' : ''} possible${n > 1 ? 's' : ''} : cliquez sur une suggestion pour corriger.` : 'Aucune faute repérée dans ce document.'} <button type="button" class="fb-link" data-gre>Revérifier</button></p>
+    ${list.slice(0, 200).map((x, i) => `<div class="gc-card" data-gi="${i}">${gcCardHtml(x, true)}</div>`).join('')}
+    ${n > 200 ? `<p class="dlg-note">Les 200 premières sont affichées : corrigez-les pour voir la suite.</p>` : ''}
+    <p class="dlg-note">Correcteur Grammalecte, sur l'appareil : le texte n'est envoyé nulle part.</p></div>`;
+  list.slice(0, 200).forEach((x, i) => { if (x.kind === 'spell' && x.sug == null && i < 30) gcSuggest(x).then(() => { const c = p.querySelector(`[data-gi="${i}"]`); if (c && GC.list === list) c.innerHTML = gcCardHtml(x, true); }); });
+}
+function openGcPanel() {
+  if (state.view !== 'writer') return;
+  if (!GC.on) setGcOn(true, true);
+  GC.panel = true; renderGcPanel(); gcRun();
+}
+$('#wStatus').addEventListener('click', e => { if (e.target.closest('#wGcBtn')) { GC.panel = !GC.panel; if (GC.panel) openGcPanel(); else renderGcPanel(); } });
+
 /* --- mise en page */
 const PAGE_DEF = { orient: 'portrait', margin: 'normal', header: '', footer: '', num: 'none', firstDiff: false, headerFirst: '', footerFirst: '', evenDiff: false, headerEven: '', footerEven: '' };
 // En-tête, pied et numéro de la page n (1 = première) : première page et pages paires peuvent être différentes.
@@ -1969,6 +2204,7 @@ const W = {
   table: () => insertTable(), hr: () => exec('insertHorizontalRule'), pagebreak: insertPageBreak, toc: insertToc,
   image: () => { if (document.activeElement !== ed) restoreRange(); $('#imgIn').click(); },
   find: () => openFind(false), layout: openPagePop,
+  gram: () => { if (!GC.on) openGcPanel(); else { GC.panel = !GC.panel; if (GC.panel) openGcPanel(); else renderGcPanel(); } },
   block: v => exec('formatBlock', '<' + v + '>'),
   outline: () => {
     if (isPhone() || innerWidth <= 900) { document.body.classList.toggle('show-outline'); }
@@ -2091,7 +2327,8 @@ function updateStats() {
   const pages = pg || Math.max(1, Math.ceil(words / 480));
   const P = pageOf();
   const nCm = (state.cur && state.cur.comments || []).filter(c => !c.done).length;
-  $('#wStatus').innerHTML = `<span><b>${words.toLocaleString('fr-FR')}</b> mots · ${chars.toLocaleString('fr-FR')} caractères · ${mins} min de lecture${nCm ? ` · <button type="button" class="w-cmt" id="wCmtBtn">${ic('comment')}${nCm} commentaire${nCm > 1 ? 's' : ''}</button>` : ''}</span><span>${pg ? '' : '≈ '}${pages} page${pages > 1 ? 's' : ''} A4 ${P.orient === 'landscape' ? 'paysage' : ''}</span>`;
+  $('#wStatus').innerHTML = `<span><b>${words.toLocaleString('fr-FR')}</b> mots · ${chars.toLocaleString('fr-FR')} caractères · ${mins} min de lecture${nCm ? ` · <button type="button" class="w-cmt" id="wCmtBtn">${ic('comment')}${nCm} commentaire${nCm > 1 ? 's' : ''}</button>` : ''}</span><span>${pg ? '' : '≈ '}${pages} page${pages > 1 ? 's' : ''} A4 ${P.orient === 'landscape' ? 'paysage' : ''}</span><button type="button" class="w-cmt w-gc" id="wGcBtn" hidden></button>`;
+  gcStatus();
 }
 
 /* =========================================================
@@ -5672,15 +5909,22 @@ async function ensurePdfJs() {
   return L;
 }
 async function ensurePdfLib() { await loadScript(LIB.pdflib); return window.PDFLib; }
-async function pdfjsOpen(bytes) {
+// pw : mot de passe à essayer d'abord (sinon celui déjà saisi pour le PDF ouvert) ; doc._pw : celui qui a ouvert le fichier
+async function pdfjsOpen(bytes, pw, name) {
   const L = await ensurePdfJs();
   // isImageDecoderSupported : les photos (JPEG) sont décodées par le navigateur lui-même, bien plus vite
   const task = L.getDocument({ data: bytes.slice(0), cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: 'lib/pdfjs/standard_fonts/', isEvalSupported: false, isImageDecoderSupported: true });
-  task.onPassword = (cb, reason) => {
-    const p = window.prompt(reason === 2 ? 'Mot de passe incorrect. Réessayez :' : 'Ce PDF est protégé par un mot de passe :');
-    if (p == null) task.destroy(); else cb(p);
+  const known = pw != null ? pw : state.cur && state.cur.type === 'pdf' ? PDF_PW.get(state.cur.pdfId) : null;
+  let auto = known != null, typed = false, last = null;
+  task.onPassword = async (cb, reason) => {
+    if (auto) { auto = false; last = known; cb(known); return; }
+    const p = await askPdfPassword(name ? `« ${name} » est protégé` : 'PDF protégé', 'Ce PDF est protégé par un mot de passe.', reason === 2 && typed);
+    if (p == null) { task.destroy(); return; }
+    typed = true; last = p; cb(p);
   };
-  return task.promise;
+  const doc = await task.promise;
+  doc._pw = last;
+  return doc;
 }
 // Texte de chaque page (pour la recherche et la conversion en document)
 async function pageText(doc, i, withLines) {
@@ -5701,6 +5945,747 @@ async function pdfAllText(doc, max = 60) {
   return out.join('\n').replace(/[ \t]+/g, ' ').slice(0, 30000);
 }
 
+/* --- PDF protégés par mot de passe : qpdf (WebAssembly, Apache 2.0) dans un Web Worker.
+   Le fichier reste chiffré dans Grimoire. Pour le modifier, il est déchiffré le temps de l'opération,
+   puis rechiffré avec exactement la même protection (mots de passe et droits d'origine, --copy-encryption).
+   Le mot de passe n'est gardé qu'en mémoire, le temps de la session. */
+const QP = { w: null, seq: 0, wait: new Map() };
+const PDF_PW = new Map(); // fichier (pdfId) → mot de passe saisi (mémoire seulement)
+function qpdfRun(args, files, out = '/out.pdf') {
+  if (!QP.w) {
+    QP.w = new Worker(LIB.qpdf);
+    QP.w.onmessage = e => { const p = QP.wait.get(e.data.id); if (p) { QP.wait.delete(e.data.id); p(e.data); } };
+    QP.w.onerror = e => { e.preventDefault && e.preventDefault(); QP.wait.forEach(p => p({ code: -1, out: null, stdout: '', stderr: 'qpdf indisponible' })); QP.wait.clear(); try { QP.w.terminate(); } catch {} QP.w = null; };
+  }
+  return new Promise(res => { const id = ++QP.seq; QP.wait.set(id, res); QP.w.postMessage({ id, args, files, out }); });
+}
+const latin1 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return s; };
+// Le fichier est-il chiffré ? (/Encrypt dans le dernier dictionnaire « trailer » ou de la table des objets)
+function pdfIsEnc(bytes) {
+  if (!bytes || !bytes.length) return false;
+  const n = bytes.length, re = /\/Encrypt\s*(\d+\s+\d+\s+R|<<)/;
+  const tail = latin1(bytes.subarray(Math.max(0, n - 4096), n));
+  let off = null; for (const m of tail.matchAll(/startxref\s+(\d+)/g)) off = +m[1];
+  if (off != null && off < n) { const at = latin1(bytes.subarray(off, Math.min(n, off + 4096))); if (/^\s*\d+\s+\d+\s+obj/.test(at) && re.test(at.split(/stream\r?\n/)[0])) return true; }
+  return re.test(latin1(bytes.subarray(Math.max(0, n - 65536), n)));
+}
+const pdfPwErr = () => { const e = new Error('mot de passe'); e.userMsg = 'Mot de passe du PDF incorrect.'; return e; };
+// Droits accordés par le mot de passe saisi (le mot de passe du propriétaire donne tous les droits)
+async function pdfRights(bytes = PDFV.bytes, pw = PDFV.pw) {
+  const C = PDFV.rightsC; if (C && C.bytes === bytes && C.pw === pw) return C.r;
+  const res = await qpdfRun(['--show-encryption', '--password=' + (pw || ''), '/in.pdf'], { '/in.pdf': bytes }, null);
+  const t = res.stdout + '\n' + res.stderr;
+  if (res.code === -1) { const e = new Error('qpdf'); e.userMsg = 'Le module des PDF protégés n\'a pas pu démarrer.'; throw e; }
+  if (/not encrypted/i.test(t)) return { enc: false, owner: true, other: true, assembly: true, forms: true, annot: true, copy: true, print: true };
+  if (/incorrect password|invalid password/i.test(t)) throw pdfPwErr();
+  const owner = /Supplied password is owner password/i.test(t), ok = k => owner || new RegExp(k + ':\\s*allowed', 'i').test(t);
+  const r = { enc: true, owner, other: ok('modify other'), assembly: ok('modify document assembly'), forms: ok('modify forms'), annot: ok('modify annotations'), copy: ok('extract for any purpose'), print: ok('print low resolution'), user: (/User password = (.*)/.exec(t) || [])[1] || '' };
+  PDFV.rightsC = { bytes, pw, r };
+  return r;
+}
+// Déchiffre (pour modifier) en vérifiant que le propriétaire l'autorise ; need : 'other' (contenu), 'assembly' (pages)
+async function pdfPlainBytes(need = 'other') {
+  const bytes = PDFV.bytes;
+  if (!PDFV.enc) return bytes;
+  const r = await pdfRights(bytes, PDFV.pw);
+  if (!r[need]) {
+    const e = new Error('droits'); e.userMsg = 'Le propriétaire de ce PDF n\'autorise pas ' + (need === 'assembly' ? 'la réorganisation de ses pages' : 'sa modification') + '. Si vous avez son mot de passe de propriétaire : Outils › Saisir le mot de passe du propriétaire.'; throw e;
+  }
+  const res = await qpdfRun(['--decrypt', '--password=' + (PDFV.pw || ''), '/in.pdf', '/out.pdf'], { '/in.pdf': bytes });
+  if (!res.out || (res.code !== 0 && res.code !== 3)) { if (/password/i.test(res.stderr)) throw pdfPwErr(); const e = new Error(res.stderr || 'qpdf'); e.userMsg = 'Ce PDF protégé n\'a pas pu être déchiffré.'; throw e; }
+  return res.out;
+}
+// Remet la protection d'origine (mêmes mots de passe, mêmes droits) sur une version modifiée
+async function pdfReprotect(plain, orig = PDFV.bytes, pw = PDFV.pw) {
+  if (!pdfIsEnc(orig)) return plain;
+  const res = await qpdfRun(['--copy-encryption=/orig.pdf', '--encryption-file-password=' + (pw || ''), '/in.pdf', '/out.pdf'], { '/in.pdf': plain, '/orig.pdf': orig });
+  if (!res.out || (res.code !== 0 && res.code !== 3)) { const e = new Error(res.stderr || 'qpdf'); e.userMsg = 'La protection du PDF n\'a pas pu être remise : rien n\'a été enregistré.'; throw e; }
+  return res.out;
+}
+// Fenêtre « mot de passe » (window.prompt n'existe pas dans l'appli de bureau)
+function askPdfPassword(title, note, again) {
+  return new Promise(res => {
+    let ov = $('#pwOv');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'pwOv'; ov.className = 'pw-ov'; ov.innerHTML = '<div class="fpop" role="dialog" aria-modal="true"></div>'; document.body.appendChild(ov); }
+    const p = ov.firstChild;
+    p.innerHTML = `<form class="dlg-in" id="pwForm"><div class="fp-h"><b>${esc(title)}</b><button type="button" class="xbtn" data-pwx aria-label="Fermer">${ic('close')}</button></div>
+      ${note ? `<p class="dlg-note">${note}</p>` : ''}${again ? '<p class="dlg-note pw-bad">Mot de passe incorrect. Réessayez.</p>' : ''}
+      <label class="dlg-f"><span>Mot de passe</span><input id="pwIn" type="password" autocomplete="off" spellcheck="false"></label>
+      <div class="fp-acts"><button class="pbtn" type="submit">Ouvrir</button><button class="pbtn ghost" type="button" data-pwx>Annuler</button></div></form>`;
+    ov.hidden = false;
+    const done = v => { ov.hidden = true; p.innerHTML = ''; res(v); };
+    $('#pwForm').addEventListener('submit', e => { e.preventDefault(); done($('#pwIn').value); });
+    p.querySelectorAll('[data-pwx]').forEach(b => b.addEventListener('click', () => done(null)));
+    setTimeout(() => $('#pwIn').focus(), 30);
+  });
+}
+// Protéger : mot de passe pour ouvrir, et au choix restrictions (modification, copie, impression)
+function openPdfProtect() {
+  if (state.view !== 'pdfv') return;
+  const p = $('#pdfDlg');
+  p.innerHTML = `<form class="dlg-in" id="ppForm"><div class="fp-h"><b>${PDFV.enc ? 'Changer la protection du PDF' : 'Protéger le PDF par un mot de passe'}</b><button type="button" class="xbtn" data-dx aria-label="Fermer">${ic('close')}</button></div>
+    <p class="dlg-note">Le PDF est chiffré (AES 256 bits) : sans le mot de passe, personne ne peut l'ouvrir. Grimoire ne garde pas le mot de passe : notez-le, il n'existe aucun moyen de le retrouver.</p>
+    <label class="dlg-f"><span>Mot de passe pour ouvrir</span><input id="ppU" type="password" autocomplete="new-password" required></label>
+    <label class="dlg-f"><span>Confirmer</span><input id="ppU2" type="password" autocomplete="new-password" required></label>
+    <label class="fp-it"><input type="checkbox" id="ppR"><span>Empêcher aussi la modification et la copie du texte</span></label>
+    <div id="ppOwn" hidden><label class="fp-it"><input type="checkbox" id="ppNoPrint"><span>Empêcher l'impression</span></label>
+    <label class="dlg-f"><span>Mot de passe du propriétaire (pour lever ces interdictions)</span><input id="ppO" type="password" autocomplete="new-password"></label></div>
+    <div class="fp-acts"><button class="pbtn" type="submit">Protéger</button></div></form>`;
+  p.hidden = false;
+  $('#ppR').addEventListener('change', e => { $('#ppOwn').hidden = !e.target.checked; });
+  setTimeout(() => $('#ppU').focus(), 30);
+  $('#ppForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const u = $('#ppU').value, r = $('#ppR').checked, o = r ? $('#ppO').value : '';
+    if (!u) return toast('Choisissez un mot de passe.', true);
+    if (u !== $('#ppU2').value) return toast('Les deux mots de passe ne sont pas identiques.', true);
+    if (r && (!o || o === u)) return toast('Choisissez un mot de passe du propriétaire, différent du mot de passe pour ouvrir.', true);
+    const owner = r ? o : u + '\u0001' + uid(); // sans restriction : mot de passe du propriétaire au hasard
+    const args = ['--encrypt', '--user-password=' + u, '--owner-password=' + owner, '--bits=256'];
+    if (r) args.push('--modify=none', '--extract=n', ...($('#ppNoPrint').checked ? ['--print=none'] : []));
+    args.push('--', '/in.pdf', '/out.pdf');
+    p.hidden = true;
+    try {
+      const plain = await pdfPlainBytes('other');
+      const res = await qpdfRun(args, { '/in.pdf': plain });
+      if (!res.out || (res.code !== 0 && res.code !== 3)) throw Object.assign(new Error(res.stderr), { userMsg: 'Protection impossible : ' + (res.stderr || 'erreur de qpdf').split('\n')[0] });
+      await pdfReplaceBytes(res.out, u);
+      toast('PDF protégé par mot de passe. Enregistrez-le (Ctrl+S) pour mettre à jour le fichier de l\'ordinateur.');
+    } catch (err) { console.warn(err); toast(err.userMsg || 'Protection impossible.', true); }
+  });
+}
+async function pdfUnprotect() {
+  if (state.view !== 'pdfv' || !PDFV.enc) return toast('Ce PDF n\'est pas protégé.');
+  try {
+    const r = await pdfRights();
+    if (!r.owner && !(r.other && r.assembly && r.copy)) return toast('Seul le mot de passe du propriétaire permet de retirer cette protection (Outils › Saisir le mot de passe du propriétaire).', true);
+    const res = await qpdfRun(['--decrypt', '--password=' + (PDFV.pw || ''), '/in.pdf', '/out.pdf'], { '/in.pdf': PDFV.bytes });
+    if (!res.out) throw new Error(res.stderr);
+    await pdfReplaceBytes(res.out, null);
+    toast('Mot de passe retiré : le PDF s\'ouvre maintenant sans mot de passe.');
+  } catch (err) { console.warn(err); toast(err.userMsg || 'Le mot de passe n\'a pas pu être retiré.', true); }
+}
+async function pdfOwnerPassword() {
+  if (state.view !== 'pdfv' || !PDFV.enc) return toast('Ce PDF n\'est pas protégé.');
+  let again = false;
+  for (;;) {
+    const pw = await askPdfPassword('Mot de passe du propriétaire', 'Il lève les interdictions posées par l\'auteur du PDF (modification, copie, impression).', again);
+    if (pw == null) return;
+    try { const r = await pdfRights(PDFV.bytes, pw); if (!r.owner) { again = true; continue; } PDFV.pw = pw; PDF_PW.set(state.cur.pdfId, pw); toast('Mot de passe du propriétaire accepté : toutes les modifications sont permises.'); renderMenubar(); return; }
+    catch (e) { if (e.userMsg && /incorrect/i.test(e.userMsg)) { again = true; continue; } toast(e.userMsg || 'Vérification impossible.', true); return; }
+  }
+}
+// PDF protégé ajouté à un autre (fusion, insertion) : mot de passe demandé, puis copie déchiffrée
+async function pdfDecryptFile(raw, name) {
+  let pw = '', again = false;
+  for (let k = 0; k < 8; k++) {
+    let r = null;
+    try { r = await pdfRights(raw, pw); } catch (e) { if (!/incorrect/i.test(e.userMsg || '')) throw e; }
+    if (r) {
+      if (!r.assembly) { const e = new Error('droits'); e.userMsg = 'son propriétaire n\'autorise pas l\'extraction de ses pages.'; throw e; }
+      const res = await qpdfRun(['--decrypt', '--password=' + pw, '/in.pdf', '/out.pdf'], { '/in.pdf': raw });
+      if (res.out && (res.code === 0 || res.code === 3)) return res.out;
+      const e = new Error(res.stderr); e.userMsg = 'déchiffrement impossible.'; throw e;
+    }
+    if (k) again = true;
+    pw = await askPdfPassword(`« ${name} » est protégé`, 'Mot de passe pour l\'ouvrir :', again);
+    if (pw == null) return null;
+  }
+  return null;
+}
+// Nouveau contenu du fichier (protégé ou non) : annulable, enregistré, rouvert
+async function pdfReplaceBytes(bytes, pw) {
+  const cur = state.cur;
+  pdfHist(); PDFV.hist[PDFV.hist.length - 1].bytes = PDFV.bytes; PDFV.hist[PDFV.hist.length - 1].pw = PDFV.pw;
+  PDFV.bytes = bytes; PDFV.pw = pw; PDFV.rightsC = null;
+  if (pw != null) PDF_PW.set(cur.pdfId, pw); else PDF_PW.delete(cur.pdfId);
+  await Store.putBlob(cur.pdfId, bytes);
+  await loadPdfDoc(pdfCurrentPage());
+  markFileDirty(); scheduleSave(); renderMenubar();
+}
+
+/* --- Reconnaissance du texte (OCR) : tesseract.js (Apache 2.0), moteur LSTM et modèle français, sur l'appareil.
+   Pour un PDF scanné, le texte reconnu est ajouté en couche invisible sous l'image de chaque page :
+   le PDF garde son aspect, mais devient cherchable, copiable, lisible par Plume et convertible en document. */
+const OCR = { w: null, init: null, prog: null, cancel: false, running: false };
+const absUrl = u => new URL(u, location.href).href;
+async function ocrWorker() {
+  if (OCR.w) return OCR.w;
+  if (!OCR.init) OCR.init = (async () => {
+    await loadScript(LIB.tess);
+    OCR.w = await window.Tesseract.createWorker('fra', 1, {
+      workerPath: absUrl(LIB.tessWorker), corePath: absUrl(LIB.tessCore), langPath: absUrl(LIB.tessLang),
+      gzip: true, cacheMethod: 'none', workerBlobURL: false,
+      logger: m => { if (OCR.prog && m && typeof m.progress === 'number') OCR.prog(m); }
+    });
+    return OCR.w;
+  })().catch(e => { OCR.init = null; throw e; });
+  return OCR.init;
+}
+// Une image (canvas) → mots avec leur position (pixels de l'image) et lignes
+async function ocrImage(canvas) {
+  const w = await ocrWorker();
+  const { data } = await w.recognize(canvas, {}, { blocks: true, text: true });
+  const lines = [];
+  (data.blocks || []).forEach(bl => (bl.paragraphs || []).forEach((pa, pi) => (pa.lines || []).forEach((ln, li) => {
+    const words = (ln.words || []).filter(wd => wd.text && wd.text.trim() && wd.confidence > 20);
+    if (words.length) lines.push({ words, bbox: ln.bbox, base: ln.baseline, par: pa, first: li === 0 });
+  })));
+  return { text: data.text || '', lines, blocks: data.blocks || [] };
+}
+// Rendu d'une page PDF pour l'OCR (environ 300 points par pouce, limité pour la mémoire)
+async function ocrRenderPage(page) {
+  const base = page.getViewport({ scale: 1, rotation: page.rotate });
+  // résolution de l'image scannée elle-même (agrandir une image floute les lettres) ; 300 points par pouce sinon
+  let dpi = 300;
+  try {
+    const L = window.pdfjsLib, ol = await page.getOperatorList({ annotationMode: L.AnnotationMode.DISABLE });
+    let best = 0;
+    ol.fnArray.forEach((fn, i) => { if (fn === L.OPS.paintImageXObject || fn === L.OPS.paintInlineImageXObject) { const a = ol.argsArray[i]; const w = fn === L.OPS.paintImageXObject ? a[1] : a[0] && a[0].width; if (w > best) best = w; } });
+    if (best > 400) dpi = Math.max(150, Math.min(400, best / (page.view[2] - page.view[0]) * 72)); // l'image du scan couvre la largeur de la page
+  } catch {}
+  const k = Math.min(dpi / 72, 4200 / Math.max(base.width, base.height));
+  const vp = page.getViewport({ scale: k, rotation: page.rotate });
+  const cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+  const g = cv.getContext('2d', { alpha: false }); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);
+  await page.render({ canvasContext: g, viewport: vp }).promise;
+  return { cv, vp };
+}
+async function pageHasText(page) {
+  try { const tc = await page.getTextContent(); return tc.items.reduce((n, it) => n + (it.str ? it.str.replace(/\s/g, '').length : 0), 0) >= 12; } catch { return false; }
+}
+// Texte reconnu des premières pages d'un PDF (sans le modifier) : Plume, factures scannées
+async function ocrPdfText(doc, maxPages = 2, onPage) {
+  const out = [];
+  for (let i = 0; i < Math.min(doc.numPages, maxPages); i++) {
+    if (onPage) onPage(i);
+    const page = await doc.getPage(i + 1), { cv } = await ocrRenderPage(page);
+    try { out.push((await ocrImage(cv)).text); } finally { cv.width = cv.height = 0; }
+  }
+  return out.join('\n');
+}
+// Barre de progression (avec Annuler) dans la vue PDF
+function ocrBar(msg, pct) {
+  let b = $('#ocrBar');
+  if (msg == null) { if (b) b.hidden = true; return; }
+  if (!b) {
+    b = document.createElement('div'); b.id = 'ocrBar'; b.className = 'ocr-bar'; b.setAttribute('role', 'status');
+    b.innerHTML = '<span class="ocr-t"></span><span class="ocr-p"><i></i></span><button type="button" class="pbtn ghost">Annuler</button>';
+    b.querySelector('button').addEventListener('click', () => { OCR.cancel = true; b.querySelector('.ocr-t').textContent = 'Arrêt après la page en cours…'; });
+    document.body.appendChild(b);
+  }
+  b.hidden = false; b.querySelector('.ocr-t').textContent = msg; b.querySelector('.ocr-p i').style.width = Math.round((pct || 0) * 100) + '%';
+}
+// Couche de texte invisible : un mot = une suite de glyphes posée sur la ligne de base, étirée à la largeur du mot
+function ocrTextOps(PDFLib, font, fontKey, lines, vp) {
+  const L = PDFLib, ops = [L.pushGraphicsState(), L.beginText(), L.setTextRenderingMode(L.TextRenderingMode.Invisible)];
+  const P = (x, y) => vp.convertToPdfPoint(x, y);
+  lines.forEach(ln => {
+    const b = ln.base && Number.isFinite(ln.base.x0) && ln.base.x1 > ln.base.x0 ? ln.base : { x0: ln.bbox.x0, y0: ln.bbox.y1, x1: ln.bbox.x1, y1: ln.bbox.y1 };
+    const yAt = x => b.y0 + (b.y1 - b.y0) * (x - b.x0) / ((b.x1 - b.x0) || 1);
+    const hPx = Math.max(4, (ln.bbox.y1 - ln.bbox.y0) * 0.82);
+    ln.words.forEach((wd, k) => {
+      const txt = winAnsiSafe(font, wd.text.trim()); if (!txt) return;
+      const p0 = P(wd.bbox.x0, yAt(wd.bbox.x0)), p1 = P(wd.bbox.x1, yAt(wd.bbox.x1)), pu = P(wd.bbox.x0, yAt(wd.bbox.x0) - hPx);
+      const len = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), size = Math.hypot(pu[0] - p0[0], pu[1] - p0[1]);
+      if (!(len > 0.5 && size > 1)) return;
+      const dx = (p1[0] - p0[0]) / len, dy = (p1[1] - p0[1]) / len;
+      const natural = font.widthOfTextAtSize(txt, size) || 1, tz = Math.max(10, Math.min(1000, 100 * len / natural));
+      const s = txt + (k < ln.words.length - 1 ? ' ' : '');
+      ops.push(L.setFontAndSize(fontKey, size), L.setCharacterSqueeze(tz), L.setTextMatrix(dx, dy, -dy, dx, p0[0], p0[1]), L.showText(font.encodeText(s)));
+    });
+  });
+  ops.push(L.endText(), L.popGraphicsState());
+  return ops;
+}
+// Le contenu d'origine est mis entre q … Q : ce qu'on ajoute après n'hérite pas de ses transformations
+function pageWrapContent(pdf, PDFLib, page) {
+  if (page.__wrapped) return; page.__wrapped = true;
+  const ctx = pdf.context, N = PDFLib.PDFName.of('Contents'), c = page.node.get(N);
+  if (!c) return;
+  if (!(ctx.lookup(c) instanceof PDFLib.PDFArray)) page.node.set(N, ctx.obj([c]));
+  page.node.wrapContentStreams(ctx.register(ctx.stream('q\n')), ctx.register(ctx.stream('\nQ\n')));
+}
+async function pdfOcr() {
+  if (state.view !== 'pdfv' || OCR.running) return;
+  const cur = state.cur, src = PDFV.srcPages;
+  ocrBar('Recherche des pages sans texte…', 0);
+  const todo = [];
+  for (let s = 0; s < src.length; s++) if (!(await pageHasText(src[s].page))) todo.push(s);
+  if (!todo.length) { ocrBar(null); return toast('Toutes les pages contiennent déjà du texte : rien à reconnaître.'); }
+  OCR.running = true; OCR.cancel = false;
+  const found = new Map(), t0 = Date.now();
+  try {
+    ocrBar('Préparation de la reconnaissance du texte (première fois : téléchargement d\'environ 5 Mo)…', 0);
+    await ocrWorker();
+    for (const [n, s] of todo.entries()) {
+      if (OCR.cancel || state.cur !== cur) break;
+      const lbl = `Reconnaissance du texte : page ${s + 1} (${n + 1} sur ${todo.length})`;
+      ocrBar(lbl, n / todo.length);
+      OCR.prog = m => { if (m.status === 'recognizing text') ocrBar(lbl, (n + m.progress) / todo.length); };
+      const { cv, vp } = await ocrRenderPage(src[s].page);
+      try { const r = await ocrImage(cv); if (r.lines.length) found.set(s, { lines: r.lines, vp }); } finally { cv.width = cv.height = 0; }
+    }
+  } catch (e) { console.warn(e); OCR.running = false; OCR.prog = null; ocrBar(null); return toast('La reconnaissance du texte n\'a pas pu démarrer (fichiers de l\'OCR introuvables).', true); }
+  OCR.prog = null;
+  if (state.cur !== cur) { OCR.running = false; ocrBar(null); return; }
+  if (!found.size) { OCR.running = false; ocrBar(null); return toast(OCR.cancel ? 'Reconnaissance arrêtée.' : 'Aucun texte reconnu sur ces pages.', !OCR.cancel); }
+  try {
+    ocrBar('Ajout du texte reconnu au PDF…', 1);
+    const PDFLib = await ensurePdfLib();
+    const pdf = await PDFLib.PDFDocument.load(await pdfPlainBytes('other'));
+    const font = await pdf.embedFont(PDFLib.StandardFonts.Helvetica), pages = pdf.getPages();
+    let words = 0;
+    for (const [s, f] of found) {
+      const pg = pages[s]; if (!pg) continue;
+      pageWrapContent(pdf, PDFLib, pg);
+      const key = pg.node.newFontDictionary('GrOCR', font.ref);
+      pg.pushOperators(...ocrTextOps(PDFLib, font, key, f.lines, f.vp));
+      f.lines.forEach(l => { words += l.words.length; });
+    }
+    const out = await pdfReprotect(await pdf.save({ useObjectStreams: true }));
+    cur.textDone = false;
+    await pdfReplaceBytes(out, PDFV.pw);
+    const sec = Math.round((Date.now() - t0) / 1000);
+    toast(`Texte reconnu sur ${found.size} page${found.size > 1 ? 's' : ''} (${words.toLocaleString('fr-FR')} mots, ${sec} s) : le PDF est maintenant cherchable et copiable.${OCR.cancel ? ' (arrêté avant la fin)' : ''}`);
+    setTimeout(async () => { try { const t = await pdfAllText(PDFV.src); if (state.cur === cur) { cur.text = t; cur.textDone = true; scheduleSave(); } } catch {} }, 300);
+  } catch (e) { console.warn(e); toast(e.userMsg || 'Le texte reconnu n\'a pas pu être ajouté au PDF.', true); }
+  finally { OCR.running = false; ocrBar(null); }
+}
+// Texte d'une photo (lettre, page de livre…) inséré dans le document à l'endroit du curseur
+async function insertOcrImage() {
+  if (state.view !== 'writer') return;
+  const at = caretNow();
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+  inp.addEventListener('change', async () => {
+    const f = inp.files[0]; if (!f) return;
+    toast('Reconnaissance du texte de l\'image…');
+    try {
+      const url = URL.createObjectURL(f), [w, h, im] = await imgSize(url);
+      if (!im) throw new Error('image');
+      const k = Math.min(1, 4000 / Math.max(w, h)), cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+      const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.drawImage(im, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
+      const r = await ocrImage(cv); cv.width = cv.height = 0;
+      const paras = [];
+      r.blocks.forEach(bl => (bl.paragraphs || []).forEach(pa => { const t = (pa.lines || []).map(l => (l.words || []).filter(x => x.confidence > 20).map(x => x.text).join(' ')).join(' ').replace(/\s+/g, ' ').trim(); if (t) paras.push(t); }));
+      if (!paras.length) return toast('Aucun texte reconnu sur cette image.', true);
+      caretBack(at);
+      exec('insertHTML', paras.map(t => `<p>${esc(t)}</p>`).join(''));
+      toast(`${paras.length} paragraphe${paras.length > 1 ? 's' : ''} reconnu${paras.length > 1 ? 's' : ''} : relisez-les, la reconnaissance peut se tromper.`);
+    } catch (e) { console.warn(e); toast('La reconnaissance du texte n\'a pas pu se faire.', true); }
+  });
+  inp.click();
+}
+
+/* --- Modifier le texte d'un PDF.
+   Le flux de contenu de la page est rejoué pour situer chaque glyphe (position, police, code) ; son texte (Unicode)
+   vient de PDF.js, qui a déjà décodé les polices (correspondance vérifiée opération par opération, code par code).
+   Modifier un passage : ses glyphes sont réellement retirés du flux (remplacés par un espace de même largeur, la suite
+   ne bouge pas), puis le nouveau texte est écrit à leur place — avec la police d'origine si elle contient tous les
+   caractères voulus, sinon avec la police standard la plus proche — et la fin de la ligne est décalée d'autant. */
+const mxm = (a, b) => [a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3], a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3], a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]];
+// Lecture d'un flux de contenu : opérations avec leurs opérandes et leur place dans le texte
+function csParse(src) {
+  const n = src.length, ops = [];
+  let i = 0, args = [], aStart = -1;
+  const ws = c => c === ' ' || c === '\n' || c === '\r' || c === '\t' || c === '\f' || c === '\0';
+  const delim = c => '()<>[]{}/%'.includes(c);
+  const skip = () => { for (;;) { while (i < n && ws(src[i])) i++; if (src[i] === '%') { while (i < n && src[i] !== '\n' && src[i] !== '\r') i++; } else break; } };
+  function str() {
+    let out = '', depth = 1; i++;
+    while (i < n) {
+      const c = src[i++];
+      if (c === '\\') {
+        const d = src[i++];
+        if (d === 'n') out += '\n'; else if (d === 'r') out += '\r'; else if (d === 't') out += '\t'; else if (d === 'b') out += '\b'; else if (d === 'f') out += '\f';
+        else if (d === '\r') { if (src[i] === '\n') i++; } else if (d === '\n') {}
+        else if (d >= '0' && d <= '7') { let o = d; for (let k = 0; k < 2 && src[i] >= '0' && src[i] <= '7'; k++) o += src[i++]; out += String.fromCharCode(parseInt(o, 8) & 255); }
+        else out += d;
+      } else if (c === '(') { depth++; out += c; } else if (c === ')') { if (--depth === 0) break; out += c; } else out += c;
+    }
+    return { t: 's', v: out };
+  }
+  function hex() {
+    let h = ''; i++;
+    while (i < n && src[i] !== '>') { if (!ws(src[i])) h += src[i]; i++; }
+    i++; if (h.length % 2) h += '0';
+    let out = ''; for (let k = 0; k < h.length; k += 2) out += String.fromCharCode(parseInt(h.substr(k, 2), 16) || 0);
+    return { t: 's', v: out };
+  }
+  function val() {
+    skip();
+    const c = src[i];
+    if (c === '(') return str();
+    if (c === '<') { if (src[i + 1] === '<') { i += 2; const d = {}; for (;;) { skip(); if (i >= n) break; if (src[i] === '>' && src[i + 1] === '>') { i += 2; break; } const k = val(); const v = val(); if (k && k.t === 'name') d[k.v] = v; else if (!k) break; } return { t: 'd', v: d }; } return hex(); }
+    if (c === '[') { i++; const a = []; for (;;) { skip(); if (i >= n) break; if (src[i] === ']') { i++; break; } const v = val(); if (!v) break; a.push(v); } return { t: 'a', v: a }; }
+    if (c === '/') { let j = i + 1; while (j < n && !ws(src[j]) && !delim(src[j])) j++; const v = src.slice(i + 1, j); i = j; return { t: 'name', v }; }
+    if (c === ']' || c === '>' || c === ')' || c === '{' || c === '}') { i++; return null; }
+    let j = i; while (j < n && !ws(src[j]) && !delim(src[j])) j++;
+    const w = src.slice(i, j); i = j;
+    if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(w)) return { t: 'n', v: parseFloat(w) };
+    if (w === 'true' || w === 'false') return { t: 'b', v: w === 'true' };
+    if (w === 'null') return { t: 'null' };
+    return { t: 'op', v: w };
+  }
+  for (;;) {
+    skip(); if (i >= n) break;
+    const at = i, v = val();
+    if (!v) continue;
+    if (v.t !== 'op') { if (!args.length) aStart = at; args.push(v); continue; }
+    if (v.v === 'BI') { // image en ligne : données binaires jusqu'à EI
+      const id = src.indexOf('ID', i); let e = id < 0 ? n : id + 3;
+      const re = /\sEI(?=[\s\/\[<(%]|$)/g; re.lastIndex = e; const m = re.exec(src); e = m ? m.index + m[0].length : n;
+      ops.push({ op: 'BI', args: [], s: args.length ? aStart : at, e }); i = e; args = []; continue;
+    }
+    ops.push({ op: v.v, args, s: args.length ? aStart : at, e: i }); args = [];
+  }
+  return ops;
+}
+const csNum = x => { const r = Math.round(x * 10000) / 10000; return Object.is(r, -0) ? '0' : String(r); };
+const csHex = s => '<' + [...s].map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('') + '>';
+const csName = s => '/' + s.replace(/[^!-~]|[()<>\[\]{}\/%#]/g, c => '#' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+// Polices de la page
+function pdfFontInfo(PDFLib, page, name, cache) {
+  if (cache.has(name)) return cache.get(name);
+  const N = PDFLib.PDFName.of, D = PDFLib.PDFDict;
+  let info = { name, ok: false };
+  try {
+    const res = page.node.Resources(), fonts = res && res.lookupMaybe(N('Font'), D), fd = fonts && fonts.lookupMaybe(N(name), D);
+    if (fd) {
+      const nm = k => { const v = fd.lookupMaybe(N(k), PDFLib.PDFName); return v ? v.decodeText() : ''; };
+      const sub = nm('Subtype'), base = nm('BaseFont').replace(/^[A-Z]{6}\+/, ''), enc = nm('Encoding');
+      // codage WinAnsi sans « Differences » : tous les caractères latins sont disponibles
+      let winAnsi = enc === 'WinAnsiEncoding';
+      if (!enc) { const ed = fd.lookupMaybe(N('Encoding'), D); if (ed) { const be = ed.lookupMaybe(N('BaseEncoding'), PDFLib.PDFName); winAnsi = !!be && be.decodeText() === 'WinAnsiEncoding' && !ed.get(N('Differences')); } }
+      let desc = fd.lookupMaybe(N('FontDescriptor'), D);
+      if (sub === 'Type0') { try { const df = fd.lookup(N('DescendantFonts'), PDFLib.PDFArray).lookup(0, D); desc = df.lookupMaybe(N('FontDescriptor'), D); } catch {} }
+      let flags = 0; try { flags = desc ? desc.lookup(N('Flags'), PDFLib.PDFNumber).asNumber() : 0; } catch {}
+      info = { name, ok: sub !== 'Type3' && !/-V$/.test(enc), sub, base, composite: sub === 'Type0', flags, std: !desc && /^(Helvetica|Times|Courier|Arial)/i.test(base) };
+      info.ansi = info.std && winAnsi && sub !== 'Type0'; // police standard non incorporée : on peut écrire n'importe quel caractère WinAnsi
+    }
+  } catch (e) { console.warn('police', name, e); }
+  cache.set(name, info);
+  return info;
+}
+// Texte de chaque glyphe : correspondance avec la liste d'opérations de PDF.js
+async function pdfjsTextShows(jsPage) {
+  const L = window.pdfjsLib, ol = await jsPage.getOperatorList({ annotationMode: L.AnnotationMode.DISABLE });
+  const out = []; let depth = 0;
+  for (let i = 0; i < ol.fnArray.length; i++) {
+    const fn = ol.fnArray[i];
+    if (fn === L.OPS.paintFormXObjectBegin) depth++;
+    else if (fn === L.OPS.paintFormXObjectEnd) depth--;
+    else if (!depth && (fn === L.OPS.showText || fn === L.OPS.showSpacedText)) out.push(ol.argsArray[i][0]);
+  }
+  return out;
+}
+function pageContentSrc(pdf, PDFLib, page) {
+  const ctx = pdf.context, c = page.node.Contents();
+  const list = !c ? [] : c instanceof PDFLib.PDFArray ? c.asArray().map(r => ctx.lookup(r)) : [c];
+  return list.map(st => latin1(st instanceof PDFLib.PDFRawStream ? PDFLib.decodePDFRawStream(st).decode() : st.getContents())).join('\n');
+}
+// Modèle de la page : glyphes situés, puis « morceaux de ligne » (suites de glyphes alignés, sans grand blanc)
+async function pdfGlyphModel(pdf, PDFLib, s) {
+  const page = pdf.getPage(s), src = pageContentSrc(pdf, PDFLib, page), ops = csParse(src);
+  const shows = await pdfjsTextShows(PDFV.srcPages[s].page);
+  const fonts = new Map(), glyphs = [];
+  let gs = { ctm: [1, 0, 0, 1, 0, 0], font: null, size: 0, Tc: 0, Tw: 0, Th: 1, TL: 0, Ts: 0, Tr: 0, fill: [0, 0, 0], cs: 1 };
+  const stack = []; let Tm = [1, 0, 0, 1, 0, 0], Tlm = [1, 0, 0, 1, 0, 0], k = 0, bad = null;
+  const td = (x, y) => { Tlm = mxm([1, 0, 0, 1, x, y], Tlm); Tm = Tlm.slice(); };
+  const num = a => a && a.t === 'n' ? a.v : 0;
+  const color = (a, n) => { const v = a.filter(x => x.t === 'n').map(x => x.v); if (n === 1 || v.length === 1) gs.fill = [v[0], v[0], v[0]]; else if (n === 3 || v.length === 3) gs.fill = v.slice(0, 3); else if (n === 4 || v.length === 4) { const [c, m, y, kk] = v; gs.fill = [(1 - c) * (1 - kk), (1 - m) * (1 - kk), (1 - y) * (1 - kk)]; } };
+  ops.forEach((o, oi) => {
+    const A = o.args;
+    switch (o.op) {
+      case 'q': stack.push({ ...gs, ctm: gs.ctm.slice(), fill: gs.fill.slice() }); break;
+      case 'Q': if (stack.length) gs = stack.pop(); break;
+      case 'cm': if (A.length >= 6) gs.ctm = mxm(A.slice(0, 6).map(num), gs.ctm); break;
+      case 'BT': Tm = [1, 0, 0, 1, 0, 0]; Tlm = Tm.slice(); break;
+      case 'Tf': gs.font = A[0] && A[0].t === 'name' ? A[0].v : null; gs.size = num(A[1]); break;
+      case 'Tc': gs.Tc = num(A[0]); break; case 'Tw': gs.Tw = num(A[0]); break; case 'Tz': gs.Th = num(A[0]) / 100; break;
+      case 'TL': gs.TL = num(A[0]); break; case 'Ts': gs.Ts = num(A[0]); break; case 'Tr': gs.Tr = num(A[0]); break;
+      case 'Td': td(num(A[0]), num(A[1])); break;
+      case 'TD': gs.TL = -num(A[1]); td(num(A[0]), num(A[1])); break;
+      case 'Tm': if (A.length >= 6) { Tm = A.slice(0, 6).map(num); Tlm = Tm.slice(); } break;
+      case 'T*': td(0, -gs.TL); break;
+      case 'g': color(A, 1); break; case 'rg': color(A, 3); break; case 'k': color(A, 4); break;
+      case 'cs': { const nm = A[0] && A[0].v; gs.cs = nm === 'DeviceGray' ? 1 : nm === 'DeviceRGB' ? 3 : nm === 'DeviceCMYK' ? 4 : 0; break; }
+      case 'sc': case 'scn': if (gs.cs) color(A, gs.cs); else gs.fill = [0, 0, 0]; break;
+      case "'": case '"': case 'Tj': case 'TJ': {
+        if (o.op === '"') { gs.Tw = num(A[0]); gs.Tc = num(A[1]); }
+        if (o.op === "'" || o.op === '"') td(0, -gs.TL);
+        const jsArr = shows[k], items = o.op === 'TJ' ? (A[0] && A[0].t === 'a' ? A[0].v : []) : [A[A.length - 1]];
+        if (!jsArr) { bad = bad || 'opérations'; k++; break; }
+        const fi = gs.font ? pdfFontInfo(PDFLib, page, gs.font, fonts) : { ok: false };
+        const jsG = jsArr.filter(x => x && typeof x === 'object');
+        let gi = 0; const myCodes = [];
+        // découpage des chaînes en codes de caractère, vérifié avec les codes lus par PDF.js
+        items.forEach((it, ii) => {
+          if (!it || it.t !== 's') return;
+          let p = 0; const b = it.v;
+          while (p < b.length) {
+            const G = jsG[gi]; if (!G) { bad = bad || 'glyphes'; break; }
+            let len = 0;
+            for (const L of fi.composite ? [2, 1, 3, 4] : [1, 2, 3, 4]) { let v = 0; for (let q = 0; q < L && p + q < b.length; q++) v = v * 256 + b.charCodeAt(p + q); if (p + L <= b.length && v === G.originalCharCode) { len = L; break; } }
+            if (!len) { bad = bad || 'codes'; break; }
+            myCodes.push({ ii, code: b.substr(p, len), G }); p += len; gi++;
+          }
+        });
+        if (gi !== jsG.length) bad = bad || 'nombre de glyphes';
+        // positions
+        const Tfs = gs.size, Th = gs.Th;
+        let ci = 0;
+        items.forEach((it, ii) => {
+          if (it && it.t === 'n') { Tm = mxm([1, 0, 0, 1, -it.v / 1000 * Tfs * Th, 0], Tm); return; }
+          while (ci < myCodes.length && myCodes[ci].ii === ii) {
+            const c = myCodes[ci++], w0 = (c.G.width || 0) / 1000;
+            const M = mxm(Tm, gs.ctm), T = mxm([Tfs * Th, 0, 0, Tfs, 0, gs.Ts], M);
+            const sp = c.code.length === 1 && c.code === ' ' ? gs.Tw : 0;
+            const tx = (w0 * Tfs + gs.Tc + sp) * Th, ux = Math.hypot(M[0], M[1]) || 1, hv = Math.hypot(T[2], T[3]) || 1;
+            glyphs.push({ op: oi, ii, code: c.code, uni: c.G.unicode || '', isSpace: !!c.G.isSpace || c.G.unicode === ' ', x: T[4], y: T[5], u: [M[0] / ux, M[1] / ux], v: [T[2] / hv, T[3] / hv], adv: tx * ux, h: hv, w0, font: gs.font, fi, Tfs, Th, Tc: gs.Tc, Tw: gs.Tw, M: M.slice(0, 4), fill: gs.fill.slice(), Tr: gs.Tr });
+            Tm = mxm([1, 0, 0, 1, tx, 0], Tm);
+          }
+        });
+        k++;
+        break;
+      }
+    }
+  });
+  if (k !== shows.length) bad = bad || 'nombre d\'opérations';
+  return { s, src, ops, glyphs, fonts, bad, runs: bad ? [] : pdfRuns(glyphs) };
+}
+const along = (g, o, u) => (g.x - o[0]) * u[0] + (g.y - o[1]) * u[1];
+function pdfRuns(glyphs) {
+  const runs = []; let R = null;
+  glyphs.forEach((g, gi) => {
+    if (!g.uni && !g.isSpace) return;
+    g.gi = gi;
+    if (R) {
+      const last = R.g[R.g.length - 1], h = Math.max(R.h, g.h);
+      const dirOk = g.u[0] * R.u[0] + g.u[1] * R.u[1] > 0.995, perp = (g.x - R.o[0]) * -R.u[1] + (g.y - R.o[1]) * R.u[0];
+      const gap = along(g, R.o, R.u) - (along(last, R.o, R.u) + last.adv);
+      if (dirOk && Math.abs(perp) < 0.3 * h && gap > -0.6 * h && gap < 3 * h && (g.Tr === 3) === R.inv) {
+        if (gap > 0.22 * h && !last.isSpace && !g.isSpace) { R.text += ' '; R.map.push(-1); }
+        R.g.push(g); R.h = h; for (let c = 0; c < Math.max(1, g.uni.length); c++) R.map.push(R.g.length - 1); R.text += g.uni || ' '; g.cs = R.map.length - Math.max(1, g.uni.length);
+        return;
+      }
+    }
+    R = { g: [g], o: [g.x, g.y], u: g.u, v: g.v, h: g.h, inv: g.Tr === 3, text: g.uni || ' ', map: [] };
+    for (let c = 0; c < Math.max(1, g.uni.length); c++) R.map.push(0);
+    g.cs = 0;
+    runs.push(R);
+  });
+  runs.forEach((R, i) => {
+    R.i = i;
+    const last = R.g[R.g.length - 1]; R.len = along(last, R.o, R.u) + last.adv;
+    R.edit = !R.inv && R.g.every(g => g.fi.ok);
+  });
+  return runs;
+}
+// Polices standard de remplacement, choisies d'après la police d'origine
+function stdFontFor(PDFLib, fi) {
+  const S = PDFLib.StandardFonts, b = (fi.base || '') + ' ' + (fi.name || ''), fl = fi.flags || 0;
+  const bold = /bold|black|heavy|semibold|demi/i.test(b), it = /italic|oblique/i.test(b) || (fl & 64);
+  const mono = /courier|mono|consol/i.test(b) || (fl & 1), serif = !mono && (/times|serif|georgia|garamond|cambria|book|roman|minion|palatino/i.test(b) && !/sans/i.test(b) || ((fl & 2) && !/sans|arial|helvet/i.test(b)));
+  if (mono) return bold && it ? S.CourierBoldOblique : bold ? S.CourierBold : it ? S.CourierOblique : S.Courier;
+  if (serif) return bold && it ? S.TimesRomanBoldItalic : bold ? S.TimesRomanBold : it ? S.TimesRomanItalic : S.TimesRoman;
+  return bold && it ? S.HelveticaBoldOblique : bold ? S.HelveticaBold : it ? S.HelveticaOblique : S.Helvetica;
+}
+// Applique des modifications de lignes sur une page : edits = [{ run, text }]
+async function pdfEditPage(pdf, PDFLib, model, edits, stdCache) {
+  const page = pdf.getPage(model.s), src = model.src, ops = model.ops;
+  const remove = new Set(), adds = [];
+  const inv = new Map(); // police → caractère → glyphe (pour réutiliser la police d'origine)
+  model.glyphs.forEach(g => { if (g.uni && [...g.uni].length === 1) { let m = inv.get(g.font); if (!m) inv.set(g.font, m = new Map()); if (!m.has(g.uni)) m.set(g.uni, g); } });
+  let missing = 0, usedStd = 0;
+  for (const { run: R, text: T } of edits) {
+    const old = R.text; if (T === old) continue;
+    let p = 0; while (p < old.length && p < T.length && old[p] === T[p]) p++;
+    let q = 0; while (q < old.length - p && q < T.length - p && old[old.length - 1 - q] === T[T.length - 1 - q]) q++;
+    // limites calées sur des débuts de glyphes (ligatures « fi »…) ; la suite (S) commence sur un vrai glyphe
+    const gStart = c => R.map[c] >= 0 && R.g[R.map[c]].cs === c;
+    while (p > 0 && R.map[p] >= 0 && !gStart(p)) p--;
+    while (q > 0 && !gStart(old.length - q)) q--;
+    const sAt = old.length - q, Mnew = T.slice(p, T.length - q);
+    const firstIdx = (() => { for (let c = p; c < old.length; c++) if (R.map[c] >= 0) return R.map[c]; return -1; })();
+    const sIdx = q ? R.map[sAt] : -1;
+    const prev = (() => { for (let c = p - 1; c >= 0; c--) if (R.map[c] >= 0) return R.g[R.map[c]]; return null; })();
+    // ancre : premier glyphe modifié (ou fin du glyphe précédent si le passage commence par un blanc)
+    const A = firstIdx >= 0 && R.g[firstIdx].cs === p ? R.g[firstIdx] : prev || R.g[0];
+    const anchorAlong = A === prev ? along(prev, R.o, R.u) + prev.adv : along(A, R.o, R.u);
+    const startG = firstIdx >= 0 ? firstIdx : R.g.length;
+    for (let j = startG; j < R.g.length; j++) remove.add(R.g[j].gi);
+    // nouveau texte : police d'origine si elle a tous les caractères, sinon police standard proche
+    const st = A, Tfs = st.Tfs, Th = st.Th;
+    let inventory = inv.get(st.font);
+    let reuse = st.fi.ok && !!inventory && [...Mnew].every(ch => ch === ' ' || inventory.has(ch));
+    if (!reuse && st.fi.ok && st.fi.ansi) {
+      // police standard non incorporée (WinAnsi) : codes et largeurs donnés par les métriques standard
+      const E = PDFLib.StandardFontEmbedder.for(stdFontFor(PDFLib, st.fi)), m = new Map(inventory || []);
+      reuse = [...Mnew].every(ch => { if (ch === ' ' || m.has(ch)) return true; try { const h = E.encodeText(ch).toString().slice(1, -1); m.set(ch, { code: String.fromCharCode(parseInt(h, 16)), w0: E.widthOfTextAtSize(ch, 1000) / 1000 }); return true; } catch { return false; } });
+      if (reuse) inventory = m;
+    }
+    let width = 0, body = '';
+    if (Mnew) {
+      if (reuse) {
+        const parts = []; let cur = '';
+        for (const ch of Mnew) {
+          const g = inventory.get(ch);
+          if (g) { cur += g.code; width += (g.w0 * Tfs + st.Tc + (g.code === ' ' ? st.Tw : 0)) * Th; }
+          else { if (cur) { parts.push(csHex(cur)); cur = ''; } const sw = 0.27; parts.push(csNum(-sw * 1000)); width += (sw * Tfs + st.Tc) * Th; }
+        }
+        if (cur) parts.push(csHex(cur));
+        body = `${csName(st.font)} ${csNum(Tfs)} Tf ${csNum(st.Tc)} Tc ${csNum(st.Tw)} Tw [${parts.join(' ')}] TJ`;
+      } else {
+        const key = stdFontFor(PDFLib, st.fi);
+        let f = stdCache.get(key); if (!f) { f = await pdf.embedFont(key); stdCache.set(key, f); }
+        const safe = winAnsiSafe(f, Mnew); if (safe !== Mnew) missing++;
+        const rn = page.node.newFontDictionary(f.name, f.ref).toString();
+        width = (f.widthOfTextAtSize(safe, Tfs) + st.Tc * [...safe].length + st.Tw * (safe.split(' ').length - 1)) * Th;
+        body = `${rn} ${csNum(Tfs)} Tf ${csNum(st.Tc)} Tc ${csNum(st.Tw)} Tw ${f.encodeText(safe).toString()} Tj`;
+        usedStd++;
+      }
+      const ux = Math.hypot(st.M[0], st.M[1]) || 1, wU = width * ux;
+      // origine : sur la ligne de base du glyphe d'ancrage, à la position « anchorAlong »
+      const bx = A.x + (anchorAlong - along(A, R.o, R.u)) * R.u[0], by = A.y + (anchorAlong - along(A, R.o, R.u)) * R.u[1];
+      adds.push(`${csNum(st.fill[0])} ${csNum(st.fill[1])} ${csNum(st.fill[2])} rg ${csNum(Th * 100)} Tz 0 Ts 0 Tr ${st.M.map(csNum).join(' ')} ${csNum(bx)} ${csNum(by)} Tm ${body}`);
+      R.wNew = wU;
+    } else R.wNew = 0;
+    // la fin de la ligne (S) est redessinée glyphe par glyphe, décalée de la différence de largeur
+    if (sIdx >= 0) {
+      const shift = anchorAlong + R.wNew - along(R.g[sIdx], R.o, R.u);
+      for (let j = sIdx; j < R.g.length; j++) {
+        const g = R.g[j], nx = g.x + shift * R.u[0], ny = g.y + shift * R.u[1];
+        adds.push(`${csNum(g.fill[0])} ${csNum(g.fill[1])} ${csNum(g.fill[2])} rg ${csNum(g.Th * 100)} Tz 0 Ts 0 Tr 0 Tc 0 Tw ${g.M.map(csNum).join(' ')} ${csNum(nx)} ${csNum(ny)} Tm ${csName(g.font)} ${csNum(g.Tfs)} Tf ${csHex(g.code)} Tj`);
+      }
+    }
+  }
+  if (!remove.size && !adds.length) return { changed: false };
+  // réécriture des opérations touchées : les glyphes retirés deviennent des espaces de même largeur
+  const byOp = new Map(); model.glyphs.forEach((g, gi) => { if (remove.has(gi)) { if (!byOp.has(g.op)) byOp.set(g.op, new Set()); byOp.get(g.op).add(gi); } });
+  const glyphsOf = new Map(); model.glyphs.forEach((g, gi) => { if (byOp.has(g.op)) { if (!glyphsOf.has(g.op)) glyphsOf.set(g.op, []); glyphsOf.get(g.op).push(gi); } });
+  let out = '', pos = 0;
+  ops.forEach((o, oi) => {
+    if (!byOp.has(oi)) return;
+    const rm = byOp.get(oi), gl = glyphsOf.get(oi), A = o.args;
+    const items = o.op === 'TJ' ? A[0].v : [A[A.length - 1]];
+    const parts = []; let cur = '', gp = 0, pend = 0;
+    const flushNum = () => { if (pend) { parts.push(csNum(pend)); pend = 0; } };
+    items.forEach((it, ii) => {
+      if (it.t === 'n') { if (cur) { parts.push(csHex(cur)); cur = ''; } pend += it.v; return; }
+      while (gp < gl.length && model.glyphs[gl[gp]].ii === ii) {
+        const gi = gl[gp++], g = model.glyphs[gi];
+        if (rm.has(gi)) { if (cur) { parts.push(csHex(cur)); cur = ''; } pend += -((g.w0 * g.Tfs + g.Tc + (g.code === ' ' ? g.Tw : 0)) / (g.Tfs || 1)) * 1000; }
+        else { flushNum(); cur += g.code; }
+      }
+    });
+    if (cur) parts.push(csHex(cur)); flushNum();
+    const pre = o.op === "'" ? 'T* ' : o.op === '"' ? `${csNum(A[0].v)} Tw ${csNum(A[1].v)} Tc T* ` : '';
+    out += src.slice(pos, o.s) + pre + `[${parts.join(' ')}] TJ`; pos = o.e;
+  });
+  out += src.slice(pos);
+  const content = 'q\n' + out + '\nQ\n' + (adds.length ? 'BT\n' + adds.join('\n') + '\nET\n' : '');
+  const u8 = new Uint8Array(content.length); for (let i = 0; i < content.length; i++) u8[i] = content.charCodeAt(i) & 255;
+  page.node.set(PDFLib.PDFName.of('Contents'), pdf.context.register(pdf.context.flateStream(u8)));
+  return { changed: true, missing, usedStd };
+}
+// Modèles des pages du PDF ouvert (mis en cache tant que le fichier ne change pas)
+async function pdfEditDoc() {
+  const PDFLib = await ensurePdfLib();
+  if (!PDFV.ed || PDFV.ed.bytes !== PDFV.bytes) PDFV.ed = { bytes: PDFV.bytes, pdf: await PDFLib.PDFDocument.load(await pdfPlainBytes('other')), models: new Map() };
+  return { PDFLib, E: PDFV.ed };
+}
+async function pdfModelOf(s) {
+  const { PDFLib, E } = await pdfEditDoc();
+  if (!E.models.has(s)) E.models.set(s, await pdfGlyphModel(E.pdf, PDFLib, s));
+  return E.models.get(s);
+}
+// edits : Map(page source → [{ run, text }]) → nouveau fichier (même protection), annulable
+async function pdfApplyEdits(edits) {
+  const { PDFLib, E } = await pdfEditDoc();
+  const stdCache = new Map(); let n = 0, missing = 0, usedStd = 0, out;
+  try {
+    for (const [s, list] of edits) { const r = await pdfEditPage(E.pdf, PDFLib, E.models.get(s), list, stdCache); if (r.changed) { n++; missing += r.missing; usedStd += r.usedStd; } }
+    if (!n) return null;
+    out = await pdfReprotect(await E.pdf.save({ useObjectStreams: true }));
+  } finally { PDFV.ed = null; } // copie de travail modifiée : on repartira du fichier
+  state.cur.textDone = false;
+  await pdfReplaceBytes(out, PDFV.pw);
+  return { pages: n, missing, usedStd };
+}
+// Outil « Modifier le texte » : clic sur une ligne → zone d'édition à sa place
+function runQuad(R) {
+  const p = (a, b) => [R.o[0] + a * R.u[0] + b * R.v[0], R.o[1] + a * R.u[1] + b * R.v[1]];
+  return [p(-1, -0.28 * R.h), p(R.len + 1, -0.28 * R.h), p(R.len + 1, 0.95 * R.h), p(-1, 0.95 * R.h)];
+}
+function runAt(model, x, y) {
+  let best = null, bd = 1e9;
+  model.runs.forEach(R => {
+    const a = (x - R.o[0]) * R.u[0] + (y - R.o[1]) * R.u[1], b = (x - R.o[0]) * R.v[0] + (y - R.o[1]) * R.v[1];
+    if (a >= -3 && a <= R.len + 3 && b >= -0.35 * R.h && b <= 1.05 * R.h) { const d = Math.abs(b - 0.3 * R.h); if (d < bd) { bd = d; best = R; } }
+  });
+  return best;
+}
+async function pdfEditTextAt(i, pt) {
+  const P = PDFV.pages[i]; if (!P) return;
+  let model;
+  try { model = await pdfModelOf(P.s); } catch (e) { console.warn(e); return toast(e.userMsg || 'Le texte de ce PDF ne peut pas être modifié.', true); }
+  if (model.bad) return toast('Le texte de cette page est rangé d\'une façon que Grimoire ne sait pas modifier (' + model.bad + ').', true);
+  const vp = vpOf(P, 1), [x, y] = vp.convertToPdfPoint(pt[0], pt[1]), R = runAt(model, x, y);
+  if (!R) return toast('Cliquez sur une ligne de texte du PDF.');
+  if (R.inv) return toast('Ce texte fait partie d\'une image scannée : utilisez le bloc blanc puis une zone de texte.', true);
+  if (!R.edit) return toast('Cette police (dessinée ou verticale) ne peut pas être modifiée.', true);
+  const S = PDFV.scale, pts = runQuad(R).map(q => vp.convertToViewportPoint(q[0], q[1]));
+  const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]), g0 = R.g[0];
+  const pa = $(`#pdfPages .pa[data-p="${i}"]`); if (!pa) return;
+  pa.querySelectorAll('.tx-ed').forEach(e => e.remove());
+  const el = document.createElement('div'); el.className = 'tx-ed';
+  const fam = /courier|mono/i.test(g0.fi.base) ? 'monospace' : /times|serif|georgia|garamond|cambria|roman/i.test(g0.fi.base) && !/sans/i.test(g0.fi.base) ? 'serif' : 'sans-serif';
+  const fs = R.h * S;
+  el.style.cssText = `left:${Math.min(...xs) * S}px;top:${Math.min(...ys) * S}px;min-width:${(Math.max(...xs) - Math.min(...xs)) * S}px;height:${(Math.max(...ys) - Math.min(...ys)) * S}px;font-size:${fs * 0.86}px;line-height:${(Math.max(...ys) - Math.min(...ys)) * S}px;font-family:${fam};font-weight:${/bold|black|heavy|semibold/i.test(g0.fi.base) ? 700 : 400};font-style:${/italic|oblique/i.test(g0.fi.base) ? 'italic' : 'normal'};color:rgb(${g0.fill.map(c => Math.round(c * 255)).join(',')})`;
+  try { el.contentEditable = 'plaintext-only'; } catch {} if (el.contentEditable !== 'plaintext-only') el.contentEditable = 'true';
+  el.textContent = R.text; el.spellcheck = false;
+  pa.appendChild(el); el.focus();
+  const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  let done = false;
+  const finish = async ok => {
+    if (done) return; done = true;
+    const t = el.textContent.replace(/\s*\n\s*/g, ' ');
+    el.remove();
+    if (!ok || t === R.text) return;
+    toast('Modification du texte…');
+    try {
+      const res = await pdfApplyEdits(new Map([[P.s, [{ run: R, text: t }]]]));
+      if (res) toast(res.missing ? 'Texte modifié (certains caractères n\'existent pas dans les polices standard : remplacés par « ? »).' : res.usedStd ? 'Texte modifié (police la plus proche : la police d\'origine n\'a pas tous ces caractères).' : 'Texte modifié dans sa police d\'origine.');
+    } catch (e) { console.warn(e); toast(e.userMsg || 'Modification impossible.', true); }
+  };
+  el.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); finish(true); } else if (e.key === 'Escape') { e.preventDefault(); finish(false); } });
+  el.addEventListener('blur', () => finish(true));
+}
+// Rechercher et remplacer dans tout le PDF
+async function pdfReplaceAll() {
+  const q = $('#pfQ').value, rep = $('#prQ').value;
+  if (!q) return;
+  const nq = q.toLocaleLowerCase('fr'), edits = new Map(); let n = 0, locked = 0, scanned = 0;
+  $('#pfCount').textContent = 'Remplacement…';
+  try {
+    for (let s = 0; s < PDFV.srcPages.length; s++) {
+      const m = await pdfModelOf(s); if (m.bad) continue;
+      m.runs.forEach(R => {
+        const low = R.text.toLocaleLowerCase('fr'); if (!low.includes(nq)) return;
+        if (R.inv) { scanned++; return; } if (!R.edit) { locked++; return; }
+        let t = '', p = 0, k; while ((k = low.indexOf(nq, p)) >= 0) { t += R.text.slice(p, k) + rep; p = k + q.length; n++; }
+        t += R.text.slice(p);
+        if (!edits.has(s)) edits.set(s, []); edits.get(s).push({ run: R, text: t });
+      });
+    }
+    if (!n) { $('#pfCount').textContent = ''; return toast(scanned ? 'Ce texte n\'existe que dans des pages scannées (image) : il ne peut pas être remplacé.' : 'Aucune occurrence à remplacer (le texte coupé entre deux lignes n\'est pas trouvé).', true); }
+    const res = await pdfApplyEdits(edits);
+    toast(`${n} remplacement${n > 1 ? 's' : ''} sur ${res ? res.pages : 0} page${res && res.pages > 1 ? 's' : ''}${locked ? ` (${locked} dans une police non modifiable)` : ''}. Ctrl+Z pour annuler.`);
+    runPdfFind();
+  } catch (e) { console.warn(e); toast(e.userMsg || 'Remplacement impossible.', true); $('#pfCount').textContent = ''; }
+}
+
 /* --- ouverture
    Le fichier d'origine (cur.pdfId, dans le magasin « blobs ») ne change pas quand on réorganise les pages :
    cur.order décrit les pages affichées ({ s: page source, r: rotation ajoutée }). Le PDF n'est réécrit qu'à l'export. */
@@ -5718,20 +6703,26 @@ async function openPdf() {
     const bytes = await Store.getBlob(cur.pdfId);
     if (!bytes) throw new Error('missing');
     if (state.cur !== cur) return;
-    PDFV.bytes = bytes;
+    PDFV.bytes = bytes; PDFV.pw = PDF_PW.get(cur.pdfId) ?? null; PDFV.rightsC = null;
     await loadPdfDoc();
   } catch (e) { $('#pdfPages').innerHTML = `<div class="pdf-msg">Ce PDF ne peut pas être ouvert${e && e.name === 'PasswordException' ? ' sans son mot de passe' : e && e.message === 'missing' ? ' : le fichier est introuvable sur cet appareil' : ''}.</div>`; return; }
   if (state.cur !== cur) return;
   if (!cur.textDone) setTimeout(async () => {
-    try { const t = await pdfAllText(PDFV.src); if (state.cur === cur) { cur.text = t; cur.textDone = true; scheduleSave(); } } catch {}
+    try {
+      const t = await pdfAllText(PDFV.src); if (state.cur !== cur) return;
+      cur.text = t; cur.textDone = true; scheduleSave();
+      if (t.replace(/\s/g, '').length < 30 && !cur.ocrHint) { cur.ocrHint = true; toast('Ce PDF est une image scannée : Outils › Reconnaître le texte (OCR) le rend cherchable et copiable.'); }
+    } catch {}
   }, 1500);
 }
 async function loadPdfDoc(keepPage) {
   const cur = state.cur, gen = ++PDFV.gen;
-  const doc = await pdfjsOpen(PDFV.bytes);
+  const doc = await pdfjsOpen(PDFV.bytes, PDFV.pw);
   if (gen !== PDFV.gen) { doc.destroy(); return; }
+  PDFV.enc = doc._pw != null || pdfIsEnc(PDFV.bytes);
+  if (PDFV.enc) { PDFV.pw = doc._pw != null ? doc._pw : ''; PDF_PW.set(cur.pdfId, PDFV.pw); } else PDFV.pw = null;
   if (PDFV.src) try { PDFV.src.destroy(); } catch {}
-  PDFV.src = PDFV.doc = doc; PDFV.texts = null;
+  PDFV.src = PDFV.doc = doc; PDFV.texts = null; PDFV.srcText = []; PDFV.ed = null;
   PDFV.srcPages = [];
   for (let i = 0; i < doc.numPages; i++) {
     const page = await doc.getPage(i + 1);
@@ -5914,7 +6905,7 @@ function setPdfTool(t) {
 function updatePdfToolOpts() {
   const t = PDFV.sel ? annById(PDFV.sel)?.t : PDFV.tool;
   const box = $('#pdfOpts');
-  if (PDFV.mode !== 'annot' || !t || t === 'select' || t === 'white' || t === 'redact' || t === 'img' || t === 'sign' || t === 'image') { box.innerHTML = PDFV.sel ? `<button class="tb" data-po="del" title="Supprimer (Suppr)">${ic('trash')}</button>` : ''; return; }
+  if (PDFV.mode !== 'annot' || !t || t === 'select' || t === 'edtext' || t === 'white' || t === 'redact' || t === 'img' || t === 'sign' || t === 'image') { box.innerHTML = PDFV.sel ? `<button class="tb" data-po="del" title="Supprimer (Suppr)">${ic('trash')}</button>` : ''; return; }
   const key = t === 'hl' ? 'hl' : t === 'rect' ? 'rect' : t === 'ink' ? 'ink' : 'text';
   const a = PDFV.sel ? annById(PDFV.sel) : null;
   const curCol = a ? a.color : PDFV.color[key];
@@ -5936,8 +6927,12 @@ $('#pdfOpts').addEventListener('click', e => {
 
 /* --- annotations */
 const annById = id => (state.cur.ann || []).find(a => a.id === id);
-const pdfSnap = () => ({ bytes: PDFV.bytes, order: JSON.stringify(state.cur.order), ann: JSON.stringify(state.cur.ann), form: JSON.stringify(state.cur.form) });
-function pdfHist() { PDFV.hist.push(pdfSnap()); if (PDFV.hist.length > 40) PDFV.hist.shift(); PDFV.fut = []; }
+const pdfSnap = () => ({ bytes: PDFV.bytes, pw: PDFV.pw, order: JSON.stringify(state.cur.order), ann: JSON.stringify(state.cur.ann), form: JSON.stringify(state.cur.form) });
+function pdfHist() {
+  PDFV.hist.push(pdfSnap()); if (PDFV.hist.length > 40) PDFV.hist.shift(); PDFV.fut = [];
+  // au plus 8 versions différentes du fichier gardées pour l'annulation (mémoire)
+  const seen = new Set(); for (let k = PDFV.hist.length - 1; k >= 0; k--) { seen.add(PDFV.hist[k].bytes); if (seen.size > 8) { PDFV.hist.splice(0, k + 1); break; } }
+}
 function pdfChanged() { scheduleSave(); }
 async function pdfUndo(redo) {
   const from = redo ? PDFV.fut : PDFV.hist, to = redo ? PDFV.hist : PDFV.fut;
@@ -5946,7 +6941,7 @@ async function pdfUndo(redo) {
   to.push(pdfSnap());
   const bytesChanged = s.bytes && s.bytes !== PDFV.bytes, orderChanged = s.order !== JSON.stringify(cur.order);
   cur.order = JSON.parse(s.order); cur.ann = JSON.parse(s.ann); cur.form = JSON.parse(s.form); PDFV.sel = null; PDFV.pageSel = new Set();
-  if (bytesChanged) { PDFV.bytes = s.bytes; await Store.putBlob(cur.pdfId, s.bytes); await loadPdfDoc(); }
+  if (bytesChanged) { PDFV.bytes = s.bytes; PDFV.pw = s.pw ?? null; PDFV.rightsC = null; if (PDFV.pw != null) PDF_PW.set(cur.pdfId, PDFV.pw); else PDF_PW.delete(cur.pdfId); await Store.putBlob(cur.pdfId, s.bytes); await loadPdfDoc(); renderMenubar(); }
   else if (orderChanged) { rebuildPages(); renderPdf(); }
   else { PDFV.pages.forEach((_, i) => { drawAnns(i); drawFields(i); }); if (PDFV.mode === 'pages') renderPdfGrid(); }
   scheduleSave();
@@ -6020,7 +7015,7 @@ const PD = { op: null };
 $('#pdfPages').addEventListener('pointerdown', e => {
   if (PDFV.mode !== 'annot') return;
   const pa = e.target.closest('.pa'); if (!pa) return;
-  if (e.target.closest('.editing')) return;
+  if (e.target.closest('.editing') || e.target.closest('.tx-ed')) return;
   // un texte en cours d'écriture : un clic ailleurs termine simplement la saisie
   const ed = $('#pdfPages .an.editing .an-tx'); if (ed) { e.preventDefault(); ed.blur(); return; }
   const i = +pa.dataset.p, pt = pagePoint(e, pa), tool = PDFV.tool;
@@ -6033,6 +7028,7 @@ $('#pdfPages').addEventListener('pointerdown', e => {
     try { pa.setPointerCapture(e.pointerId); } catch {}
     return;
   }
+  if (tool === 'edtext') { e.preventDefault(); pdfEditTextAt(i, pt); return; }
   if (tool === 'select') { if (PDFV.sel) selectAnn(null); return; }
   if (tool === 'text') {
     e.preventDefault();
@@ -6111,6 +7107,7 @@ document.addEventListener('keydown', e => {
   if (!inField && mod && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); pdfUndo(e.shiftKey); }
   if (!inField && mod && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); pdfUndo(true); }
   if (mod && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openPdfFind(); }
+  if (mod && (e.key === 'h' || e.key === 'H')) { e.preventDefault(); openPdfFind(true); }
   if (!inField && mod && (e.key === 'a' || e.key === 'A') && PDFV.mode === 'pages') { e.preventDefault(); PDFV.pageSel = new Set(PDFV.pages.map((_, i) => i)); renderPdfGrid(); }
   if (!inField && e.key === 'Escape' && PDFV.sel) selectAnn(null);
 });
@@ -6372,12 +7369,12 @@ async function appendSourcePages(at, build) {
   const PDFLib = await ensurePdfLib();
   const cur = state.cur;
   try {
-    const pdf = await PDFLib.PDFDocument.load(PDFV.bytes, { ignoreEncryption: true });
+    const pdf = await PDFLib.PDFDocument.load(await pdfPlainBytes('assembly'));
     const n0 = pdf.getPageCount();
     await build(pdf, PDFLib);
     const added = pdf.getPageCount() - n0;
     if (!added) return 0;
-    const bytes = await pdf.save({ useObjectStreams: true });
+    const bytes = await pdfReprotect(await pdf.save({ useObjectStreams: true }));
     pdfHist();
     PDFV.hist[PDFV.hist.length - 1].bytes = PDFV.bytes;
     PDFV.bytes = bytes;
@@ -6390,7 +7387,7 @@ async function appendSourcePages(at, build) {
     await loadPdfDoc();
     scheduleSave();
     return added;
-  } catch (e) { console.warn(e); toast('Ajout impossible : ce PDF est peut-être protégé ou endommagé.', true); return 0; }
+  } catch (e) { console.warn(e); toast(e.userMsg || 'Ajout impossible : ce PDF est peut-être endommagé.', true); return 0; }
 }
 const selOrAll = () => PDFV.pageSel.size ? [...PDFV.pageSel].sort((a, b) => a - b) : [];
 async function pagesOp(k) {
@@ -6437,10 +7434,13 @@ async function pagesFromFiles(pdf, PDFLib, files) {
     const isPdf = /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name);
     if (isPdf) {
       try {
-        const src = await PDFLib.PDFDocument.load(new Uint8Array(await f.arrayBuffer()), { ignoreEncryption: true });
+        let raw = new Uint8Array(await f.arrayBuffer());
+        if (pdfIsEnc(raw)) raw = await pdfDecryptFile(raw, f.name);
+        if (!raw) continue;
+        const src = await PDFLib.PDFDocument.load(raw);
         const cp = await pdf.copyPages(src, src.getPageIndices());
         cp.forEach(p => out.push({ kind: 'ext', page: p }));
-      } catch { toast(`« ${f.name} » n'a pas pu être ajouté (PDF protégé ou endommagé).`, true); }
+      } catch (e) { toast(e && e.userMsg ? `« ${f.name} » : ${e.userMsg}` : `« ${f.name} » n'a pas pu être ajouté (PDF endommagé).`, true); }
     } else if (/^image\//.test(f.type) || /\.(jpe?g|png|gif|webp|heic)$/i.test(f.name)) {
       try {
         const im = await fileToImageData(f);
@@ -6498,8 +7498,21 @@ const hexRgbPdf = (PDFLib, hex) => { const [r, g, b] = hexRgb(hex); return PDFLi
 async function pdfExportBytes(opts = {}) {
   const PDFLib = await ensurePdfLib();
   const cur = state.cur;
+  // PDF protégé : formulaire seul → rempli par PDF.js (protection intacte) ; sinon déchiffré, modifié puis rechiffré à l'identique
+  let work = PDFV.bytes;
+  if (PDFV.enc) {
+    const o0 = cur.order || [], same0 = o0.length === PDFV.srcPages.length && o0.every((x, k) => x.s === k && !x.r), anns = (cur.ann || []).length;
+    if (same0 && !anns && !opts.flattenForm && !opts.plain) {
+      const v = cur.form || {};
+      if (!Object.keys(v).length) return PDFV.bytes;
+      const out = await pdfjsFormSave(v); await pdfVerifyForm(out, v); return out;
+    }
+    const r = await pdfRights();
+    if (anns && !r.other) { const e = new Error('droits'); e.userMsg = 'Le propriétaire de ce PDF n\'autorise pas sa modification : les annotations ne peuvent pas y être ajoutées. Si vous avez son mot de passe de propriétaire : Outils › Saisir le mot de passe du propriétaire.'; throw e; }
+    work = await pdfPlainBytes(anns ? 'other' : !same0 ? 'assembly' : 'forms');
+  }
   let pdf = null;
-  try { pdf = await PDFLib.PDFDocument.load(PDFV.bytes, { ignoreEncryption: true }); } catch (e) { console.warn('pdf-lib ne sait pas ouvrir ce PDF', e); }
+  try { pdf = await PDFLib.PDFDocument.load(work, { ignoreEncryption: true }); } catch (e) { console.warn('pdf-lib ne sait pas ouvrir ce PDF', e); }
   // PDF protégé (chiffré, souvent sans mot de passe à l'ouverture) : pdf-lib ne sait pas le réécrire.
   // On remplit alors ses champs avec PDF.js, qui sait l'enregistrer en gardant sa protection.
   if (!pdf || pdf.isEncrypted) {
@@ -6596,7 +7609,8 @@ async function pdfExportBytes(opts = {}) {
     out = await pdf.save({ useObjectStreams: true, updateFieldAppearances: false });
   }
   if (Object.keys(vals).length && !opts.flattenForm) await pdfVerifyForm(out, vals);
-  return await pdfRedact(out, PDFLib);
+  out = await pdfRedact(out, PDFLib);
+  return PDFV.enc && !opts.plain ? await pdfReprotect(out) : out;
 }
 // Caviardage : chaque page qui porte un bloc « caviarder » est refaite en image (bloc noir compris).
 // Le texte, les images et les champs cachés dessous disparaissent réellement du fichier ; le reste
@@ -6770,12 +7784,12 @@ function printBytes(bytes) {
 async function splitPdf(parts, dest, label) {
   const PDFLib = await ensurePdfLib();
   try {
-    const full = await PDFLib.PDFDocument.load(await pdfExportBytes({ flattenForm: false }), { ignoreEncryption: true });
+    const full = await PDFLib.PDFDocument.load(await pdfExportBytes({ flattenForm: false, plain: true }));
     const outs = [];
     for (const idx of parts) {
       const d = await PDFLib.PDFDocument.create();
       (await d.copyPages(full, idx)).forEach(p => d.addPage(p));
-      outs.push({ bytes: await d.save({ useObjectStreams: true }), idx });
+      outs.push({ bytes: await pdfReprotect(await d.save({ useObjectStreams: true })), idx });
     }
     const base = state.cur.title || 'Document';
     const nameOf = o => `${base} — ${label === 'extrait' ? 'extrait' : 'partie'} ${o.idx.length === 1 ? 'p. ' + (o.idx[0] + 1) : 'p. ' + (o.idx[0] + 1) + '-' + (o.idx[o.idx.length - 1] + 1)}`;
@@ -6793,7 +7807,7 @@ async function splitPdf(parts, dest, label) {
       }
       toast(outs.length === 1 ? `« ${nameOf(outs[0])} » ajouté à vos documents` : `${outs.length} PDF ajoutés à vos documents`);
     }
-  } catch (e) { console.warn(e); toast('Division impossible : ce PDF est peut-être protégé.', true); }
+  } catch (e) { console.warn(e); toast(e.userMsg || 'Division impossible : ce PDF est peut-être endommagé.', true); }
 }
 function parseRanges(s, n) {
   const out = [];
@@ -6841,7 +7855,7 @@ async function ensurePdfTexts() {
   }
   return (PDFV.texts = out);
 }
-function openPdfFind() { if (PDFV.mode !== 'read') setPdfMode('read'); $('#pdfFind').hidden = false; const q = $('#pfQ'); q.focus(); q.select(); }
+function openPdfFind(withRep) { if (PDFV.mode !== 'read') setPdfMode('read'); $('#pdfFind').hidden = false; if (withRep === true) $('#pdfFind').classList.add('with-rep'); const q = $('#pfQ'); q.focus(); q.select(); }
 function closePdfFind() { $('#pdfFind').hidden = true; PF.q = ''; PF.hits = []; if (window.CSS && CSS.highlights) { CSS.highlights.delete('g-find'); CSS.highlights.delete('g-cur'); } $('#pfCount').textContent = ''; }
 async function runPdfFind() {
   const q = norm($('#pfQ').value.trim()); PF.q = q; PF.hits = [];
@@ -6888,6 +7902,8 @@ $('#pfQ').addEventListener('keydown', e => {
 $('#pdfFind').addEventListener('click', e => {
   const b = e.target.closest('[data-pf]'); if (!b) return;
   if (b.dataset.pf === 'close') return closePdfFind();
+  if (b.dataset.pf === 'rep') { $('#pdfFind').classList.toggle('with-rep'); if ($('#pdfFind').classList.contains('with-rep')) $('#prQ').focus(); return; }
+  if (b.dataset.pf === 'repall') return pdfReplaceAll();
   if (!PF.hits.length) return;
   PF.i = (PF.i + (b.dataset.pf === 'prev' ? -1 : 1) + PF.hits.length) % PF.hits.length; showPdfHit();
 });
@@ -6902,7 +7918,7 @@ async function pdfToDoc() {
     parts.push(paras.map(p => `<p>${esc(p)}</p>`).join(''));
   }
   const html = parts.join('<hr data-pb="1">');
-  if (!html.replace(/<[^>]+>/g, '').trim()) return toast('Ce PDF ne contient pas de texte (document scanné ?).', true);
+  if (!html.replace(/<[^>]+>/g, '').trim()) return toast('Ce PDF ne contient pas de texte (document scanné ?) : lancez d\'abord Outils › Reconnaître le texte (OCR).', true);
   await createDoc('texte', { title: (state.cur.title || 'PDF') + ' (texte)', html });
   toast('Texte du PDF copié dans un nouveau document.');
 }
@@ -6948,9 +7964,10 @@ async function importPdfFiles(files) {
       if (files.length === 1) toast('Conversion en PDF…');
     }
     // vérification rapide (PDF lisible) : seule la structure est lue, pas les pages
-    const doc = await pdfjsOpen(bytes);
-    const n = doc.numPages; doc.destroy();
+    const doc = await pdfjsOpen(bytes, null, one ? files[0].name : '');
+    const n = doc.numPages, pw = doc._pw; doc.destroy();
     const pdfId = uid(); await Store.putBlob(pdfId, bytes);
+    if (pw != null) PDF_PW.set(pdfId, pw);
     await createDoc('pdf', { title, pdfId, ann: [], form: {}, pagesN: n });
     toast(one || files.length === 1 ? `PDF ouvert : ${n} page${n > 1 ? 's' : ''}` : `PDF créé : ${n} page${n > 1 ? 's' : ''}. Réorganisez-les dans l'onglet Pages.`);
   } catch (e) {
@@ -8225,6 +9242,7 @@ if (window.ResizeObserver) new ResizeObserver(relayoutComments).observe(ed);
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'm' || e.key === 'M' || e.code === 'KeyM') && state.view === 'writer') { e.preventDefault(); addComment(); }
   if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'f' || e.key === 'F' || e.code === 'KeyF') && state.view === 'writer') { e.preventDefault(); insertFootnote(); }
+  if (e.key === 'F7' && !e.ctrlKey && !e.altKey && state.view === 'writer') { e.preventDefault(); openGcPanel(); }
 });
 
 /* =========================================================
@@ -9792,7 +10810,7 @@ async function curPdfText() {
   if (cur.textDone && cur.text) return cur.text;
   return PDFV.src ? pdfTextOf(PDFV.src) : '';
 }
-const scanMsg = 'Ce PDF ne contient pas de texte lisible (document scanné ou photo) : Plume ne peut pas le lire pour l\'instant.';
+const scanMsg = 'Aucun texte n\'a pu être lu dans ce PDF, même par la reconnaissance du texte (OCR).';
 // Libellé visible à côté de chaque champ (le nom technique est souvent « Texte1 »)
 async function fieldsWithLabels() {
   const out = new Map();
@@ -9888,8 +10906,10 @@ function pickInvoices() {
       toast(`Plume lit les factures… ${i + 1} / ${files.length}`);
       try {
         const d = await pdfjsOpen(new Uint8Array(await f.arrayBuffer()));
-        const text = await pdfTextOf(d); try { d.destroy(); } catch {}
-        if (text.length < 30) { skipped.push(f.name + ' (scanné)'); continue; }
+        let text = await pdfTextOf(d);
+        if (text.length < 30) { toast(`Plume lit les factures… ${i + 1} / ${files.length} (scannée : reconnaissance du texte)`); text = await ocrPdfText(d, 2).catch(() => ''); }
+        try { d.destroy(); } catch {}
+        if (text.replace(/\s/g, '').length < 30) { skipped.push(f.name + ' (illisible)'); continue; }
         const x = await extractInvoice(text, f.name); if (x) rows.push(x); else skipped.push(f.name + ' (pas une facture)');
       } catch (e) { skipped.push(f.name); console.warn(e); }
     }
@@ -9912,7 +10932,11 @@ async function runPlumePdf(kind) {
   Plume.ctl = new AbortController();
   const done = () => { $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = false); Plume.ctl = null; };
   try {
-    const text = await curPdfText();
+    let text = await curPdfText();
+    if (kind !== 'remplir' && text.replace(/\s/g, '').length < 30 && PDFV.src) {
+      // PDF scanné : Plume en lit le texte par OCR (sans modifier le fichier)
+      text = await ocrPdfText(PDFV.src, 3, i => { out.textContent = `PDF scanné : reconnaissance du texte, page ${i + 1}…`; }).catch(() => '');
+    }
     if (kind !== 'remplir' && text.replace(/\s/g, '').length < 30) { out.textContent = scanMsg; return done(); }
     const signal = Plume.ctl.signal, live = ({ text: t }) => { out.textContent = t; };
     if (kind === 'resumer') {
@@ -10426,8 +11450,11 @@ function commands() {
     add('Insérer', 'Renvoi (voir Figure 2…)', 'link', openXref);
     add('Insérer', 'Zone de texte', 'square', openTextBox);
     add('Insérer', 'Forme (rectangle, flèche, bulle…)', 'square', openShape);
+    add('Insérer', 'Texte d\'une photo (reconnaissance du texte)…', 'scan', insertOcrImage);
     add('Publipostage', 'Publipostage (lettres à partir d\'un classeur)…', 'grid', openMailMerge);
     add('Format', 'Modifier les styles (Titre 1, Paragraphe…)', 'type', () => openStylePop());
+    add('Langue', 'Vérifier l\'orthographe et la grammaire', 'abc', openGcPanel, 'F7');
+    add('Langue', GC.on ? 'Ne plus souligner les fautes' : 'Souligner les fautes pendant la frappe', 'abc', () => setGcOn(!GC.on));
     add('Révision', 'Activer ou désactiver le suivi des modifications', 'pen', () => toggleTrack(), 'Ctrl Maj E');
     add('Révision', 'Accepter toutes les modifications', 'tick', () => trAll(true));
     add('Révision', 'Refuser toutes les modifications', 'close', () => trAll(false));
@@ -10510,6 +11537,14 @@ function commands() {
     add('Exporter', 'Exporter en PDF (.pdf)', 'pdf', () => runExport('docpdf'));
     add('Exporter', 'Exporter une copie Excel (.xlsx)', 'download', () => runExport('xlsx').catch(() => toast('Export impossible.', true)));
     add('Exporter', 'Exporter en CSV', 'download', () => runExport('csv'));
+  }
+  if (v === 'pdfv') {
+    add('PDF', 'Rechercher dans le PDF', 'search', () => openPdfFind(), 'Ctrl F');
+    add('PDF', 'Rechercher et remplacer dans le PDF', 'search', () => openPdfFind(true), 'Ctrl H');
+    add('PDF', 'Modifier le texte du PDF (clic sur une ligne)', 'edtext', () => { setPdfMode('annot'); setPdfTool('edtext'); toast('Cliquez sur une ligne de texte pour la modifier ; Entrée pour valider, Échap pour annuler.'); });
+    add('Texte du PDF', 'Reconnaître le texte des pages scannées (OCR)', 'scan', pdfOcr);
+    add('Protection', PDFV.enc ? 'Changer le mot de passe du PDF…' : 'Protéger le PDF par un mot de passe…', 'lock', openPdfProtect);
+    if (PDFV.enc) { add('Protection', 'Retirer le mot de passe du PDF', 'unlock', pdfUnprotect); add('Protection', 'Saisir le mot de passe du propriétaire…', 'unlock', pdfOwnerPassword); }
   }
   if (v !== 'home') {
     add('Fichier', 'Enregistrer', 'save', () => saveDoc(false), 'Ctrl S');
@@ -10627,7 +11662,7 @@ function menuModel() {
     doc ? ['-', pick('Retour à l\'accueil').map(c => ({ ...c, label: 'Fermer le document' }))] : null
   ]; };
   const affichageFin = () => ['-', pick(/^Passer en mode/, /^Passer au thème/)];
-  const outils = () => [pick('Révision:'), '-', pick('Plume:')];
+  const outils = () => [pick('Langue:'), '-', pick('Révision:'), '-', pick('Plume:')];
 
   if (v === 'writer') {
     menu('Fichier', fichier());
@@ -10663,9 +11698,9 @@ function menuModel() {
     menu('Outils', outils());
   } else {
     menu('Fichier', fichier());
-    if (v === 'pdfv') menu('Édition', cmd('Annuler', undoRun(false), 'Ctrl Z', 'undo'), cmd('Rétablir', undoRun(true), 'Ctrl Y', 'redo'));
+    if (v === 'pdfv') menu('Édition', cmd('Annuler', undoRun(false), 'Ctrl Z', 'undo'), cmd('Rétablir', undoRun(true), 'Ctrl Y', 'redo'), '-', pick('PDF:'));
     menu('Affichage', affichageFin());
-    menu('Outils', outils());
+    menu('Outils', pick('Texte du PDF:'), '-', pick('Protection:'), '-', outils());
   }
   // Filet de sécurité : une commande qu'aucun menu n'a prise va dans « Outils »
   const reste = all.filter(c => !used.has(c) && c.group !== 'Créer' && c.group !== 'Document');
@@ -10806,6 +11841,7 @@ async function openSettings() {
 }
 function segSet(id, v) { $$('#' + id + ' button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === v))); }
 async function renderSettings() {
+  renderGcSettings();
   segSet('segMode', MODE); segSet('segTheme', ls.get('grim.theme', 'auto')); segSet('segProv', AI.provider);
   { const a = ls.get('grim.author', {}) || {}; $('#meName').value = a.name || ''; $('#meIni').value = a.ini || ''; $('#meIni').placeholder = initialsOf(a.name) || 'Initiales'; }
   $('#aiKey').value = AI.key; $('#aiModel').value = AI.model; $('#aiMe').value = ls.get('grim.me', '') || ''; $('#aiModel').placeholder = AI_DEF[AI.provider];
@@ -11002,6 +12038,16 @@ acListen($('#ed')); acListen($('#qnText')); acListen($('#notes'));
 $('#acOn').checked = AC.on; $('#acMine').value = AC.mine;
 $('#acOn').addEventListener('change', e => { AC.on = e.target.checked; ls.set('grim.autocorr', AC.on); toast(AC.on ? 'Correction automatique activée.' : 'Correction automatique désactivée.'); });
 $('#acMine').addEventListener('change', e => { AC.mine = e.target.value; ls.set('grim.autocorr.mine', AC.mine); AC_MINE = acMineMap(); toast('Remplacements enregistrés.'); });
+function renderGcSettings() {
+  $('#gcOn').checked = ls.get('grim.gc', !isPhone());
+  $('#gcDict').value = ls.get('grim.dict', []).join('\n');
+  const n = ls.get('grim.gcIgn', []).length;
+  $('#gcIgnNote').innerHTML = n ? `${n} règle${n > 1 ? 's' : ''} de grammaire mise${n > 1 ? 's' : ''} de côté. <button type="button" class="fb-link" id="gcIgnReset">Les signaler de nouveau</button>` : '';
+}
+renderGcSettings();
+$('#gcOn').addEventListener('change', e => { ls.set('grim.gc', e.target.checked); GC.on = e.target.checked; toast(e.target.checked ? 'Les fautes seront soulignées dans les documents.' : 'Les fautes ne seront plus soulignées.'); });
+$('#gcDict').addEventListener('change', e => { ls.set('grim.dict', [...new Set(e.target.value.split('\n').map(w => w.trim()).filter(Boolean))]); toast('Dictionnaire enregistré.'); });
+$('#gcCard').addEventListener('click', e => { if (e.target.closest('#gcIgnReset')) { ls.set('grim.gcIgn', []); renderGcSettings(); toast('Toutes les règles seront de nouveau signalées.'); } });
 
 Store.init().then(() => {
   syncUI(); if (SY.cfg) syncNow(); scheduleReminders();
