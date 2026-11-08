@@ -877,3 +877,41 @@ body:not(.m-phone) .bar{border-bottom-color:transparent}
 .imp-pb .imp-t{font-weight:600;margin-top:14px}
 .imp-pb ul{margin:0 0 16px;padding-left:20px;line-height:1.5}
 .imp-pb .set-acts{justify-content:flex-end}
+
+/* Tableau croisé : fenêtre */
+.pv-g{flex:0 0 9.5em}
+.pv-v{margin-bottom:6px}
+.pv-v select:first-child{flex:1.4}
+.pv-v .xbtn{flex:none}
+.pv-add{align-self:flex-start;background:none;border:0;color:var(--accent);font:inherit;font-size:13px;cursor:pointer;padding:2px 0}
+.pv-fv{max-height:150px;overflow-y:auto;border:1px solid var(--line);border-radius:9px;padding:6px 10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:2px 10px;font-size:13px}
+.pv-fv .dlg-note{grid-column:1/-1;margin-bottom:2px}
+.pv-fv label,.pv-chk{display:flex;align-items:center;gap:6px;cursor:pointer}
+.pv-chk{font-size:13px;margin:4px 0 8px}
+.pv-v select{flex:1;min-width:0;border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:8px 10px;font-size:14px}
+.pv-v select:first-child{flex:1.5}
+.pv-v select:focus{outline:none;border-color:var(--selline)}
+
+/* Plume guidé : fil de la conversation, questions à choix */
+.pthread{display:flex;flex-direction:column;gap:8px}
+.pthread:empty{display:none}
+.pmsg{font-size:13.5px;line-height:1.5;border-radius:12px;padding:9px 12px;max-width:100%;overflow-wrap:anywhere}
+.pmsg.bot{background:var(--surface);border:1px solid var(--line);align-self:stretch}
+.pmsg.me{background:var(--accent-soft);align-self:flex-end;max-width:85%}
+.pmsg p{margin:0 0 6px}.pmsg p:last-child{margin:0}
+.pmsg small{display:block;color:var(--muted);font-size:12px;margin-top:6px}
+.pq-c{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.pq-o{border:1px solid var(--line-strong);background:var(--paper);color:var(--fg);border-radius:999px;padding:6px 11px;font:inherit;font-size:13px;cursor:pointer;text-align:left}
+.pq-o:hover:not(:disabled),.pq-o:focus-visible{border-color:var(--accent);color:var(--accent);outline:none}
+.pq-o[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent)}
+.pq-o:disabled{opacity:.45;cursor:default}
+.pq-ok{margin-top:8px}
+.ph-s{display:flex;flex-direction:column;gap:2px;margin-top:10px}
+.ph-s>span{color:var(--muted);font-size:12.5px}
+.ph-ex{font-style:italic}
+.ph-n{color:var(--muted);font-size:12.5px;margin-top:10px!important}
+.pchip-aide{border-style:dashed}
+
+/* Plume : la zone de saisie reste visible en bas, la conversation défile au-dessus */
+.plume-b>.ask{position:sticky;bottom:-16px;margin-top:auto;margin-bottom:-16px;padding:10px 0 16px;background:var(--paper);border-top:1px solid var(--line);z-index:1}
+.plume-b>.ask textarea{min-height:64px}
