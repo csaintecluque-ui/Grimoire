@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.20.0';
+const APP_VERSION = '1.21.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -364,7 +364,7 @@ const WELCOME = () => ({
 <h2>Vos données</h2>
 <p>Tout est enregistré automatiquement sur cet appareil, et Grimoire fonctionne hors connexion. Pour passer vos documents sur un autre appareil : <strong>Réglages → Sauvegarder tout</strong>, puis <strong>Restaurer</strong> de l'autre côté.</p>
 <h2>Plume, l'assistant (facultatif)</h2>
-<p>Ajoutez une clé Mistral ou OpenRouter dans les Réglages pour reformuler, corriger ou écrire une formule à partir d'une phrase. Sans clé, tout le reste fonctionne.</p>`
+<p>Ajoutez une clé Mistral ou OpenRouter dans les Réglages, ou choisissez <strong>Ollama</strong> pour faire tourner l'IA sur votre ordinateur (gratuit, sans clé, rien ne sort de chez vous), pour reformuler, corriger ou écrire une formule à partir d'une phrase. Sans Plume, tout le reste fonctionne.</p>`
 });
 const sheetTpl = (title, rows, colW) => {
   const cells = {};
@@ -8575,13 +8575,56 @@ document.addEventListener('click', e => { if (!$('#exportPop').hidden && !e.targ
 /* =========================================================
    Plume (assistant d'écriture)
    ========================================================= */
-const AI_DEF = { mistral: 'mistral-small-latest', openrouter: 'mistralai/mistral-small-3.2-24b-instruct' };
-const AI_SUGG = { mistral: ['mistral-small-latest', 'mistral-medium-latest', 'mistral-large-latest'], openrouter: ['mistralai/mistral-small-3.2-24b-instruct', 'mistralai/mistral-medium-3', 'openrouter/auto'] };
-let AI = Object.assign({ provider: 'mistral', key: '', model: '' }, ls.get('grim.ai', {}));
+const AI_DEF = { mistral: 'mistral-small-latest', openrouter: 'mistralai/mistral-small-3.2-24b-instruct', ollama: 'qwen3.5:4b' };
+const AI_SUGG = { mistral: ['mistral-small-latest', 'mistral-medium-latest', 'mistral-large-latest'], openrouter: ['mistralai/mistral-small-3.2-24b-instruct', 'mistralai/mistral-medium-3', 'openrouter/auto'], ollama: ['qwen3.5:4b'] };
+let AI = Object.assign({ provider: 'mistral', key: '', model: '', url: '' }, ls.get('grim.ai', {}));
+if (!AI_DEF[AI.provider]) AI.provider = 'mistral';
 const aiModel = () => AI.model || AI_DEF[AI.provider];
-const provName = () => AI.provider === 'mistral' ? 'Mistral' : 'OpenRouter';
+const provName = () => ({ mistral: 'Mistral', openrouter: 'OpenRouter', ollama: 'Ollama' })[AI.provider];
+// Ollama : l'IA tourne sur cet ordinateur (gratuit, sans clé, rien ne sort de chez vous)
+const OLLAMA_DEF = 'http://127.0.0.1:11434';
+const ollamaUrl = () => (AI.url || OLLAMA_DEF).trim().replace(/\/+$/, '');
+const aiReady = () => AI.provider === 'ollama' || !!aiReady();
+async function ollamaModels() {
+  try {
+    const r = await fetch(ollamaUrl() + '/api/tags', { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return [];
+    return ((await r.json()).models || []).map(m => m.name).filter(Boolean);
+  } catch { return []; }
+}
+async function ollamaChat(messages, { signal, onText } = {}, think = false) {
+  // API native d'Ollama : permet de couper le mode « réflexion » (bien plus rapide pour Plume)
+  const body = { model: aiModel(), messages, stream: true, keep_alive: '15m', options: { temperature: 0.4, num_ctx: 16384 } };
+  if (think !== null) body.think = think;
+  let res;
+  try { res = await fetch(ollamaUrl() + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal, body: JSON.stringify(body) }); }
+  catch (e) { if (e && e.name === 'AbortError') throw e; throw { code: 'network' }; }
+  if (!res.ok) {
+    let m = ''; try { const j = await res.json(); m = j.error || ''; } catch {}
+    if (think !== null && /think/i.test(m)) return ollamaChat(messages, { signal, onText }, null);
+    throw { code: 'http', status: res.status, message: String(m).slice(0, 200) };
+  }
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = '', text = '';
+  const eat = line => {
+    if (!line) return;
+    let j; try { j = JSON.parse(line); } catch { return; }
+    if (j.error) throw { code: 'http', status: 500, message: String(j.error).slice(0, 200) };
+    const t = j.message && j.message.content;
+    if (t) { text += t; if (onText) onText({ text }); }
+  };
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) { eat(buf.slice(0, i).trim()); buf = buf.slice(i + 1); }
+  }
+  eat(buf.trim());
+  return { text: text.replace(/^\s*<think>[\s\S]*?<\/think>\s*/, '') };
+}
 async function aiChat(prompt, { signal, onText } = {}) {
   const messages = Array.isArray(prompt) ? prompt : [{ role: 'user', content: prompt }];
+  if (AI.provider === 'ollama') return ollamaChat(messages, { signal, onText });
   if (!AI.key) throw { code: 'no_key' };
   const url = AI.provider === 'mistral' ? 'https://api.mistral.ai/v1/chat/completions' : 'https://openrouter.ai/api/v1/chat/completions';
   const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AI.key };
@@ -8608,6 +8651,11 @@ async function aiChat(prompt, { signal, onText } = {}) {
 function aiError(e) {
   if (!e) return 'Plume n\'a pas pu répondre.';
   if (e.code === 'no_key') return 'Ajoutez d\'abord une clé API dans les Réglages.';
+  if (AI.provider === 'ollama') {
+    if (e.code === 'network') return `Ollama ne répond pas (${ollamaUrl()}). Vérifiez qu'il est lancé sur cet ordinateur` + (location.protocol === 'https:' && !window.grimoireBureau ? ` et qu'il autorise ce site (OLLAMA_ORIGINS=${location.origin}, voir Réglages).` : ' (commande « ollama serve »).');
+    if (e.status === 404) return `Le modèle « ${aiModel()} » n'est pas installé. Dans un terminal : ollama pull ${aiModel()}`;
+    return 'Ollama n\'a pas pu répondre' + (e.message ? ' : ' + e.message : e.status ? ` (erreur ${e.status})` : '') + '.';
+  }
   if (e.code === 'network') return navigator.onLine === false ? 'Pas de connexion internet.' : `Connexion à ${provName()} impossible.` + (AI.provider === 'mistral' ? ' Si cela persiste, essayez OpenRouter, qui propose aussi les modèles Mistral.' : ' Vérifiez votre connexion.');
   if (e.status === 401 || e.status === 403) return 'Clé API refusée. Vérifiez-la dans les Réglages.';
   if (e.status === 402) return 'Crédit épuisé chez le fournisseur.';
@@ -8619,8 +8667,10 @@ const Plume = {
   available: true, mode: 'texte', ctl: null, result: '', target: null,
   ctx() {
     const c = $('#plumeCtx');
-    $('#plumeNote').textContent = AI.key ? `Plume envoie le passage concerné à ${provName()} (${aiModel()}), uniquement quand vous cliquez. Relisez avant d'insérer.` : '';
-    if (!AI.key) { c.innerHTML = 'Plume a besoin d\'une clé API Mistral ou OpenRouter. <button class="pbtn" id="plumeSet" style="margin-top:8px">Ouvrir les réglages</button>'; return; }
+    $('#plumeNote').textContent = !aiReady() ? '' : AI.provider === 'ollama'
+      ? `Plume utilise ${aiModel()} sur cet ordinateur, avec Ollama : rien ne sort de chez vous. Relisez avant d'insérer.`
+      : `Plume envoie le passage concerné à ${provName()} (${aiModel()}), uniquement quand vous cliquez. Relisez avant d'insérer.`;
+    if (!aiReady()) { c.innerHTML = 'Plume a besoin d\'une clé API Mistral ou OpenRouter, ou d\'Ollama sur cet ordinateur. <button class="pbtn" id="plumeSet" style="margin-top:8px">Ouvrir les réglages</button>'; return; }
     if (this.mode === 'pdf') {
       const nf = new Set(PDFV.srcPages.flatMap(S => S.fields.map(f => f.fieldName))).size;
       c.innerHTML = `PDF de <b>${PDFV.pages.length}</b> page${PDFV.pages.length > 1 ? 's' : ''}${nf ? ` · formulaire de <b>${nf}</b> champ${nf > 1 ? 's' : ''}` : ''}. Plume lit son texte quand vous le lui demandez.`;
@@ -8686,7 +8736,7 @@ async function runPlume(kind) {
   if (Plume.mode === 'pdf') return runPlumePdf(kind);
   if (Plume.mode === 'feuille' && !kind) {
     const ask = $('#plumeAsk').value.trim(); if (!ask) { $('#plumeAsk').focus(); return; }
-    if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
+    if (!aiReady()) { toast('Réglez d\'abord Plume dans les Réglages : une clé API, ou Ollama sur cet ordinateur.'); return; }
     if (Plume.ctl) Plume.ctl.abort();
     commitEdit(false); $('#plumeActs').hidden = true;
     $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = true);
@@ -8701,7 +8751,7 @@ async function runPlume(kind) {
     $$('#plume button.pchip, #plumeGo').forEach(b => b.disabled = false); Plume.ctl = null;
     return;
   }
-  if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
+  if (!aiReady()) { toast('Réglez d\'abord Plume dans les Réglages : une clé API, ou Ollama sur cet ordinateur.'); return; }
   if (Plume.ctl) Plume.ctl.abort();
   const ask = $('#plumeAsk').value.trim();
   const title = state.cur.title || 'Sans titre';
@@ -8856,7 +8906,7 @@ async function extractInvoice(text, file, signal) {
 }
 // Plusieurs factures d'un coup, choisies sur l'ordinateur
 function pickInvoices() {
-  if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
+  if (!aiReady()) { toast('Réglez d\'abord Plume dans les Réglages : une clé API, ou Ollama sur cet ordinateur.'); return; }
   const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.pdf,application/pdf'; inp.multiple = true;
   inp.addEventListener('change', async () => {
     const files = [...inp.files]; if (!files.length) return;
@@ -8879,7 +8929,7 @@ function pickInvoices() {
   inp.click();
 }
 async function runPlumePdf(kind) {
-  if (!AI.key) { toast('Ajoutez une clé API dans les Réglages pour utiliser Plume.'); return; }
+  if (!aiReady()) { toast('Réglez d\'abord Plume dans les Réglages : une clé API, ou Ollama sur cet ordinateur.'); return; }
   if (kind === 'lot') return pickInvoices();
   if (Plume.ctl) Plume.ctl.abort();
   const out = $('#plumeOut'), ask = $('#plumeAsk').value.trim(), title = state.cur.title || 'PDF';
@@ -9045,7 +9095,7 @@ function plumeHelp() {
   plThreadReset();
   const parts = PL_HELP[Plume.mode === 'feuille' ? 'feuille' : Plume.mode === 'pdf' ? 'pdf' : 'texte'];
   plSay('<p><b>Ce que Plume sait faire ici</b></p>' + parts.map(([t, d, acts]) => `<div class="ph-s"><b>${esc(t)}</b>${d ? `<span>${esc(d)}</span>` : ''}<div class="pq-c">${acts.map(a => a[0] === 'ex' ? `<button type="button" class="pq-o ph-ex" data-pl="ex" data-t="${esc(a[1])}">« ${esc(a[1])} »</button>` : `<button type="button" class="pq-o" data-pl="k" data-k="${a[1]}">${esc(a[2])}</button>`).join('')}</div></div>`).join('')
-    + (AI.key ? '' : '<p class="ph-n">Plume a besoin d\'une clé API (Réglages) ; le tableau croisé guidé fonctionne sans.</p>'), 'bot', true);
+    + (aiReady() ? '' : '<p class="ph-n">Plume a besoin d\'une clé API ou d\'Ollama (Réglages) ; le tableau croisé guidé fonctionne sans.</p>'), 'bot', true);
 }
 function plAction(b) {
   const k = b.dataset.pl;
@@ -9147,14 +9197,14 @@ async function runPivotWizard(pre, base, S) {
   if (d.sort == null) d.sort = S.kinds[d.rows] === 'date' ? 'label' : 'desc';
   const sh = createPivot(d);
   if (!sh) { plSay('Je n\'ai pas pu créer le tableau croisé.'); return; }
-  plSay(`<p>C'est fait : ${esc(pvDescribe(d, S))}, sur la nouvelle feuille « ${esc(sh.name)} ».</p><div class="pq-c">${AI.key ? `<button type="button" class="pq-o" data-pl="pvcomment" data-sid="${sh.id}">Commenter le résultat</button>` : ''}<button type="button" class="pq-o" data-pl="pvedit" data-sid="${sh.id}">Modifier</button></div><small>Les chiffres viennent des formules de Grimoire, pas de l'IA. Pour reprendre de nouvelles lignes : clic sur l'onglet → Actualiser.</small>`, 'bot', true);
+  plSay(`<p>C'est fait : ${esc(pvDescribe(d, S))}, sur la nouvelle feuille « ${esc(sh.name)} ».</p><div class="pq-c">${aiReady() ? `<button type="button" class="pq-o" data-pl="pvcomment" data-sid="${sh.id}">Commenter le résultat</button>` : ''}<button type="button" class="pq-o" data-pl="pvedit" data-sid="${sh.id}">Modifier</button></div><small>Les chiffres viennent des formules de Grimoire, pas de l'IA. Pour reprendre de nouvelles lignes : clic sur l'onglet → Actualiser.</small>`, 'bot', true);
 }
 // Demande en français → définition (l'IA ne reçoit que les titres et 5 lignes d'exemple)
 async function plumePivotFromText(ask, signal) {
   const C = pvContext(); if (C.err) { plSay(C.err); return; }
   const { base, S } = C;
   let pre = {};
-  if (AI.key) {
+  if (aiReady()) {
     $('#plumeOut').textContent = 'Plume lit les colonnes…';
     const res = await aiChat(`Un tableur contient un tableau de ${S.rowsN} lignes, avec ces colonnes :\n${pvColsList(S)}\nExemple (5 premières lignes) :\n${pvSampleTSV(base, S)}\n\nDemande : « ${ask} »\n\nTraduis cette demande en tableau croisé dynamique. Réponds UNIQUEMENT par un objet JSON de cette forme :\n${PV_SCHEMA}\nN'utilise que des noms de colonnes de la liste. Mets null pour tout ce que la demande ne précise pas : on le demandera à la personne.`, { signal });
     $('#plumeOut').textContent = '';
@@ -9178,7 +9228,7 @@ async function plumePivotSuggest(signal) {
 }
 // Commentaire du résultat : seules les cases du tableau croisé (déjà calculées) sont envoyées
 async function plumePivotComment(sid) {
-  if (!AI.key) return;
+  if (!aiReady()) return;
   const cur = state.cur, i = cur.sheets.findIndex(s => s.id === sid); if (i < 0) return;
   const vals = SH.hf.getSheetValues(SH.ids[i]) || [];
   const tsv = vals.slice(0, 40).map(r => (r || []).slice(0, 12).map(v => v == null || typeof v === 'object' ? '' : typeof v === 'number' ? numToRaw(Math.round(v * 100) / 100) : String(v)).join('\t')).join('\n');
@@ -9196,7 +9246,7 @@ async function runPlumePivot(kind) {
   if (Plume.ctl) Plume.ctl.abort();
   commitEdit(false); plThreadReset(); $('#plumeActs').hidden = true; $('#plumeOut').textContent = '';
   const ask = $('#plumeAsk').value.trim();
-  if (kind === 'analyser' && !AI.key) { plSay('« Analyser ces données » a besoin d\'une clé API (Réglages). Le tableau croisé guidé, lui, fonctionne sans.'); return; }
+  if (kind === 'analyser' && !aiReady()) { plSay('« Analyser ces données » a besoin d\'une clé API ou d\'Ollama (Réglages). Le tableau croisé guidé, lui, fonctionne sans.'); return; }
   $('#plumeGo').disabled = true; Plume.ctl = new AbortController();
   try {
     if (kind === 'analyser') await plumePivotSuggest(Plume.ctl.signal);
@@ -9774,6 +9824,14 @@ async function renderSettings() {
   { const a = ls.get('grim.author', {}) || {}; $('#meName').value = a.name || ''; $('#meIni').value = a.ini || ''; $('#meIni').placeholder = initialsOf(a.name) || 'Initiales'; }
   $('#aiKey').value = AI.key; $('#aiModel').value = AI.model; $('#aiMe').value = ls.get('grim.me', '') || ''; $('#aiModel').placeholder = AI_DEF[AI.provider];
   $('#aiModels').innerHTML = AI_SUGG[AI.provider].map(m => `<option value="${m}">`).join('');
+  {
+    const ol = AI.provider === 'ollama';
+    $('#aiKeyRow').hidden = ol; $('#aiKeyNote').hidden = ol; $('#aiUrlRow').hidden = !ol; $('#aiOllamaNote').hidden = !ol;
+    $('#aiUrl').value = AI.url || ''; $('#aiUrl').placeholder = OLLAMA_DEF;
+    $('#aiOllamaWeb').hidden = !(ol && location.protocol === 'https:' && !window.grimoireBureau);
+    $('#aiOllamaOrigin').textContent = location.origin;
+    if (ol) ollamaModels().then(l => { if (l.length && AI.provider === 'ollama') $('#aiModels').innerHTML = l.map(m => `<option value="${esc(m)}">`).join(''); });
+  }
   $('#appVer').textContent = APP_VERSION;
   const inst = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   $('#instState').textContent = window.grimoireBureau ? 'Application de bureau Grimoire : elle s\'ouvre depuis le menu Démarrer ou le menu des applications, fonctionne hors connexion et se met à jour toute seule.'
@@ -9797,9 +9855,11 @@ $('#meIni').addEventListener('change', () => { setUser($('#meName').value, $('#m
 $('#whoAsk').addEventListener('submit', e => { e.preventDefault(); const v = $('#whoIn').value.trim(); if (!v) return; setUser(v, ''); toast('Bonjour, ' + userName() + ' !'); });
 $('#whoLater').addEventListener('click', () => { $('#whoAsk').hidden = true; });
 $('#aiModel').addEventListener('input', e => { AI.model = e.target.value.trim(); ls.set('grim.ai', AI); });
+$('#aiUrl').addEventListener('input', e => { AI.url = e.target.value.trim(); ls.set('grim.ai', AI); });
+$('#aiUrl').addEventListener('change', () => { $('#aiRes').textContent = ''; renderSettings(); });
 $('#aiTest').addEventListener('click', async () => {
   const r = $('#aiRes'); r.className = 'set-res'; r.textContent = 'Test en cours…';
-  try { const res = await aiChat('Réponds uniquement par le mot : OK'); r.className = 'set-res ok'; r.textContent = `Connexion réussie avec ${provName()} (${aiModel()}) : « ${res.text.trim().slice(0, 30)} »`; }
+  try { const res = await aiChat('Réponds uniquement par le mot : OK'); r.className = 'set-res ok'; r.textContent = `Connexion réussie avec ${provName()} (${aiModel()}) : « ${res.text.trim().slice(0, 30)} »`; if (AI.provider === 'ollama') renderSettings(); }
   catch (e) { r.className = 'set-res err'; r.textContent = aiError(e); }
 });
 async function backupAll() {
