@@ -3,12 +3,13 @@
 // depuis l'ordinateur par le protocole app://grimoire/ : hors connexion, et des
 // données qui ne dépendent plus d'un navigateur.
 'use strict';
-const { app, BrowserWindow, protocol, ipcMain, dialog, shell, Menu, net } = require('electron');
+const { app, BrowserWindow, protocol, ipcMain, dialog, shell, Menu, net, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 const { fileURLToPath } = require('url');
 const { execFile } = require('child_process');
+const { Pi } = require('./pi');
 
 const WEB = path.join(__dirname, 'app');
 const ORIGINE = 'app://grimoire';
@@ -211,6 +212,14 @@ async function installerMaj() {
 
 /* ---------- échanges avec la page */
 function ipc() {
+  // Fichiers du Pi (serveur Scriptorium)
+  const pi = new Pi({ dossier: app.getPath('userData'), safeStorage });
+  ipcMain.handle('pi:etat', () => pi.etat());
+  ipcMain.handle('pi:connecter', (_e, o) => pi.connecter(o));
+  ipcMain.handle('pi:deconnecter', () => pi.deconnecter());
+  ipcMain.handle('pi:lister', (_e, dir) => pi.lister(dir));
+  ipcMain.handle('pi:lire', (_e, p) => pi.lire(p));
+  ipcMain.handle('pi:ecrire', (_e, o) => pi.ecrire(o));
   ipcMain.handle('fichiers:attente', () => enAttente.splice(0));
   ipcMain.handle('fichier:lire', async (_e, p) => {
     if (!estAutorise(p)) throw new Error('EACCES: fichier non autorisé');

@@ -12,7 +12,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const clone = o => JSON.parse(JSON.stringify(o));
 
-const APP_VERSION = '1.20.0';
+const APP_VERSION = '1.21.0';
 const LIB = {
   hf: 'lib/hyperformula.full.min.js',
   xlsx: 'lib/xlsx-style.bundle.js',
@@ -7620,7 +7620,7 @@ const FH = {
   db: null, links: new Map(),
   open() { return this.db ||= new Promise((res, rej) => { const r = indexedDB.open('grimoire-fichiers', 1); r.onupgradeneeded = () => r.result.createObjectStore('h'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
   async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('h', mode); const q = fn(t.objectStore('h')); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); },
-  async get(id) { if (this.links.has(id)) return this.links.get(id); let h = null; try { h = await this.tx('readonly', st => st.get(id)) || null; } catch {} if (this.links.has(id)) return this.links.get(id); /* lié pendant la lecture : ne pas l'écraser */ if (h && h.__path && window.grimoireBureau) h = window.grimoireBureau.poignee(h.__path); this.links.set(id, h); return h; },
+  async get(id) { if (this.links.has(id)) return this.links.get(id); let h = null; try { h = await this.tx('readonly', st => st.get(id)) || null; } catch {} if (this.links.has(id)) return this.links.get(id); /* lié pendant la lecture : ne pas l'écraser */ if (h && h.__path && window.grimoireBureau) h = window.grimoireBureau.poignee(h.__path); else if (h && h.__pi && window.grimoirePi) h = window.grimoirePi.poignee(h); /* fichier du Pi (Scriptorium) */ this.links.set(id, h); return h; },
   async set(id, h) { this.links.set(id, h); try { await this.tx('readwrite', st => st.put(h, id)); } catch {} },
   async del(id) { this.links.delete(id); this.dirty(id, false); try { await this.tx('readwrite', st => st.delete(id)); } catch {} },
   dirty(id, v) { const m = ls.get('grim.fdirty', {}); if (v === undefined) return !!m[id]; if (v) m[id] = 1; else delete m[id]; ls.set('grim.fdirty', m); }
@@ -7643,12 +7643,12 @@ function updFileSt() {
   el.hidden = !h; if (!h) return;
   const d = FH.dirty(cur.id);
   el.dataset.dirty = d ? '1' : '';
-  el.textContent = h.name;
-  el.title = d ? `Modifications pas encore enregistrées dans ${h.name} (Ctrl+S)` : `Enregistré dans ${h.name}`;
+  el.textContent = (h.__pi ? 'Pi · ' : '') + h.name;
+  el.title = (d ? `Modifications pas encore enregistrées dans ${h.name} (Ctrl+S)` : `Enregistré dans ${h.name}`) + (h.__pi ? ` — sur le Pi : ${h.__pi}` : '');
 }
 function markFileDirty() { const c = state.cur; if (c && FH.links.get(c.id) && !FH.dirty(c.id)) { FH.dirty(c.id, true); updFileSt(); } }
 async function linkHandle(id, h) { if (h && id) { await FH.set(id, h); FH.dirty(id, false); if (state.cur && state.cur.id === id) updFileSt(); } }
-async function saveDoc(asNew) {
+async function saveDoc(asNew, surPi) {
   const cur = state.cur; if (!cur) return;
   if (state.view === 'sheet') commitEdit(false);
   await flushSave();
@@ -7669,12 +7669,13 @@ async function saveDoc(asNew) {
   }
   const fresh = !h;
   if (!h) {
-    if (!window.showSaveFilePicker || isPhone()) {
+    const choisir = surPi && window.grimoirePi ? window.grimoirePi.enregistrerSous : window.showSaveFilePicker;
+    if (!choisir || (!surPi && isPhone())) {
       // Pas d'accès direct aux fichiers (Firefox, téléphone) : le fichier part dans les téléchargements.
       try { await runExport(fmts[0].k); } catch { toast('Enregistrement impossible.', true); }
       return;
     }
-    try { h = await window.showSaveFilePicker({ suggestedName: safeName(cur.title) + '.' + fmts[0].ext, types: fmts.map(f => ({ description: f.d, accept: { [MIME[f.ext]]: ['.' + f.ext] } })) }); }
+    try { h = await choisir({ suggestedName: safeName(cur.title) + '.' + fmts[0].ext, types: fmts.map(f => ({ description: f.d, accept: { [MIME[f.ext]]: ['.' + f.ext] } })) }); }
     catch (e) { if (e && e.name !== 'AbortError') toast('Enregistrement impossible : ' + (e.message || e), true); return; }
   }
   const k = kindFor(cur.type, h.name) || fmts[0].k;
@@ -7688,7 +7689,14 @@ async function saveDoc(asNew) {
     const w = await h.createWritable(); await w.write(blob); await w.close();
   } catch (e) { console.warn(e); toast(e && e.userMsg || 'Le fichier ' + h.name + ' n\'a pas pu être écrit' + (e && e.name === 'NoModificationAllowedError' ? ' : il est peut-être ouvert ailleurs.' : '.'), true); return; }
   await linkHandle(cur.id, h);
-  toast('Enregistré dans ' + h.name);
+  toast((h.__pi ? 'Enregistré sur le Pi : ' : 'Enregistré dans ') + h.name);
+}
+async function openFromPi() {
+  if (!window.grimoirePi) return;
+  let hs;
+  try { hs = await window.grimoirePi.ouvrir(); }
+  catch (e) { if (e && e.name !== 'AbortError') toast('Ouverture impossible : ' + (e.message || e), true); return; }
+  await importHandles(hs);
 }
 async function openFromComputer() {
   if (!window.showOpenFilePicker || isPhone()) { $('#fileIn').click(); return; }
@@ -9478,6 +9486,7 @@ function commands() {
   if (v !== 'home') {
     add('Fichier', 'Enregistrer', 'save', () => saveDoc(false), 'Ctrl S');
     add('Fichier', 'Enregistrer sous…', 'saveAs', () => saveDoc(true), 'Ctrl Maj S');
+    if (window.grimoirePi) add('Fichier', 'Enregistrer sur le Pi…', 'saveAs', () => saveDoc(true, true));
     add('Document', 'Renommer', 'pen', () => { $('#titleIn').focus(); $('#titleIn').select(); });
     add('Document', 'Retour à l\'accueil', 'home', goHome);
   }
@@ -9488,6 +9497,7 @@ function commands() {
   add('Créer', 'Suivi des dépenses (modèle)', 'grid', () => fromTemplate('depenses'));
   add('Créer', 'Lettre (modèle)', 'doc', () => fromTemplate('lettre'));
   add('Créer', 'Ouvrir un fichier Word, Excel, CSV ou PDF', 'upload', () => openFromComputer());
+  if (window.grimoirePi) add('Créer', 'Ouvrir depuis le Pi (Scriptorium)', 'upload', () => openFromPi());
   add('Plume', 'Ajouter des factures PDF au suivi des factures', 'feather', () => pickInvoices());
   if (v === 'writer' || v === 'sheet') add('Exporter', 'Imprimer ou créer un PDF', 'printer', printDoc, 'Ctrl P');
   add('Préférences', isPhone() ? 'Passer en mode PC' : 'Passer en mode téléphone', isPhone() ? 'monitor' : 'phone', () => setMode(isPhone() ? 'pc' : 'phone'));
@@ -9583,9 +9593,9 @@ function menuModel() {
   const fichier = () => { const imprimer = pick('Imprimer ou créer un PDF'); return [
     pick('Nouveau document', 'Nouveau classeur'),
     sub('Nouveau d\'après un modèle', pick(/\(modèle\)$/).map(c => ({ ...c, label: c.label.replace(/ \(modèle\)$/, '') })), 'grid'),
-    '-', pick('Ouvrir un fichier Word, Excel, CSV ou PDF', 'Ouvrir un PDF, ou fusionner des PDF et des photos'),
+    '-', pick('Ouvrir un fichier Word, Excel, CSV ou PDF', 'Ouvrir depuis le Pi (Scriptorium)', 'Ouvrir un PDF, ou fusionner des PDF et des photos'),
     sub('Ouvrir un document récent', recents, 'doc'),
-    '-', pick('Enregistrer', 'Enregistrer sous…', 'Renommer'),
+    '-', pick('Enregistrer', 'Enregistrer sous…', 'Enregistrer sur le Pi…', 'Renommer'),
     doc ? sub('Exporter', pick('Exporter:'), 'download') : null, imprimer,
     '-', pick('Sauvegarder tous mes documents', 'Réglages'),
     doc ? ['-', pick('Retour à l\'accueil').map(c => ({ ...c, label: 'Fermer le document' }))] : null

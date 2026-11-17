@@ -49,6 +49,8 @@ C'est la même appli que la version web, servie depuis l'ordinateur : hors conne
 
 Les documents ne passent pas tout seuls de la version navigateur à l'appli : *Réglages → Sauvegarder tout* dans le navigateur, puis *Réglages → Restaurer une sauvegarde* dans l'appli (ou la sauvegarde en ligne GitHub des deux côtés).
 
+**Fichiers du Pi (Scriptorium).** Si un serveur Scriptorium tourne à la maison, l'appli de bureau ouvre et enregistre directement dans son coffre : *Fichier → Ouvrir depuis le Pi (Scriptorium)* et *Fichier → Enregistrer sur le Pi…*. La première fois, Grimoire demande l'adresse du Pi (par exemple `http://192.168.1.80:8080`), l'identifiant et le mot de passe ; ils restent sur l'ordinateur, le mot de passe chiffré par le système quand un trousseau est disponible. Ensuite Ctrl+S réécrit le fichier sur le Pi, qui garde l'ancienne version ; si le fichier a changé sur le Pi entre-temps, Grimoire le signale avant de remplacer. Hors de la maison, il faut d'abord activer le VPN vers la maison. La version navigateur n'a pas ces deux entrées.
+
 **Pour le développement** (dossier `bureau/`) : `npm install` puis `npm start` lance l'appli ; `npm run linux` construit le .deb. Une nouvelle release est construite et publiée automatiquement par GitHub Actions (`.github/workflows/bureau.yml`) dès que `APP_VERSION` de `app.js` change sur `main` ; sur une pull request, les installateurs sont construits pour vérification (onglet *Actions* → *Artifacts*).
 
 ## Installer l'appli web

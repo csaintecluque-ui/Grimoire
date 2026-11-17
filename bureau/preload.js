@@ -15,5 +15,6 @@ contextBridge.exposeInMainWorld('bureauNatif', {
   parDefaut: () => ipcRenderer.invoke('appli:par-defaut'),
   retablir: () => ipcRenderer.invoke('appli:retablir'),
   surMaj: cb => { ipcRenderer.on('maj:prete', (_e, i) => cb(i)); },
-  installerMaj: () => ipcRenderer.invoke('maj:installer')
+  installerMaj: () => ipcRenderer.invoke('maj:installer'),
+  pi: (nom, arg) => ipcRenderer.invoke('pi:' + nom, arg)
 });
